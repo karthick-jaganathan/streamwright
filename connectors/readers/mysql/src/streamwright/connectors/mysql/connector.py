@@ -73,14 +73,16 @@ requests:
   #       - {column: "is_active", op: "=", value: 1}
 
 transform:
-  - name: final_products
-    select: |
-      SELECT 
-        id AS product_id,
-        sku,
-        price::DOUBLE AS price,
-        updated_at
-      FROM read_products
+  mode: page
+  steps:
+    - name: final_products
+      select: |
+        SELECT 
+          id AS product_id,
+          sku,
+          price::DOUBLE AS price,
+          updated_at
+        FROM read_products
 
 export:
   products:

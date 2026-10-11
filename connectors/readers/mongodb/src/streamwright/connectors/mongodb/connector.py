@@ -77,14 +77,16 @@ requests:
   #     batch_size: 1000
 
 transform:
-  - name: final_customers
-    select: |
-      SELECT 
-        _id AS customer_id,
-        name,
-        email,
-        tier
-      FROM read_customers
+  mode: page
+  steps:
+    - name: final_customers
+      select: |
+        SELECT 
+          _id AS customer_id,
+          name,
+          email,
+          tier
+        FROM read_customers
 
 export:
   customers:

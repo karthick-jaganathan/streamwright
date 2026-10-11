@@ -74,16 +74,18 @@ requests:
   #     fields: ["id", "name", "objective", "status", "daily_budget"]
 
 transform:
-  - name: final_insights
-    select: |
-      SELECT 
-        campaign_id::BIGINT AS campaign_id,
-        campaign_name,
-        impressions::BIGINT AS impressions,
-        clicks::BIGINT AS clicks,
-        spend::DOUBLE AS spend,
-        date_start AS report_date
-      FROM campaign_insights
+  mode: page
+  steps:
+    - name: final_insights
+      select: |
+        SELECT 
+          campaign_id::BIGINT AS campaign_id,
+          campaign_name,
+          impressions::BIGINT AS impressions,
+          clicks::BIGINT AS clicks,
+          spend::DOUBLE AS spend,
+          date_start AS report_date
+        FROM campaign_insights
 
 export:
   insights:

@@ -53,14 +53,16 @@ requests:
       # options:                       # Format-specific reader options (delimiter, etc.)
 
 transform:
-  - name: final_logs
-    select: |
-      SELECT 
-        log_id,
-        severity,
-        message,
-        timestamp
-      FROM read_logs
+  mode: page
+  steps:
+    - name: final_logs
+      select: |
+        SELECT 
+          log_id,
+          severity,
+          message,
+          timestamp
+        FROM read_logs
 
 export:
   logs:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-deltalake"
-version = "0.1.0"
+version = "0.0.1"
 description = "StreamWright - Delta Lake connector (read-only queries and scans on Delta tables through DuckDB's delta extension)"
 readme = "README.md"
 license = "Apache-2.0"
@@ -28,8 +28,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/karthick-jaganathan/streamwright"
+Homepage = "https://streamwright.web.app"
+Documentation = "https://streamwright.web.app/docs/"
 Repository = "https://github.com/karthick-jaganathan/streamwright"
+"Issue Tracker" = "https://github.com/karthick-jaganathan/streamwright/issues"
 
 [project.entry-points."streamwright.connectors"]
 deltalake = "streamwright.connectors.deltalake.connector:DeltaLakeConnector"

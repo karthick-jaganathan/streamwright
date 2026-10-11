@@ -241,12 +241,18 @@ def _parser():
     _add_log_options(run)
 
     conn = commands.add_parser("connectors",
-                               help="list, search or install connectors (bare: the installed connectors and their "
+                               help="list, find or install connectors (bare: the installed connectors and their "
                                     "SDK loggers)")
-    conn.add_argument("action", nargs="?", choices=["list", "search", "install"],
-                      help="list (catalog + installed), search TEXT, or install KEY [KEY ...]")
+    conn.add_argument("-ls", "--list", action="store_true", dest="flag_list",
+                      help="list catalog and installed connectors")
+    conn.add_argument("-i", "--install", nargs="+", dest="flag_install", metavar="KEY",
+                      help="install one or more connector keys")
+    conn.add_argument("-s", "-f", "--search", "--find", nargs="+", dest="flag_search", metavar="TEXT",
+                      help="find/search connectors in the catalog by keyword")
+    conn.add_argument("action", nargs="?", metavar="{ls,i,find}",
+                      help="ls (catalog + installed), -i KEY (install), or find TEXT (search catalog)")
     conn.add_argument("query", nargs="*", metavar="KEY|TEXT",
-                      help="connector keys (install: one or more) or words (search)")
+                      help="connector keys (install: one or more) or search words")
     conn.add_argument("--yes", action="store_true", help="skip the confirmation prompt when installing")
     conn.add_argument("--hub-url", metavar="URL",
                       help="the connector hub (default: $STREAMWRIGHT_HUB_URL, else the live StreamWright hub; when it is "
@@ -562,19 +568,42 @@ def _connector_lines():
 
 
 def _connectors_command(args):
-    """`streamwright connectors`: bare = installed list; list/search/install use the catalog (the hub)."""
-    action = getattr(args, "action", None)
+    """`streamwright connectors`: bare = installed list; ls/i/find use the catalog (the hub)."""
+    if getattr(args, "flag_list", False):
+        action = "ls"
+        query = []
+    elif getattr(args, "flag_install", None):
+        action = "install"
+        query = args.flag_install
+    elif getattr(args, "flag_search", None):
+        action = "find"
+        query = args.flag_search
+    else:
+        action = getattr(args, "action", None)
+        query = getattr(args, "query", [])
+
     if action is None:
         lines = _connector_lines()
-        print("\n".join(lines) if lines else "no connectors installed (e.g. streamwright connectors install postgres)")
+        print("\n".join(lines) if lines else "no connectors installed (e.g. streamwright connectors -i postgres)")
         return 0
-    from streamwright.core import catalog
-    if action == "list":
+
+    norm_action = action.lower()
+    if norm_action in ("ls", "list", "-ls", "--list"):
+        from streamwright.core import catalog
         lines = catalog.listing(args.hub_url)
         print("\n".join(lines) if lines else "the catalog is empty")
         return 0
-    if action == "search":
-        text = " ".join(args.query)
+
+    if norm_action in ("i", "install", "-i", "--install"):
+        from streamwright.core import catalog
+        if not query:
+            sys.stderr.write("streamwright: 'connectors -i' needs at least one connector KEY\n")
+            return 2
+        return catalog.install_many(query, assume_yes=args.yes, hub_url=args.hub_url)
+
+    if norm_action in ("find", "search", "s", "-s", "-f", "--find", "--search"):
+        from streamwright.core import catalog
+        text = " ".join(query)
         hits = catalog.search(text, args.hub_url)
         if not hits:
             print("no connectors match %r" % text)
@@ -582,12 +611,17 @@ def _connectors_command(args):
         for key, entry in sorted(hits.items()):
             print("  %-16s %-10s %s" % (key, entry.get("trust", "community"), entry.get("summary", "")))
         return 0
-    if action == "install":
-        if not args.query:
-            sys.stderr.write("streamwright: 'connectors install' needs at least one connector KEY\n")
-            return 2
-        return catalog.install_many(args.query, assume_yes=args.yes, hub_url=args.hub_url)
-    return 2
+
+    # If action was not a reserved verb, treat it as a direct search query (e.g. `sw connectors ads`)
+    from streamwright.core import catalog
+    text = " ".join([action] + query)
+    hits = catalog.search(text, args.hub_url)
+    if not hits:
+        print("no connectors match %r" % text)
+        return 0
+    for key, entry in sorted(hits.items()):
+        print("  %-16s %-10s %s" % (key, entry.get("trust", "community"), entry.get("summary", "")))
+    return 0
 
 
 def main(argv=None):

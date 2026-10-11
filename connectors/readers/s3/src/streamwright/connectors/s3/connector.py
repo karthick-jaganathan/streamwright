@@ -61,14 +61,16 @@ requests:
       # options:                      # Format-specific reader options (delimiter, etc.)
 
 transform:
-  - name: final_transactions
-    select: |
-      SELECT 
-        tx_id,
-        user_id,
-        amount::DOUBLE AS amount,
-        created_at
-      FROM read_transactions
+  mode: page
+  steps:
+    - name: final_transactions
+      select: |
+        SELECT 
+          tx_id,
+          user_id,
+          amount::DOUBLE AS amount,
+          created_at
+        FROM read_transactions
 
 export:
   transactions:

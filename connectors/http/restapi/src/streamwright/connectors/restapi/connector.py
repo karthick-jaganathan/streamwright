@@ -49,28 +49,32 @@ http:
 ```yaml
 requests:
   - name: list_items
-    url: "/items"               # Appended to http.base_url
-    method: GET                 # GET | POST
-    params:
-      status: "active"
-    records: "data.items"       # JSONPath or dot-notation to record list (optional)
+    http:
+      path: "/items"            # Appended to http.base_url
+      method: GET               # GET | POST | PUT | PATCH | DELETE
+      params:
+        status: "active"
+    records:
+      path: "data.items"        # Object with 'path' (or 'explode')
     paginator:
-      type: cursor              # "cursor" | "page" | "offset" | "link_header"
-      cursor_param: "starting_after"
-      cursor_path: "meta.next_cursor"
-      # For page:   {type: page, page_param: "page", page_size: 100, page_size_param: "limit"}
-      # For offset: {type: offset, offset_param: "offset", limit: 100, limit_param: "limit"}
-      # For link:   {type: link_header}
+      type: cursor              # "cursor" | "offset" | "page_number" | "link_header"
+      param: "starting_after"
+      token_path: "meta.next_cursor"
+      # For page_number: {type: page_number, page_param: "page", page_size: 100, size_param: "limit"}
+      # For offset:      {type: offset, offset_param: "offset", limit_param: "limit", page_size: 100}
+      # For link_header: {type: link_header}
 
 transform:
-  - name: items_clean
-    select: |
-      SELECT 
-        CAST(id AS VARCHAR) AS item_id,
-        name,
-        price::DECIMAL(10,2) AS price,
-        strptime(created_at, '%Y-%m-%dT%H:%M:%SZ') AS created_at
-      FROM list_items
+  mode: page                    # "page" | "run"
+  steps:
+    - name: items_clean
+      select: |
+        SELECT 
+          CAST(record->>'id' AS VARCHAR) AS item_id,
+          record->>'name' AS name,
+          CAST(record->>'price' AS DECIMAL(10,2)) AS price,
+          strptime(record->>'created_at', '%Y-%m-%dT%H:%M:%SZ') AS created_at
+        FROM list_items
 
 export:
   items:

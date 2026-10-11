@@ -74,17 +74,19 @@ requests:
   #   method: list_accessible_customers
 
 transform:
-  - name: final_campaigns
-    select: |
-      SELECT 
-        campaign.id::BIGINT AS campaign_id,
-        campaign.name AS campaign_name,
-        campaign.status AS campaign_status,
-        metrics.impressions::BIGINT AS impressions,
-        metrics.clicks::BIGINT AS clicks,
-        (metrics.cost_micros::DOUBLE / 1000000.0) AS cost,
-        segments.date AS report_date
-      FROM campaign_performance
+  mode: page
+  steps:
+    - name: final_campaigns
+      select: |
+        SELECT 
+          campaign.id::BIGINT AS campaign_id,
+          campaign.name AS campaign_name,
+          campaign.status AS campaign_status,
+          metrics.impressions::BIGINT AS impressions,
+          metrics.clicks::BIGINT AS clicks,
+          (metrics.cost_micros::DOUBLE / 1000000.0) AS cost,
+          segments.date AS report_date
+        FROM campaign_performance
 
 export:
   campaigns:

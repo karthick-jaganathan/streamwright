@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-azure-blob"
-version = "0.1.0"
+version = "0.0.1"
 description = "StreamWright - azure_blob connector (csv, tsv, json, jsonl and parquet objects in Azure Blob Storage, read with DuckDB)"
 readme = "README.md"
 license = "Apache-2.0"
@@ -28,8 +28,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/karthick-jaganathan/streamwright"
+Homepage = "https://streamwright.web.app"
+Documentation = "https://streamwright.web.app/docs/"
 Repository = "https://github.com/karthick-jaganathan/streamwright"
+"Issue Tracker" = "https://github.com/karthick-jaganathan/streamwright/issues"
 
 [project.entry-points."streamwright.connectors"]
 azure_blob = "streamwright.connectors.azure_blob.connector:AzureBlobConnector"

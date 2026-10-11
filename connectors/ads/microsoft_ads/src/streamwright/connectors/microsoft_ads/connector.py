@@ -74,15 +74,17 @@ requests:
   #         PredefinedTime: Yesterday
 
 transform:
-  - name: final_campaigns
-    select: |
-      SELECT 
-        Campaign.Id::BIGINT AS campaign_id,
-        Campaign.Name AS campaign_name,
-        Campaign.Status AS status,
-        Campaign.BudgetType AS budget_type,
-        Campaign.DailyBudget::DOUBLE AS daily_budget
-      FROM active_campaigns
+  mode: page
+  steps:
+    - name: final_campaigns
+      select: |
+        SELECT 
+          Campaign.Id::BIGINT AS campaign_id,
+          Campaign.Name AS campaign_name,
+          Campaign.Status AS status,
+          Campaign.BudgetType AS budget_type,
+          Campaign.DailyBudget::DOUBLE AS daily_budget
+        FROM active_campaigns
 
 export:
   campaigns:

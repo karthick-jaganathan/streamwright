@@ -67,14 +67,16 @@ requests:
   #       type: "click"
 
 transform:
-  - name: final_events
-    select: |
-      SELECT 
-        event_id,
-        user_id,
-        event_type,
-        timestamp
-      FROM read_silver_events
+  mode: page
+  steps:
+    - name: final_events
+      select: |
+        SELECT 
+          event_id,
+          user_id,
+          event_type,
+          timestamp
+        FROM read_silver_events
 
 export:
   silver_events:

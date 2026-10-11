@@ -30,7 +30,7 @@ permissions:
 
 jobs:
   resolve:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       packages: ${{ steps.pick.outputs.packages }}
       target: ${{ steps.pick.outputs.target }}
@@ -54,7 +54,7 @@ jobs:
 
   publish:
     needs: resolve
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: pypi-release
     permissions:
       id-token: write   # required for Trusted Publishing

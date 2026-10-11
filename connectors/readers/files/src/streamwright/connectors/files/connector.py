@@ -54,14 +54,16 @@ requests:
       #   header: true
 
 transform:
-  - name: clean_orders
-    select: |
-      SELECT 
-        id AS order_id,
-        customer,
-        amount::DOUBLE AS amount,
-        created_at
-      FROM read_orders
+  mode: page
+  steps:
+    - name: clean_orders
+      select: |
+        SELECT 
+          id AS order_id,
+          customer,
+          amount::DOUBLE AS amount,
+          created_at
+        FROM read_orders
 
 export:
   orders:

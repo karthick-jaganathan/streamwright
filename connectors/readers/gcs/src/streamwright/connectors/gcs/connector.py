@@ -55,14 +55,16 @@ requests:
       # options:                       # Format-specific reader options (delimiter, etc.)
 
 transform:
-  - name: final_events
-    select: |
-      SELECT 
-        event_id,
-        user_id,
-        timestamp,
-        payload
-      FROM read_events
+  mode: page
+  steps:
+    - name: final_events
+      select: |
+        SELECT 
+          event_id,
+          user_id,
+          timestamp,
+          payload
+        FROM read_events
 
 export:
   events:

@@ -78,14 +78,16 @@ requests:
   #       - {column: "status", op: "=", value: "completed"}
 
 transform:
-  - name: final_users
-    select: |
-      SELECT 
-        id AS user_id,
-        email,
-        plan_tier,
-        created_at
-      FROM read_active_users
+  mode: page
+  steps:
+    - name: final_users
+      select: |
+        SELECT 
+          id AS user_id,
+          email,
+          plan_tier,
+          created_at
+        FROM read_active_users
 
 export:
   users:

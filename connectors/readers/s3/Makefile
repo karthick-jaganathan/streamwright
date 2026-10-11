@@ -2,7 +2,7 @@
 
 # Package information
 PACKAGE_NAME = streamwright-s3
-VERSION = 0.1.0
+VERSION = 0.0.1
 
 # Installation mode (dev, prod, dist)
 MODE ?= prod

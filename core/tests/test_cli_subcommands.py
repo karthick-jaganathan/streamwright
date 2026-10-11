@@ -30,3 +30,43 @@ def test_cli_mcp_not_installed(capsys):
             assert code == 1
             captured = capsys.readouterr()
             assert "'streamwright-mcp' is not installed" in captured.err
+
+
+def test_cli_connectors_help():
+    result = subprocess.run([sys.executable, "-m", "streamwright.core.cli", "connectors", "--help"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            universal_newlines=True)
+    assert result.returncode == 0
+    assert "-ls" in result.stdout
+    assert "-i" in result.stdout
+    assert "-s" in result.stdout or "find" in result.stdout
+
+
+def test_cli_connectors_variants(monkeypatch, capsys):
+    from streamwright.core import catalog
+    fake_catalog = {
+        "postgres": {"title": "Postgres", "summary": "Postgres DB", "trust": "official"}
+    }
+    monkeypatch.setattr(catalog, "connectors", lambda hub_url=None: fake_catalog)
+    monkeypatch.setattr(catalog, "listing", lambda hub_url=None: ["catalog-listing-item"])
+
+    # Test ls subcommand
+    code = cli.main(["connectors", "ls"])
+    assert code == 0
+    assert "catalog-listing-item" in capsys.readouterr().out
+
+    # Test -ls flag
+    code = cli.main(["connectors", "-ls"])
+    assert code == 0
+    assert "catalog-listing-item" in capsys.readouterr().out
+
+    # Test find subcommand
+    code = cli.main(["connectors", "find", "postgres"])
+    assert code == 0
+    assert "postgres" in capsys.readouterr().out
+
+    # Test -s flag
+    code = cli.main(["connectors", "-s", "postgres"])
+    assert code == 0
+    assert "postgres" in capsys.readouterr().out
+
