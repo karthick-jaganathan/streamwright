@@ -14,11 +14,12 @@ its `transform` steps shape them with SQL (DuckDB), and its exports are written 
 described in [the source format design](docs/design/source-format.md); the examples are in
 [`examples/sources/`](examples/sources/).
 
-- **`streamwright`** ([streamwright](core/README.md)) runs sources: built-in auth, partitions, pagination, async
+- **`streamwright`** (or shorthand **`sw`**) ([streamwright](core/README.md)) runs sources: built-in auth, partitions, pagination, async
   report jobs, incremental state, retries and rate limits, SQL transform steps; output as Singer messages, JSONL, CSV,
   TSV or Parquet files, DuckDB or DuckLake tables, or any [dlt](https://dlthub.com/docs) destination.
-- **`streamwright validate`** checks sources without running them; every finding has its file, line
+- **`streamwright validate`** (or **`sw validate`**) checks sources without running them; every finding has its file, line
   and YAML path. JSON Schemas for editor autocomplete are in [`docs/schemas/`](docs/schemas/).
+- **`streamwright mcp`** (or **`sw mcp`**) runs the Model Context Protocol (MCP) server for AI coding assistants.
 - **Connectors** add APIs that need a vendor SDK, and read files and databases:
 
 | Connector | Package | Reads |

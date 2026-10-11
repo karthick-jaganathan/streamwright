@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright"
-version = "0.1.6"
+version = "0.1.7"
 description = "Declarative data connectors — pull from APIs, files and databases with YAML, shape with SQL, write anywhere."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -36,9 +36,10 @@ dependencies = [
 dlt = ["dlt>=1.0"]
 
 [project.urls]
-Homepage = "https://github.com/karthick-jaganathan/streamwright"
-Repository = "https://github.com/karthick-jaganathan/streamwright"
+Homepage = "https://streamwright.web.app"
 Documentation = "https://streamwright.web.app/docs/"
+Repository = "https://github.com/karthick-jaganathan/streamwright"
+"Issue Tracker" = "https://github.com/karthick-jaganathan/streamwright/issues"
 
 [project.scripts]
 # `streamwright run`, `streamwright validate`, `streamwright connectors` - one CLI (see streamwright.core.cli)

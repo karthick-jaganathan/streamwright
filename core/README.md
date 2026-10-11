@@ -16,9 +16,12 @@ Each stream follows a three-stage pipeline:
 
 ## CLI Commands
 
-- **`streamwright run`** — Execute a source and stream records to the configured destination.
-- **`streamwright validate`** — Validate source definitions, authentication specifications, and schemas without executing network requests.
-- **`streamwright connectors`** — Browse, inspect, and install connectors from the StreamWright Hub.
+All commands can be invoked interchangeably using `streamwright` or the shorthand `sw` alias (e.g. `sw run`, `sw validate`, `sw connectors`, `sw mcp`).
+
+- **`streamwright run`** (or **`sw run`**) — Execute a source and stream records to the configured destination.
+- **`streamwright validate`** (or **`sw validate`**) — Validate source definitions, authentication specifications, and schemas without executing network requests.
+- **`streamwright connectors`** (or **`sw connectors`**) — Browse, inspect, and install connectors from the StreamWright Hub.
+- **`streamwright mcp`** (or **`sw mcp`**) — Launch the Model Context Protocol (MCP) server for AI coding assistants.
 
 ## Source Structure
 
@@ -92,3 +95,4 @@ streamwright run streamwright/examples/sources/readers/files_demo \
 - **Full documentation:** https://streamwright.web.app/docs/
 - **Architecture Guide:** https://streamwright.web.app/docs/architecture/
 - **Connectors & Readers:** https://streamwright.web.app/docs/connectors/
+- **MCP Server Guide:** https://streamwright.web.app/docs/ai/mcp/
