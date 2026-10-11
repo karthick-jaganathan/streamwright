@@ -1,0 +1,27 @@
+description: Metadata discovery for all sheet tabs in the spreadsheet workbook.
+
+requests:
+  - name: raw_tabs
+    service: spreadsheet
+    method: list_sheets
+    sdk: google_sheets
+    arguments:
+      spreadsheet_id: "{{ config.spreadsheet_id }}"
+
+transform:
+  mode: page
+  steps:
+    - name: sheet_tabs
+      select: |
+        SELECT
+          (record->>'sheet_id')::BIGINT       AS sheet_id,
+          record->>'title'                    AS sheet_title,
+          (record->>'index')::INTEGER         AS sheet_index,
+          (record->>'row_count')::INTEGER     AS row_count,
+          (record->>'column_count')::INTEGER  AS column_count
+        FROM raw_tabs
+
+export:
+  workbook_sheets:
+    step: sheet_tabs
+    primary_key: [sheet_id]

@@ -1,0 +1,31 @@
+description: Google Sheets budget targets and campaign allocations.
+
+requests:
+  - name: raw_budgets
+    service: spreadsheet
+    method: read
+    sdk: google_sheets
+    arguments:
+      spreadsheet_id: "{{ config.spreadsheet_id }}"
+      sheet: "Budgets"
+      header_row: 1
+
+transform:
+  mode: page
+  steps:
+    - name: budgets
+      select: |
+        SELECT
+          record->>'campaign_id'              AS campaign_id,
+          record->>'campaign_name'            AS campaign_name,
+          record->>'month'                    AS budget_month,
+          (record->>'target_budget')::DOUBLE  AS target_budget,
+          record->>'owner'                    AS owner,
+          current_timestamp                   AS _synced_at
+        FROM raw_budgets
+        WHERE record->>'campaign_id' IS NOT NULL
+
+export:
+  campaign_budgets:
+    step: budgets
+    primary_key: [campaign_id, budget_month]

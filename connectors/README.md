@@ -23,6 +23,7 @@ vendor SDK: `files` (local files), `s3` and `gcs` (object storage) and `postgres
 | [mysql](readers/mysql/README.md) | `streamwright-mysql` | `mysql` | duckdb (its mysql extension) | - |
 | [mongodb](readers/mongodb/README.md) | `streamwright-mongodb` | `mongodb` | pymongo | - |
 | [deltalake](readers/deltalake/README.md) | `streamwright-deltalake` | `deltalake` | duckdb (its delta extension) | - |
+| [google_sheets](readers/google_sheets/README.md) | `streamwright-google-sheets` | `google_sheets` | google-auth | `google.auth` |
 | [restapi](http/restapi/README.md) | `streamwright-restapi` | `restapi` | requests | `streamwright.network` |
 
 ```bash

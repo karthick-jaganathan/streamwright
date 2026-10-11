@@ -9,9 +9,9 @@ FORCE_DEPS ?= false
 # The streamwright package (the `streamwright` CLI: run, validate, connectors), at core
 CORE_DIR = core
 # Connectors (optional: each installs its own dependencies: a vendor SDK, or DuckDB for files, s3, gcs and
-CONNECTORS = files s3 gcs azure_blob postgres mysql mongodb deltalake google_ads microsoft_ads meta_ads openai_ads linkedin_ads amazon_ads apple_ads restapi
+CONNECTORS = files s3 gcs azure_blob postgres mysql mongodb deltalake google_sheets google_ads microsoft_ads meta_ads openai_ads linkedin_ads amazon_ads apple_ads restapi
 CONNECTOR_DIRS = connectors/readers/files connectors/readers/s3 connectors/readers/gcs connectors/readers/azure_blob connectors/readers/postgres \
-	connectors/readers/mysql connectors/readers/mongodb connectors/readers/deltalake \
+	connectors/readers/mysql connectors/readers/mongodb connectors/readers/deltalake connectors/readers/google_sheets \
 	connectors/ads/google_ads connectors/ads/microsoft_ads connectors/ads/meta_ads connectors/ads/openai_ads connectors/ads/linkedin_ads \
 	connectors/ads/amazon_ads connectors/ads/apple_ads \
 	connectors/http/restapi
@@ -45,7 +45,7 @@ help:
 	@echo "  MODE=dist  - Distribution mode (build + install from $(DIST_BASE))"
 	@echo ""
 	@echo "Individual package: make install-core (or: cd core && make install)"
-	@echo "Individual connectors: make install-google-ads | install-microsoft-ads | install-meta-ads | install-openai-ads | install-linkedin-ads | install-amazon-ads | install-apple-ads | install-files | install-s3 | install-gcs | install-azure-blob | install-postgres | install-mysql | install-mongodb | install-deltalake | install-restapi"
+	@echo "Individual connectors: make install-google-ads | install-microsoft-ads | install-meta-ads | install-openai-ads | install-linkedin-ads | install-amazon-ads | install-apple-ads | install-files | install-s3 | install-gcs | install-azure-blob | install-postgres | install-mysql | install-mongodb | install-deltalake | install-google-sheets | install-restapi"
 
 # Generic install command for all packages
 install: install-all
@@ -119,6 +119,9 @@ install-mongodb:
 install-deltalake:
 	cd connectors/readers/deltalake && $(MAKE) install MODE=$(MODE) FORCE_DEPS=$(FORCE_DEPS)
 
+install-google-sheets:
+	cd connectors/readers/google_sheets && $(MAKE) install MODE=$(MODE) FORCE_DEPS=$(FORCE_DEPS)
+
 # Generic build command for all packages
 build: build-all
 build-all:
@@ -137,7 +140,7 @@ build-all:
 uninstall:
 	@echo "Uninstalling all StreamWright packages..."
 	pip uninstall -y streamwright-google-ads streamwright-microsoft-ads streamwright-meta-ads streamwright-openai-ads streamwright-linkedin-ads streamwright-amazon-ads streamwright-apple-ads \
-		streamwright-files streamwright-s3 streamwright-gcs streamwright-azure-blob streamwright-postgres streamwright-mysql streamwright-mongodb streamwright-deltalake streamwright-restapi \
+		streamwright-files streamwright-s3 streamwright-gcs streamwright-azure-blob streamwright-postgres streamwright-mysql streamwright-mongodb streamwright-deltalake streamwright-google-sheets streamwright-restapi \
 		streamwright 2>/dev/null || true
 	@echo "✅ All packages uninstalled!"
 

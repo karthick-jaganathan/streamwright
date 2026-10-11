@@ -1,0 +1,18 @@
+# Example source folder: this file, and one file per stream in streams/.
+# Check it with: streamwright validate examples/sources/readers/google_sheets_demo
+# Run it (pip install streamwright-google-sheets): streamwright run examples/sources/readers/google_sheets_demo
+# Secrets come from STREAMWRIGHT_SECRET_<NAME> environment variables or --secrets FILE.
+kind: source
+name: google_sheets_demo
+description: Read-only tabular data extracts from Google Sheets spreadsheets.
+
+spec:
+  config:
+    spreadsheet_id: {type: string, description: "Google Sheets document ID"}
+  secrets:
+    gcp_service_account_json: {type: string, description: "GCP Service Account JSON credentials"}
+
+auth:
+  provider: google_sheets
+  service_account_json: "{{ secrets.gcp_service_account_json }}"
+  spreadsheet_id: "{{ config.spreadsheet_id }}"
