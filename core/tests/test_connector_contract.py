@@ -43,7 +43,7 @@ SAMPLE = ConnectorDefinition(
     operations=(Operation(service="item", method="read", arguments=(
         Field("limit", "integer"), Field("mode", "string", choices=("a", "b")))),),
     adapters={"source": "no_such_module_0042:Adapter"},
-    validator="test_connector_contract:validate_sample",
+    validator=f"{__name__}:validate_sample",
 )
 SOURCE = EngineCapabilities(engine="source", operation_kinds=frozenset({OperationKind.READ}),
                             arguments=MappingProxyType({"item.read": {"limit": None, "mode": ("a",)}}))

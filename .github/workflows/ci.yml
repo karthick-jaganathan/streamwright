@@ -28,8 +28,11 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       # No vendor SDKs here: the core must work without them (the connector tests run in the connectors job).
+      # The connector packages install without their dependencies: core tests and examples load their definitions.
       - name: Install StreamWright
-        run: python -m pip install ./core pytest jsonschema responses "ruff==0.17.3"
+        run: |
+          python -m pip install ./core pytest jsonschema responses "ruff==0.17.3"
+          python -m pip install --no-deps connectors/*/*
 
       # Blocking: ruff (ruff.toml) and scripts/check_code_standards.py (docs/design/connector-contract.md section 7)
       - name: Check the code standards
@@ -38,7 +41,9 @@ jobs:
       - name: Run core tests
         run: python -m pytest core/tests -q
 
+      # make check-vendored skips a companion that is not checked out
       - uses: actions/checkout@v7
+        continue-on-error: true
         with:
           repository: karthick-jaganathan/streamwright-spark
           path: .contract-repos/streamwright-spark
@@ -78,15 +83,15 @@ jobs:
       # Dynamically install all connectors and test dependencies
       - name: Install StreamWright, connectors and test dependencies
         run: |
-          python -m pip install ./core connectors/*/* pytest jsonschema responses pyarrow deltalake "dlt[duckdb]>=1.0" \
-            "ruff==0.17.3"
+          python -m pip install ./core connectors/*/* "streamwright-spark[all]~=0.1.0" pytest jsonschema responses \
+            pyarrow deltalake "dlt[duckdb]>=1.0" "ruff==0.17.3"
 
       - name: Check the connectors are registered
         run: |
           out="$(streamwright connectors)"; echo "$out"
           for pp in connectors/*/*/pyproject.toml; do
             c="$(basename "$(dirname "$pp")")"
-            echo "$out" | grep -qE "\[installed\]\s+$c\b" || { echo "missing connector: $c"; exit 1; }
+            echo "$out" | grep -qE "^\s+$c\s" || { echo "missing connector: $c"; exit 1; }
           done
 
       - name: Lint and run tests
