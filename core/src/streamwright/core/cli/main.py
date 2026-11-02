@@ -27,7 +27,7 @@ from streamwright.core.cli.commands.connectors import run_connectors_command
 from streamwright.core.cli.commands.source import run
 from streamwright.core.cli.jobs import JOB_OPTION
 from streamwright.core.cli.log_options import log_options, log_setup
-from streamwright.core.cli.parser import build_parser, build_validate_parser, command_parsers
+from streamwright.core.cli.parser import build_parser, build_plan_parser, build_validate_parser, command_parsers
 from streamwright.core.validation import engine
 from streamwright.core.validation.engine import NON_STRICT_CODES, check_components
 
@@ -147,7 +147,11 @@ def main(argv=None):
     if command == "validate":
         return _validate_command(argv)
     if command == "plan":
-        sys.stderr.write("streamwright: 'plan' needs an installed job manifest kind and path\n")
+        if any(argument in ("-h", "--help") for argument in argv[1:]):
+            build_plan_parser().print_help()
+            return 0
+        sys.stderr.write("streamwright: 'plan' needs a job manifest (JOB or --job JOB) of an installed engine's "
+                         "kind; see streamwright plan -h\n")
         return 2
     args = build_parser().parse_args(argv)
     if args.command == "connectors":

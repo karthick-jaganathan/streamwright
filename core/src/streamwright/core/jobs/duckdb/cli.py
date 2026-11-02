@@ -197,7 +197,8 @@ def _cmd_state(args):
 def _inputs(parser, secrets=False):
     add_job_arguments(parser)
     if secrets:
-        parser.add_argument("--secrets", help="a YAML file of secret values (or STREAMWRIGHT_SECRET_<NAME>)")
+        parser.add_argument("--secrets", metavar="FILE",
+                            help="a YAML file of spec.secrets values (or STREAMWRIGHT_SECRET_<NAME> variables)")
 
 
 def _build_parser(prog):
@@ -220,9 +221,11 @@ def _build_parser(prog):
     _inputs(run, secrets=True)
     run.set_defaults(func=_cmd_run, parser=run)
     state = sub.add_parser("state", allow_abbrev=False, help="list, retry or abandon a job's batches (runtime.state)")
-    state.add_argument("action", choices=["list", "retry", "abandon"])
-    state.add_argument("--batch", help="the batch id (retry, abandon)")
-    state.add_argument("--limit", type=int, default=20, help="batches to list")
+    state.add_argument("action", choices=["list", "retry", "abandon"],
+                       help="list: the job's recent batches; retry: run a failed batch again from where it failed; "
+                            "abandon: give a failed batch up so the job can run again")
+    state.add_argument("--batch", metavar="ID", help="the batch id (retry, abandon)")
+    state.add_argument("--limit", type=int, default=20, metavar="N", help="list: the number of batches (default 20)")
     _inputs(state, secrets=True)
     state.set_defaults(func=_cmd_state, parser=state)
     return parser

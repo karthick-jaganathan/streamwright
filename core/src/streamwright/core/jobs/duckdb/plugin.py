@@ -31,8 +31,8 @@ class DuckDBJobEngine:
 
     kind = KIND
 
-    def main(self, argv=None):
-        return cli.main(argv)
+    def main(self, argv=None, prog="streamwright"):
+        return cli.main(argv, prog=prog)
 
     def validate_job(self, job, *, overlays=(), config=None, strict=False, allowed=None):
         return engine.validate_job(job, overlays=overlays, config=config, strict=strict, allowed=allowed)

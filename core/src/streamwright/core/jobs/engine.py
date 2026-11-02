@@ -41,7 +41,10 @@ class JobEngine(Protocol):
     kind: str  # the manifest `kind` it runs, e.g. "DuckDBJob" (= the entry-point name)
 
     def main(self, argv: Sequence[str] | None = None) -> int:
-        """Runs the engine's command line on the original arguments (`validate|plan|run JOB ...`); the exit code."""
+        """
+        Runs the engine's command line on the original arguments (`validate|plan|run JOB ...`); the exit code. An engine
+        may also take `prog`, the command's name in its usage lines (`streamwright duckdb` for the explicit form).
+        """
 
     def validate_job(self, job: str | Mapping[str, Any], *, overlays: Sequence[str] = (),
                      config: Mapping[str, Any] | None = None, strict: bool = False) -> JobReport:

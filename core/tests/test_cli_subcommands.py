@@ -6,8 +6,12 @@ import subprocess
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from streamwright.core import cli
 from streamwright.core.cli.jobs import parse_set
+from streamwright.core.cli.parser import build_parser, build_validate_parser
+from streamwright.core.jobs.duckdb import cli as duckdb_cli
 from streamwright.core.runtime import plugins
 
 
@@ -126,9 +130,10 @@ def test_command_entry_is_registered_from_metadata(monkeypatch, capsys):
 def test_builtin_job_shorthand_uses_plugin_route(monkeypatch):
     jobs_module = importlib.import_module("streamwright.core.cli.commands.jobs")
     calls = []
-    monkeypatch.setattr(jobs_module, "run_job_kind", lambda kind, argv: calls.append((kind, argv)) or 0)
+    monkeypatch.setattr(jobs_module, "run_job_kind",
+                        lambda kind, argv, prog=None: calls.append((kind, argv, prog)) or 0)
     assert cli.main(["duckdb", "run", "job.yaml"]) == 0
-    assert calls == [("DuckDBJob", ["run", "job.yaml"])]
+    assert calls == [("DuckDBJob", ["run", "job.yaml"], "streamwright duckdb")]  # its usage lines name the command
 
 
 def test_shared_job_set_parser_uses_jobs_input_rules():
@@ -139,3 +144,33 @@ def test_shared_job_set_parser_uses_jobs_input_rules():
         assert "NAME=VALUE" in str(exc)
     else:
         raise AssertionError("an invalid --set must be rejected")
+
+
+def _without_help(parser, path):
+    missing = []
+    for action in parser._actions:
+        if isinstance(action, argparse._HelpAction) or action.help == argparse.SUPPRESS:
+            continue
+        if isinstance(action, argparse._SubParsersAction):
+            helps = {choice.dest: choice.help for choice in action._choices_actions}
+            for name, sub in action.choices.items():
+                missing += [] if helps.get(name) else ["%s %s" % (path, name)]
+                missing += _without_help(sub, "%s %s" % (path, name))
+        elif not action.help and action.nargs != argparse.REMAINDER:  # (REMAINDER: another parser's arguments)
+            missing.append("%s %s" % (path, "/".join(action.option_strings) or action.dest))
+    return missing
+
+
+def test_every_command_and_option_has_help(capsys):
+    plugin_commands = {item["name"] for item in plugins.discover(plugins.COMMANDS)} - {"duckdb"}
+    missing = [item for item in _without_help(build_parser(), "streamwright")
+               if item.split()[1] not in plugin_commands]  # (installed plug-ins check their own)
+    assert missing == []
+    assert _without_help(build_validate_parser(), "streamwright validate") == []
+    assert _without_help(duckdb_cli._build_parser("streamwright duckdb"), "streamwright duckdb") == []
+    assert cli.main(["plan", "-h"]) == 0
+    with pytest.raises(SystemExit) as shown:
+        cli.main(["duckdb", "-h"])  # forwarded to the engine's own parser
+    assert shown.value.code == 0
+    out = capsys.readouterr().out
+    assert "usage: streamwright plan" in out and "usage: streamwright duckdb" in out

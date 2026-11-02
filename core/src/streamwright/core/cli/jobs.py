@@ -38,10 +38,14 @@ def add_job_arguments(parser):
     """Add common job manifest and execution options to an argparse parser."""
     parser.add_argument("job", nargs="?", metavar="JOB", help="the job manifest (a YAML file or its folder)")
     parser.add_argument("--job", "-j", dest=JOB_OPTION, metavar="JOB", help="the job manifest, as an option")
-    parser.add_argument("--overlay", action="append", default=[], metavar="FILE")
-    parser.add_argument("--config", metavar="FILE")
-    parser.add_argument("--set", action="append", default=[], type=parse_set, metavar="NAME=VALUE")
-    parser.add_argument("--allow-connector", action="append", default=[], metavar="NAME")
-    parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--overlay", action="append", default=[], metavar="FILE",
+                        help="a YAML overlay merged onto the job, in order (repeatable; a null deletes a key, a list "
+                             "replaces the job's)")
+    parser.add_argument("--config", metavar="FILE", help="a YAML/JSON file of spec.config values")
+    parser.add_argument("--set", action="append", default=[], type=parse_set, metavar="NAME=VALUE",
+                        help="a spec.config value (repeatable; lists as a,b,c); overrides --config")
+    parser.add_argument("--allow-connector", action="append", default=[], metavar="NAME",
+                        help="allow only this connector (repeatable); by default any installed connector")
+    parser.add_argument("--strict", action="store_true", help="treat warnings as errors")
     add_log_options(parser)
     return parser

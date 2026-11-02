@@ -30,19 +30,36 @@ from streamwright.core.validation import engine
 def build_validate_parser():
     """`streamwright validate --help`: validation options, then the logging options (as streamwright run's)."""
     parser = engine._parser("streamwright validate")
+    parser.epilog = ("A job manifest (kind: DuckDBJob, SparkJob) is checked by its engine, with that engine's options: "
+                     "streamwright duckdb validate -h, streamwright spark validate -h.")
     add_log_options(parser.add_argument_group("logging options"))
+    return parser
+
+
+def build_plan_parser():
+    """`streamwright plan --help`: the command takes a job manifest; its engine's plan command takes the options."""
+    parser = argparse.ArgumentParser(
+        prog="streamwright plan",
+        description="Show a job's execution plan - its steps, outputs and the order they run in - without running it "
+                    "or needing secrets. The manifest's kind picks the engine, and its options are that engine's: "
+                    "streamwright duckdb plan -h (kind: DuckDBJob), streamwright spark plan -h (kind: SparkJob).")
+    parser.add_argument("job", nargs="?", metavar="JOB", help="the job manifest (a YAML file or its folder)")
+    parser.add_argument("--job", "-j", dest=JOB_OPTION, metavar="JOB", help="the job manifest, as an option")
     return parser
 
 
 def build_parser():
     parser = argparse.ArgumentParser(prog="streamwright",
-                                     description="Run and check StreamWright sources (`kind: source`).")
+                                     description="Run and check StreamWright sources (`kind: source`) and jobs "
+                                                 "(`kind: DuckDBJob`, `kind: SparkJob`).")
     commands = parser.add_subparsers(dest="command", metavar="COMMAND")
     commands.required = True
 
-    run = commands.add_parser("run", help="run a source and write its records",
+    run = commands.add_parser("run", help="run a source and write its records, or a job (JOB or --job JOB)",
                               description="Run a source. Records go to stdout as Singer messages unless --output "
-                                          "names a folder for files or a warehouse; logs go to stderr.")
+                                          "names a folder for files or a warehouse; logs go to stderr. A job "
+                                          "manifest (kind: DuckDBJob, SparkJob) runs on its engine, with that "
+                                          "engine's options: streamwright duckdb run -h, streamwright spark run -h.")
     run.add_argument("source", nargs="?", metavar="SOURCE",
                      help="a source folder (source.yaml and one file per stream in streams/) or a source file; or a "
                           "job manifest (kind: DuckDBJob, SparkJob), which runs on its engine")
@@ -114,7 +131,8 @@ def build_parser():
                                    add_help=False)
     validate.add_argument("arguments", nargs=argparse.REMAINDER)
 
-    plan_cmd = commands.add_parser("plan", help="show execution plan DAG for a DuckDB job", add_help=False)
+    plan_cmd = commands.add_parser("plan", help="show a job's execution plan: its steps, outputs and their order "
+                                                 "(no secrets needed)", add_help=False)
     plan_cmd.add_argument("arguments", nargs=argparse.REMAINDER)
     installed_commands = {item["name"] for item in plugins.discover(plugins.COMMANDS)}
     if "duckdb" not in installed_commands:  # editable installs have stale entry-point metadata
