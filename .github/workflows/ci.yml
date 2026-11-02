@@ -91,7 +91,7 @@ jobs:
           out="$(streamwright connectors)"; echo "$out"
           for pp in connectors/*/*/pyproject.toml; do
             c="$(basename "$(dirname "$pp")")"
-            echo "$out" | grep -qE "^\s+$c\s" || { echo "missing connector: $c"; exit 1; }
+            echo "$out" | grep -qx "Name: $c" || { echo "missing connector: $c"; exit 1; }
           done
 
       - name: Lint and run tests
