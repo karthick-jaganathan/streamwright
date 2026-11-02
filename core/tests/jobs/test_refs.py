@@ -14,6 +14,14 @@ from streamwright.core.jobs.refs import (
 )
 
 
+def test_a_value_that_is_one_input_reference_keeps_the_input_type():
+    job = {"value": "{{ config.channels }}", "limit": " {{ config.limit }} ", "sql": "IN {{ config.channels }}"}
+    resolved, problems = resolve(job, {"channels": ["SEARCH", "SHOPPING"], "limit": 5}, {})
+    # a query builder's IN gets the list itself; inside other text the value is written as text
+    assert resolved == {"value": ["SEARCH", "SHOPPING"], "limit": 5, "sql": "IN ['SEARCH', 'SHOPPING']"}
+    assert problems == []
+
+
 def test_resolve_replaces_inputs_only_and_reports_missing_values_without_secrets():
     job = {"a": "{{ config.x }}-{{ secrets.s }}", "b": ["{{ step.col }}"], "{{ config.k }}": 1}
     resolved, problems = resolve(job, {"x": 1, "k": "key"}, {"s": "pw"})

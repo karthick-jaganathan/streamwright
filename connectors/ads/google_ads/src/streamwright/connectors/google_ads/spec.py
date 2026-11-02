@@ -15,7 +15,10 @@ __all__ = ["CONNECTOR"]
 _CUSTOMER = Field("customer_id", ("string", "integer"), required=True, pattern=r"^[0-9-]+$",
                   description="the customer to query, digits (dashes are removed)")
 _QUERY = Field("query", "string", required=True, literal=True,
-               description="GAQL text, or `{gaql: {...}}`, the query builder that writes values safely")
+               description="`{gaql: {select: [...], from: RESOURCE, where: [{field, op, type, value}], order_by, "
+                           "limit}}`, the query builder that writes values safely (the only way to use config, "
+                           "partition or window values; see the connector guide's Query builder section), or GAQL "
+                           "text without `{{ }}` references")
 
 
 def _search(method: str, description: str) -> Operation:

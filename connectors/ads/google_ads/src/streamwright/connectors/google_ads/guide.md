@@ -13,6 +13,9 @@ Supports GAQL (Google Ads Query Language) stream queries with parameterization, 
 kind: source
 name: google_ads_pipeline
 spec:
+  config:
+    customer_ids: {type: list, items: string, description: Customer IDs without dashes}
+    start_date: {type: date, default: "-30d"}
   secrets:
     gads_developer_token: {type: string, required: true}
     gads_client_id: {type: string, required: true}
@@ -56,58 +59,107 @@ arguments:
 ### `streams/<stream>.yaml` contract
 
 ```yaml
+# One row per campaign per day, for each customer in config.customer_ids.
+partitions:
+  - {name: customer_id, values: "{{ config.customer_ids }}"}
+incremental:
+  cursor_field: date
+  start: "{{ config.start_date }}"
+  window: 7d
+  lookback: 30d                      # conversions are restated: re-read the last 30 days each run
 requests:
-  # Method 1: GAQL search_stream query
-  - name: campaign_performance
+  - name: raw_campaign_performance
     sdk: google_ads
     service: GoogleAdsService
     method: search_stream
     arguments:
-      customer_id: "1234567890"        # Or referenced from partition: "{{ partition.customer_id }}"
-      query: |
-        SELECT
-          campaign.id,
-          campaign.name,
-          campaign.status,
-          metrics.impressions,
-          metrics.clicks,
-          metrics.cost_micros,
-          segments.date
-        FROM campaign
-        WHERE segments.date >= '{{ window.start }}'
-          AND segments.date <= '{{ window.end }}'
-
-  # Method 2: List accessible client accounts under MCC
-  # - name: accessible_accounts
-  #   sdk: google_ads
-  #   service: CustomerService
-  #   method: list_accessible_customers
+      customer_id: "{{ partition.customer_id }}"
+      query:
+        gaql:                        # the query builder (see Query builder); GAQL text also works for fixed queries
+          select: [customer.id, campaign.id, campaign.name, campaign.status, segments.date,
+                   metrics.impressions, metrics.clicks, metrics.cost_micros]
+          from: campaign
+          where:
+            - {field: segments.date, op: BETWEEN, type: date, value: ["{{ window.start }}", "{{ window.end }}"]}
+            - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
 
 transform:
   mode: page
   steps:
-    - name: final_campaigns
+    - name: campaign_performance
       select: |
-        SELECT 
-          campaign.id::BIGINT AS campaign_id,
-          campaign.name AS campaign_name,
-          campaign.status AS campaign_status,
-          metrics.impressions::BIGINT AS impressions,
-          metrics.clicks::BIGINT AS clicks,
-          (metrics.cost_micros::DOUBLE / 1000000.0) AS cost,
-          segments.date AS report_date
-        FROM campaign_performance
+        SELECT record->>'$.customer.id'                                 AS customer_id,
+               record->>'$.campaign.id'                                 AS campaign_id,
+               record->>'$.campaign.name'                               AS campaign_name,
+               record->>'$.campaign.status'                             AS status,
+               (record->>'$.segments.date')::DATE                       AS date,
+               coalesce((record->>'$.metrics.impressions')::BIGINT, 0)  AS impressions,
+               coalesce((record->>'$.metrics.clicks')::BIGINT, 0)       AS clicks,
+               round((record->>'$.metrics.cost_micros')::BIGINT * 0.000001, 2) AS cost
+        FROM raw_campaign_performance
 
 export:
-  campaigns:
-    step: final_campaigns
-    primary_key: [campaign_id, report_date]
+  campaign_performance:
+    step: campaign_performance
+    primary_key: [customer_id, campaign_id, date]
 ```
+
+Other read methods: `CustomerService.list_accessible_customers` lists the accounts a manager (MCC) login can reach;
+any `<Service>.get_*` / `list_*` read method of the installed library works the same way.
 
 ### Transform & Data Shaping
 
-- Emits records as nested JSON dictionaries matching GAQL field paths (e.g. `campaign.id`, `metrics.clicks`).
-- In `transform` steps, nested fields can be addressed directly in DuckDB SQL using dot notation or struct unpacking.
+- Each record is the API row as nested JSON, matching the GAQL field paths (`campaign.id`, `metrics.clicks`).
+- A transform reads it from the request's table as the column `record`: extract values with `->>`
+  (`record->>'$.campaign.id'`, which returns text) and cast numbers and dates. IDs are 64-bit: keep them as text or
+  BIGINT. Money fields are in micros.
+
+## Query builder
+
+`query` takes either form:
+
+- **`{gaql: {...}}`, the `gaql` query builder** (recommended). It writes the GAQL from a typed mapping, so input
+  values are checked and escaped, never pasted into the query text, and a list input fills an `IN` directly. Use it
+  whenever the query uses a `config`, partition or window value.
+- **GAQL text**, as you would write it in the Google Ads query builder or API docs. The text is sent as written and
+  may not contain `{{ }}` references, so it suits fixed queries (GAQL's relative dates, such as
+  `segments.date DURING LAST_7_DAYS`, work in it).
+
+```yaml
+query: |
+  SELECT campaign.id, campaign.name FROM campaign
+  WHERE campaign.advertising_channel_type IN ('SEARCH', 'SHOPPING')
+```
+
+The builder form, with the channels coming from an input (plus a status and a date filter):
+
+```yaml
+query:
+  gaql:
+    select: [campaign.id, campaign.name, campaign.advertising_channel_type]
+    from: campaign
+    where:
+      - {field: campaign.status, op: "=", type: enum, value: ENABLED}
+      - {field: campaign.advertising_channel_type, op: IN, type: enum, value: "{{ config.channels }}",
+         skip_if_empty: true}
+      - {field: segments.date, op: BETWEEN, type: date, value: ["{{ window.start }}", "{{ window.end }}"]}
+    order_by: [campaign.id]          # or "metrics.clicks DESC"
+    limit: 100
+```
+
+- Keys: `select` (field paths), `from` (one resource), `where` (items joined with AND), `order_by`, `limit`.
+- A `where` item: `field`, `op`, `type` and `value`.
+  - `op`: `=` `!=` `>` `>=` `<` `<=` `IN` `NOT IN` `LIKE` `NOT LIKE` `BETWEEN` `IS NULL` `IS NOT NULL`
+    `CONTAINS ANY` `CONTAINS ALL` `CONTAINS NONE`.
+  - `type` says how the value is written: `int` (checked numbers), `string` (quoted and escaped), `enum` (bare
+    names, e.g. `SEARCH`), `date` (`YYYY-MM-DD`).
+  - `IN`, `NOT IN` and `CONTAINS *` take a list, or a reference to a list input (`"{{ config.channels }}"`, in sources
+    and jobs alike); `BETWEEN` takes `[low, high]`; `IS NULL` and `IS NOT NULL` take none.
+  - `skip_if_empty: true` drops the item when its value (or a `BETWEEN` bound) is missing or empty.
+- In a DuckDBJob or SparkJob call step, the same mapping goes in the step's `arguments.query`; the records reach the
+  step's `sql` as `record` JSON (`record->>'$.campaign.id'`).
+
+Grammar: https://developers.google.com/google-ads/api/docs/query/grammar
 
 ## Engines
 
@@ -115,8 +167,9 @@ export:
 
 - **Transport**: `sdk` (`google-ads`).
 - **Services & Methods**: resolved dynamically against the installed `google-ads` library (contract v1.3 §6b).
-  - `GoogleAdsService.search_stream` / `search`: Arguments: `customer_id` (string/int, required), `query` (GAQL
-    string or query dict, required); any other argument is a request field (vendor argument).
+  - `GoogleAdsService.search_stream` / `search`: Arguments: `customer_id` (string/int, required), `query` (a
+    `{gaql: {...}}` query builder mapping, or GAQL text; required); any other argument is a request field (vendor
+    argument).
   - `<AnyService>.get_*` / `list_*` (e.g. `CustomerService.list_accessible_customers`): the request fields are vendor
     arguments; the installed library decides which methods exist.
 - **Streaming**: Yields rows in gRPC response stream chunks.

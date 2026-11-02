@@ -32,10 +32,13 @@ Source files can only use installed (and allowed) connectors; a source can call 
 it may use. Nothing is imported before the allow-list admits it.
 """
 
+import importlib.util
+
 from streamwright.core.engine import queries
 from streamwright.core.runtime import plugins, source_connectors
 from streamwright.core.runtime.connector_types import ComponentLoadError, ConnectorContext, ConnectorError, QueryBuilder
 from streamwright.core.runtime.contract import AdapterLoadError, ConnectorDefinition
+from streamwright.core.runtime.contract_guide import guide_text
 from streamwright.core.runtime.definitions import load_definition
 
 __all__ = [
@@ -52,6 +55,7 @@ __all__ = [
     "component_problems",
     "declared_auth",
     "describe",
+    "guide",
     "load",
     "load_query_builder",
     "path_text",
@@ -162,6 +166,24 @@ def load(name, allowed=None, registry=None):
         raise ComponentLoadError(str(exc)) from exc
     registry.loaded[name] = definition
     return definition
+
+
+def guide(name, capabilities=(), registry=None):
+    """
+    The user guide installed connector `name` ships (its `guide.md`, with the tables generated from its definition;
+    `capabilities`: the engines to show), or None when it ships none. Only the connector's spec is imported.
+    """
+    definition = load(name, registry=registry)
+    entry = next((item for item in _entry_points() if item.name == name), None)
+    if entry is None:  # registered in-process: no package
+        return None
+    module = entry.value.partition(":")[0]
+    spec = importlib.util.find_spec(module)
+    package = module if spec is not None and spec.submodule_search_locations else module.rpartition(".")[0]
+    try:
+        return guide_text(definition, package, capabilities)
+    except (FileNotFoundError, ModuleNotFoundError):
+        return None
 
 
 def query_builders(allowed=None, registry=None):

@@ -600,3 +600,14 @@ def test_downloads_are_read_in_pages():
         list(downloads.read(io.BytesIO(b"{oops\n"), "jsonl"))
     with pytest.raises(downloads.DownloadError, match=r"\(gzip\)"):
         list(downloads.read(io.BytesIO(gzip.compress(b"a,b\n1,2\n")[:15]), "csv", "gzip"))
+
+
+def test_an_installed_connector_guide_comes_with_its_generated_tables():
+    guide = components.guide("files")
+    assert guide.startswith("# ") and "\n## Connection\n" in guide and "| `roots` |" in guide
+    components.register(ConnectorDefinition("in_process", "In process", "test", connection=(), operations=(),
+                                            adapters={}))
+    try:
+        assert components.guide("in_process") is None  # registered in-process: no package, no guide
+    finally:
+        components.unregister("in_process")

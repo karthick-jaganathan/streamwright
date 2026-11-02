@@ -18,7 +18,9 @@
 """
 `{{ ... }}` references in job manifests.
 
-* `{{ config.NAME }}` / `{{ secrets.NAME }}`: inputs, substituted once by `resolve` before a job is checked or run.
+* `{{ config.NAME }}` / `{{ secrets.NAME }}`: inputs, substituted once by `resolve` before a job is checked or run. A
+  value that is only the reference takes the input's value as it is (a list stays a list, e.g. for a query builder's
+  `IN`); inside other text the value is written as text.
 * `{{ step }}` / `{{ step.column }}`: values from an earlier step's data. In SQL fragments (table-format predicates, for
   example) they are rendered by `substitute` as escaped SQL *literals* from pinned values, never spliced as text.
   Values are pinned in the batch manifest in a type-tagged JSON form (`encode_value`) so a replay renders the same
@@ -111,6 +113,12 @@ def resolve(job, config=None, secrets=None):
 
     def walk(node):
         if isinstance(node, str):
+            whole = MOUSTACHE.fullmatch(node.strip())
+            hit = INPUT_REF.match(whole.group(1)) if whole else None
+            if hit:  # a value that is one input reference keeps the input's type (a list, a number), as in sources
+                values = config if hit.group(1) == "config" else secrets
+                if values.get(hit.group(2)) is not None:
+                    return values[hit.group(2)]
             return substitute_inputs(node)
         if isinstance(node, list):
             return [walk(item) for item in node]

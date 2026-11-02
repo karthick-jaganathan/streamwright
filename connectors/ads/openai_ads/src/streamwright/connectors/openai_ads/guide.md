@@ -45,6 +45,9 @@ engine's HTTP reader with the source's `http:` defaults (base URL, headers, pagi
 ### `streams/<stream>.yaml` contract
 
 ```yaml
+# The campaigns of each account in config.account_ids.
+partitions:
+  - {name: account_id, values: "{{ config.account_ids }}"}
 requests:
   - name: raw_campaigns
     http:

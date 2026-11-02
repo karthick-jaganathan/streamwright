@@ -14,11 +14,12 @@ customer management, ad insight, ...); the connector never enumerates them (cont
 kind: source
 name: microsoft_ads_pipeline
 spec:
+  config:
+    account_ids: {type: list, items: string}
   secrets:
     msads_developer_token: {type: string, required: true}
     msads_client_id: {type: string, required: true}
     msads_refresh_token: {type: string, required: true}
-    msads_client_secret: {type: string, required: false}
 
 auth:
   provider: microsoft_ads
@@ -26,7 +27,7 @@ auth:
   client_id: "{{ secrets.msads_client_id }}"
   refresh_token: "{{ secrets.msads_refresh_token }}"
   # Optional:
-  # client_secret: "{{ secrets.msads_client_secret }}"
+  # client_secret: "{{ secrets.msads_client_secret }}"   # web apps only; declare it in spec.secrets
   # customer_id: "1234567"
   # account_id: "9876543"
   # environment: "production"          # "production" | "sandbox"
@@ -58,59 +59,47 @@ arguments:
 ### `streams/<stream>.yaml` contract
 
 ```yaml
+# The campaigns of each account in config.account_ids.
+partitions:
+  - {name: account_id, values: "{{ config.account_ids }}"}
 requests:
-  # Method 1: Campaign entity query
-  - name: active_campaigns
+  - name: raw_campaigns
     sdk: microsoft_ads
     service: CampaignManagementService
     method: GetCampaignsByAccountId
     arguments:
       request:                         # the fields of the SOAP request
-        AccountId: 9876543
-        CampaignType: ["Search", "Shopping"]
-      # account_id: 9876543            # the SOAP header's account (default: the request's own AccountId)
-      # customer_id: 1234567           # the SOAP header's customer (default: the connection's)
-
-  # Method 2: Reporting query (async job handled by engine)
-  # - name: campaign_performance_report
-  #   sdk: microsoft_ads
-  #   service: ReportingService
-  #   method: SubmitGenerateReport
-  #   arguments:
-  #     request:
-  #       ReportRequest:
-  #         "@type": CampaignPerformanceReportRequest
-  #         Format: Csv
-  #         ReportName: DailyCampaignPerformance
-  #         Aggregation: Daily
-  #         Scope:
-  #           AccountIds: [9876543]
-  #         Time:
-  #           PredefinedTime: Yesterday
+        AccountId: "{{ partition.account_id }}"
+        CampaignType: [Search, Shopping, PerformanceMax]   # without it, only Search
+      # account_id / customer_id: the SOAP header's account and customer (defaults: the request's, the connection's)
+    records: {path: Campaign}          # one record per campaign in the response
+  # Reports: ReportingService.SubmitGenerateReport with a ReportRequest (the connector polls and downloads it)
 
 transform:
   mode: page
   steps:
-    - name: final_campaigns
+    - name: campaigns
       select: |
-        SELECT 
-          Campaign.Id::BIGINT AS campaign_id,
-          Campaign.Name AS campaign_name,
-          Campaign.Status AS status,
-          Campaign.BudgetType AS budget_type,
-          Campaign.DailyBudget::DOUBLE AS daily_budget
-        FROM active_campaigns
+        SELECT partition->>'account_id'         AS account_id,
+               record->>'Id'                    AS campaign_id,
+               record->>'Name'                  AS campaign_name,
+               record->>'Status'                AS status,
+               record->>'CampaignType'          AS campaign_type,
+               (record->>'DailyBudget')::DOUBLE AS daily_budget
+        FROM raw_campaigns
 
 export:
   campaigns:
-    step: final_campaigns
-    primary_key: [campaign_id]
+    step: campaigns
+    primary_key: [account_id, campaign_id]
 ```
 
 ### Transform & Data Shaping
 
 - Emits records as nested JSON dictionaries representing deserialized SOAP responses.
-- In `transform` steps, nested fields can be addressed directly in DuckDB SQL using dot notation or struct unpacking.
+- A transform reads each record from the request's table as the column `record` (and the partition's values as
+  `partition`): extract values with `->>` (`record->>'Id'`); `records: {path: Campaign}` makes each item of the
+  response's `Campaign` list one record.
 
 ## Engines
 
