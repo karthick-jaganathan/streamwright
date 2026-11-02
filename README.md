@@ -75,7 +75,7 @@ StreamWright is layered so that **what to extract** (a customer's YAML source), 
   networks) locally, in Docker, or as Kubernetes Jobs writing to an object-storage warehouse.
 
 The layers, the `streamwright run` flow and the orchestration flow — with sequence diagrams — are in
-[docs/architecture.md](docs/architecture.md). Orchestration details are in the
+[the architecture page](https://streamwright.web.app/docs/architecture/). Orchestration details are in the
 [orchestration documentation](https://github.com/karthick-jaganathan/streamwright-orchestration).
 
 ## Repository layout
@@ -84,7 +84,7 @@ The layers, the `streamwright run` flow and the orchestration flow — with sequ
 core/          streamwright: the `streamwright` CLI, the runtime and streamwright validate
 connectors/<name>/        one distribution per connector, with its own tests and README
 examples/sources/        example source folders, validated in CI
-docs/                  documentation site, the source format design and the JSON Schemas
+docs/                  design documents (connector contract, source format) and the JSON Schemas
 tests/                 the core test suite
 ```
 
@@ -112,7 +112,9 @@ make test                   # python -m pytest tests connectors -q
 make validate               # streamwright validate --strict configs
 ```
 
-See [docs/contributing.md](docs/contributing.md).
+Adding a connector: see [connectors/README.md](connectors/README.md) and the
+[connector contract](docs/design/connector-contract.md). User documentation:
+<https://streamwright.web.app/docs/>.
 
 ## License
 
