@@ -111,11 +111,24 @@
               "additionalProperties": false,
               "properties": {
                 "<<": {},
-                "client_id": {},
-                "client_secret": {},
-                "refresh_token": {},
-                "scopes": {},
-                "token_url": {},
+                "client_id": {
+                  "type": "string"
+                },
+                "client_secret": {
+                  "type": "string"
+                },
+                "refresh_token": {
+                  "type": "string"
+                },
+                "scopes": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "token_url": {
+                  "type": "string"
+                },
                 "type": {}
               },
               "required": [
@@ -142,10 +155,19 @@
               "additionalProperties": false,
               "properties": {
                 "<<": {},
-                "in": {},
-                "name": {},
+                "in": {
+                  "enum": [
+                    "header",
+                    "query"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                },
                 "type": {},
-                "value": {}
+                "value": {
+                  "type": "string"
+                }
               },
               "required": [
                 "name",
@@ -169,7 +191,9 @@
               "additionalProperties": false,
               "properties": {
                 "<<": {},
-                "token": {},
+                "token": {
+                  "type": "string"
+                },
                 "type": {}
               },
               "required": [
@@ -193,9 +217,13 @@
               "additionalProperties": false,
               "properties": {
                 "<<": {},
-                "password": {},
+                "password": {
+                  "type": "string"
+                },
                 "type": {},
-                "username": {}
+                "username": {
+                  "type": "string"
+                }
               },
               "required": [
                 "username",
@@ -242,6 +270,11 @@
         "description": {
           "type": "string"
         },
+        "file_name": {
+          "description": "The export's file inside a file output's directory (folders allowed), a template with {{ export }}, {{ source }}, {{ today }}, {{ timestamp }} and {{ config.NAME }}; --file-name replaces it.",
+          "minLength": 1,
+          "type": "string"
+        },
         "primary_key": {
           "items": {
             "type": "string"
@@ -261,6 +294,34 @@
     },
     "http_request": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "params_encoding": {
+                "const": "plain"
+              }
+            },
+            "required": [
+              "params_encoding"
+            ]
+          },
+          "then": {
+            "properties": {
+              "params": {
+                "additionalProperties": {
+                  "not": {
+                    "type": [
+                      "object",
+                      "array"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "<<": {},
         "headers": {
@@ -309,7 +370,10 @@
           "pattern": "^[0-9]+d$",
           "type": "string"
         },
-        "start": {},
+        "start": {
+          "pattern": "^(?:today|-?[0-9]+d|[0-9]{4}-[0-9]{2}-[0-9]{2}|\\{\\{.*\\}\\})$",
+          "type": "string"
+        },
         "window": {
           "description": "whole days, at least 1d, e.g. 1d, 7d",
           "pattern": "^0*[1-9][0-9]*d$",
@@ -324,6 +388,148 @@
     },
     "input": {
       "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "string"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "default": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "integer"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "default": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "number"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "default": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "boolean"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "default": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "date"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "default": {
+                "anyOf": [
+                  {
+                    "pattern": "^(?:today|-?[0-9]+d|[0-9]{4}-[0-9]{2}-[0-9]{2}|\\{\\{.*\\}\\})$",
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "list"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "default": {
+                "type": [
+                  "array",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "items"
+            ]
+          }
+        }
+      ],
       "properties": {
         "<<": {},
         "default": {
@@ -743,11 +949,6 @@
               },
               {
                 "required": [
-                  "headers"
-                ]
-              },
-              {
-                "required": [
                   "async_job"
                 ]
               }
@@ -804,11 +1005,6 @@
                 "required": [
                   "arguments"
                 ]
-              },
-              {
-                "required": [
-                  "headers"
-                ]
               }
             ]
           },
@@ -824,15 +1020,6 @@
         },
         "async_job": {
           "$ref": "#/definitions/async_job"
-        },
-        "headers": {
-          "additionalProperties": {
-            "type": [
-              "string",
-              "integer"
-            ]
-          },
-          "type": "object"
         },
         "http": {
           "$ref": "#/definitions/http_request"
@@ -998,16 +1185,6 @@
         "arguments": {
           "type": "object"
         },
-        "headers": {
-          "additionalProperties": {
-            "type": [
-              "string",
-              "integer"
-            ]
-          },
-          "description": "Per-request headers the connector supports, e.g. CustomerAccountId (microsoft_ads).",
-          "type": "object"
-        },
         "method": {
           "type": "string"
         },
@@ -1069,6 +1246,12 @@
         "incremental": {
           "$ref": "#/definitions/incremental"
         },
+        "kind": {
+          "enum": [
+            "stream"
+          ],
+          "type": "string"
+        },
         "name": {
           "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
           "type": "string"
@@ -1076,13 +1259,15 @@
         "on_partition_error": {
           "enum": [
             "fail",
-            "skip"
+            "skip",
+            "warn"
           ]
         },
         "partitions": {
           "items": {
             "$ref": "#/definitions/partition"
           },
+          "minItems": 1,
           "type": "array"
         },
         "rate_limit": {
@@ -1138,7 +1323,7 @@
       "type": "object"
     }
   },
-  "description": "One stream of a source folder: streams/<name>.yaml, where the file name is the stream name. Generated by `streamwright-validate --export-schema`; run streamwright-validate on the folder for the full set of checks.",
+  "description": "One stream of a source folder: streams/<name>.yaml, where the file name is the stream name. Generated by `streamwright validate --export-schema`; run `streamwright validate` on the folder for the full set of checks.",
   "properties": {
     "<<": {},
     "description": {
@@ -1159,16 +1344,24 @@
     "incremental": {
       "$ref": "#/definitions/incremental"
     },
+    "kind": {
+      "enum": [
+        "stream"
+      ],
+      "type": "string"
+    },
     "on_partition_error": {
       "enum": [
         "fail",
-        "skip"
+        "skip",
+        "warn"
       ]
     },
     "partitions": {
       "items": {
         "$ref": "#/definitions/partition"
       },
+      "minItems": 1,
       "type": "array"
     },
     "rate_limit": {

@@ -1,0 +1,113 @@
+# ==============================================================================
+# Pipeline: Kafka Event-Driven Ingestion to Delta Lake
+# Engine:   StreamWright DuckDBJob (Zero-JVM In-Process Lakehouse Engine)
+# Pattern:  Kafka / Event Notification -> Dynamic File URI Resolution
+#           -> Multi-Schema Multi-File Read (schema_mode: by_name, row_index: row_id)
+#           -> Business Transformation -> In-Process ACID Delta Lake Merge
+# ==============================================================================
+
+kind: DuckDBJob
+version: 1
+name: kafka_order_files
+description: Consumes file arrival notifications, dynamically discovers file paths, reads multi-schema files with lazy per-file row numbering, and performs ACID merge into Delta Lake.
+
+connections:
+  # Notification bus (Kafka topic peek/consume or synthetic incoming queue)
+  bus:
+    provider: kafka
+    bootstrap_servers: "localhost:9092"
+    security_protocol: PLAINTEXT
+
+  # Landing storage: S3, GCS, Azure, or local directory
+  landing:
+    provider: files
+    roots: ["data/landing/"]
+
+  # Lakehouse Delta Lake target
+  lake_delta:
+    provider: deltalake
+    roots: ["data/lake/"]
+
+steps:
+  # Step 1: Peek / consume arrival notifications from Kafka bus
+  - name: file_arrivals
+    connection: bus
+    service: message
+    method: read
+    arguments:
+      destination: lake.s3_file_events.v1
+      from: earliest
+      max_messages: 500
+      max_wait: 5s
+
+  # Step 2: Parse incoming JSON message payload
+  - name: parsed_file_events
+    sql: |
+      SELECT
+        "offset" AS message_offset,
+        json_extract_string(value, '$.file_uri') AS file_uri,
+        json_extract_string(value, '$.client_id') AS client_id
+      FROM file_arrivals
+
+  # Step 3: Deduplicate file URIs across the batch
+  - name: distinct_files
+    materialize: table
+    sql: |
+      SELECT DISTINCT file_uri, client_id
+      FROM parsed_file_events
+      WHERE file_uri IS NOT NULL
+
+  # Step 4: Multi-file multi-schema read directly from dynamic paths
+  # - path: dynamically queries distinct file URIs from step 3
+  # - schema_mode: by_name (unions columns by name without positional drift)
+  # - row_index: attaches per-file row numbering resetting for each file
+  - name: file_contents
+    connection: landing
+    read: auto
+    path: "{{ distinct_files.file_uri }}"
+    schema_mode: by_name
+    row_index: row_id
+    options:
+      header: true
+
+  # Step 5: Business Transformation & Normalization
+  - name: processed_orders
+    sql: |
+      SELECT
+        f.order_id,
+        f.client_id,
+        f.item_name,
+        CAST(f.amount AS DOUBLE) AS amount,
+        ROUND(CAST(f.amount AS DOUBLE) * 0.08, 2) AS tax,
+        ROUND(CAST(f.amount AS DOUBLE) * 1.08, 2) AS total_amount,
+        CAST(f.event_ts AS TIMESTAMP) AS event_ts,
+        CAST(f.event_ts AS DATE) AS event_date,
+        f.row_id,
+        filename AS source_file
+      FROM file_contents f
+
+outputs:
+  # Output: In-Process ACID Delta Lake Merge
+  - name: delta_orders_merge
+    connection: lake_delta
+    step: processed_orders
+    path: orders_delta          # relative to the connection's first root
+    mode: merge
+    condition: "target.order_id = source.order_id AND target.client_id = source.client_id"
+    target_predicate: "target.event_date IN ({{ processed_orders.event_date }})"
+    partition_by: [event_date]
+    schema_evolution: add_columns
+    when_matched:
+      - action: update
+        set:
+          item_name: source.item_name
+          amount: source.amount
+          tax: source.tax
+          total_amount: source.total_amount
+          event_ts: source.event_ts
+          source_file: source.source_file
+    when_not_matched:
+      - action: insert
+
+runtime:
+  threads: 4

@@ -1,0 +1,97 @@
+kind: DuckDBJob
+version: 1
+name: files_orders
+description: Harmonizes multi-currency orders across customers and generates both warehouse tables and partitioned Parquet exports.
+
+spec:
+  config:
+    min_amount_usd: {type: number, default: 50.0}
+
+connections:
+  raw_data:
+    provider: files
+    roots: [data]          # relative to this job's folder
+
+  analytics_warehouse:
+    provider: duckdb
+    path: /tmp/orders_analytics.duckdb
+
+  lake_export:
+    provider: files
+    roots: [/tmp/orders_lake]
+
+steps:
+  - name: raw_orders
+    description: Read orders from Parquet format
+    connection: raw_data
+    read: parquet
+    path: orders.parquet
+    materialize: view
+
+  - name: raw_customers
+    description: Read customer master data from CSV
+    connection: raw_data
+    read: csv
+    path: customers.csv
+    options:
+      header: true
+      delimiter: ","
+    materialize: view
+
+  - name: raw_fx
+    description: Read foreign exchange rates from JSON
+    connection: raw_data
+    read: json
+    path: fx_rates.json
+    materialize: view
+
+  - name: harmonized_orders
+    description: Join orders with customer profiles and normalize amounts to USD
+    materialize: table
+    sql: |
+      SELECT
+        o.order_id,
+        o.order_date,
+        c.customer_id,
+        c.customer_name,
+        c.tier AS customer_tier,
+        c.country,
+        o.amount AS original_amount,
+        o.currency AS original_currency,
+        ROUND(o.amount * COALESCE(fx.rate_to_usd, 1.0), 2) AS amount_usd
+      FROM raw_orders o
+      LEFT JOIN raw_customers c ON o.customer_id = c.customer_id
+      LEFT JOIN raw_fx fx ON o.currency = fx.currency
+
+  - name: high_value_orders
+    description: Filter orders meeting minimum USD threshold
+    materialize: view
+    sql: |
+      SELECT *
+      FROM harmonized_orders
+      WHERE amount_usd >= {{ config.min_amount_usd }}
+
+outputs:
+  - name: warehouse_fact_orders
+    description: ACID merge into analytics DuckDB warehouse
+    connection: analytics_warehouse
+    step: harmonized_orders
+    table: fact_orders
+    mode: merge
+    primary_key:
+      - order_id
+
+  - name: country_lake_export
+    description: Export high-value orders, one Parquet file per country
+    connection: lake_export
+    step: high_value_orders
+    path: high_value
+    format: parquet
+    mode: overwrite
+    split_by:
+      - country
+    file_name: "orders_{country}_{today}.parquet"
+
+runtime:
+  threads: 4
+  memory_limit: 1GB

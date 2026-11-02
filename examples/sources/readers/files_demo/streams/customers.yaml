@@ -7,7 +7,7 @@ incremental:
 requests:
   - name: raw_customers
     sdk: files
-    service: file
+    service: object
     method: read
     arguments:
       path: "customers/{{ window.start }}.jsonl"

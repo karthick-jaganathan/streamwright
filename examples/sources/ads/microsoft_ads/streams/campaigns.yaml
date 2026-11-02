@@ -7,8 +7,9 @@ requests:
     service: CampaignManagementService
     method: GetCampaignsByAccountId
     arguments:
-      AccountId: "{{ partition.account_id }}"
-      CampaignType: [Search, Shopping, DynamicSearchAds, Audience, PerformanceMax]   # without it, only Search
+      request:
+        AccountId: "{{ partition.account_id }}"
+        CampaignType: [Search, Shopping, DynamicSearchAds, Audience, PerformanceMax]   # without it, only Search
     records: {path: Campaign}
 transform:
   mode: page

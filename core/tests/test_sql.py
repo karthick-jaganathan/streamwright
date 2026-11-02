@@ -3,6 +3,7 @@ import json
 import os
 import time
 from decimal import Decimal
+from types import MappingProxyType
 
 import pytest
 import yaml
@@ -14,11 +15,11 @@ from streamwright.core.runtime.testing import MemoryOutput, page_stream
 
 TODAY = datetime.date(2026, 10, 3)
 
-CAMPAIGNS = [
+CAMPAIGNS = (
     {"campaign": {"id": "11", "name": "O'Brien", "status": "ENABLED"},
      "metrics": {"clicks": "40", "impressions": "1000", "cost_micros": "12345678"}, "segments": {"date": "2026-10-02"}},
     {"campaign": {"id": "12", "name": "Generic", "status": "PAUSED"}, "segments": {"date": "2026-10-02"}},
-]
+)
 
 SELECT = """
 SELECT partition->>'account_id'                                      AS account_id,
@@ -36,7 +37,7 @@ FROM records
 """
 
 
-INCREMENTAL = {"cursor_field": "date", "start": "2026-10-02", "window": "1d"}
+INCREMENTAL = MappingProxyType({"cursor_field": "date", "start": "2026-10-02", "window": "1d"})
 
 
 def source(api, request=None, select=SELECT, primary_key=("account_id", "campaign_id", "date"), incremental=INCREMENTAL,
@@ -167,7 +168,7 @@ def test_step_values_become_plain_data(api):
      "WITH queries cannot be named pg_settings"),
     ("WITH PG_Settings AS (SELECT setting FROM pg_settings) SELECT * FROM PG_Settings",
      "WITH queries cannot be named pg_settings"),
-    ("PIVOT records ON (record->>'k') USING count(*)", "found: CREATE, SELECT (list the values of a PIVOT"),
+    ("PIVOT records ON (record->>'k') USING count(*)", "(list the values of a PIVOT"),
     ("SELECT get_block_size('memory') AS b FROM records", "function(s) get_block_size are not allowed"),
     ("SELECT write_log('x') AS w FROM records", "function(s) write_log are not allowed"),
     ("SELECT 1 AS x; DROP TABLE records", "one SELECT statement, found: SELECT, DROP"),
@@ -288,7 +289,7 @@ def test_schemas_match_values_and_json_is_data():
 def test_queries_have_a_time_limit():
     sandbox = sql.Sandbox(timeout=0.2)
     try:
-        with pytest.raises(sql.SqlError, match="step 'shaped': the query took longer than 0.2s"):
+        with pytest.raises(sql.SqlError, match=r"step 'shaped': the query took longer than 0\.2s"):
             shaped(sandbox, "SELECT count(*) AS n FROM range(100000000000) a, records", [{}], {"today": TODAY})
         assert shaped(sandbox, "SELECT count(*) AS n FROM records", [{}, {}]) == [{"n": 2}]
     finally:
@@ -302,7 +303,7 @@ def test_the_time_limit_also_stops_a_statement_started_after_it():
             time.sleep(0.3)  # the limit passes between two statements: the next one must still stop
             return sandbox.connection.execute("SELECT sum(hash(i) % 7) FROM range(300000000) t(i)").fetchall()
         started = time.time()
-        with pytest.raises(sql.SqlError, match="took longer than 0.1s"):
+        with pytest.raises(sql.SqlError, match=r"took longer than 0\.1s"):
             sandbox._timed(work)
         assert time.time() - started < 2.0
         assert sandbox.connection.execute("SELECT 42").fetchone() == (42,)  # no interrupt reaches the next query

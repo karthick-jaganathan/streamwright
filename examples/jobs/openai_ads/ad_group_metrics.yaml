@@ -1,0 +1,75 @@
+kind: DuckDBJob
+version: 1
+name: openai_ads_ad_group_metrics
+description: Pulls live OpenAI Ads ad groups via the openai_ads connector, calculates status metrics in DuckDB, and merges into the analytical warehouse.
+
+spec:
+  config:
+    account_id: {type: string}
+  secrets:
+    openai_ads_key: {type: string}
+
+connections:
+  analytics_dw:
+    provider: duckdb
+    path: /tmp/openai_dw.duckdb
+
+steps:
+  # STEP 1: Ingest ad groups live from OpenAI Ads API
+  - name: raw_ad_groups
+    description: Fetch ad groups via the streamwright openai_ads source
+    source: ../../sources/ads/openai_ads     # relative to this job's folder
+    stream: ad_groups
+    config:
+      account_ids:
+        - "{{ config.account_id }}"
+
+  # STEP 2: Aggregate status metrics with DuckDB SQL
+  - name: ad_group_metrics
+    description: Compute aggregate status metrics across ad groups
+    materialize: table
+    sql: |
+      SELECT
+        account_id,
+        status,
+        COUNT(*) AS total_ad_groups,
+        COUNT(CASE WHEN bid_strategy IS NOT NULL THEN 1 END) AS with_bidding_strategy,
+        MIN(created_at) AS earliest_created,
+        MAX(updated_at) AS latest_updated
+      FROM raw_ad_groups
+      GROUP BY account_id, status
+
+  # STEP 3: Filter active ad groups
+  - name: active_groups
+    description: Filter active ad groups for warehouse sync
+    materialize: view
+    sql: |
+      SELECT
+        account_id,
+        ad_group_id,
+        ad_group_name,
+        status,
+        bid_strategy
+      FROM raw_ad_groups
+      WHERE status = 'active'
+
+outputs:
+  # Output 1: Save aggregate metrics table
+  - name: save_metrics
+    connection: analytics_dw
+    step: ad_group_metrics
+    table: ad_group_metrics
+    mode: overwrite
+
+  # Output 2: Merge active ad groups on primary key
+  - name: save_active_groups
+    connection: analytics_dw
+    step: active_groups
+    table: active_ad_groups
+    mode: merge
+    primary_key:
+      - ad_group_id
+
+runtime:
+  threads: 4
+  memory_limit: 1GB

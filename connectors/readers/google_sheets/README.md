@@ -61,3 +61,16 @@ requests:
     arguments:
       spreadsheet_id: "{{ config.spreadsheet_id }}"
 ```
+
+## Engines
+
+The package registers one entry point, `streamwright.connectors` -> `streamwright.connectors.google_sheets:CONNECTOR`
+(connector contract v1). Engines load the adapter they need from `CONNECTOR.adapters`; the vendor facts (credential
+handling, the Sheets client, column naming) live once in `client.py`.
+
+| Engine | Adapter | Needs |
+|---|---|---|
+| source (`streamwright run`, DuckDBJob call steps) | `engines/source.py` | nothing more |
+| SparkJob | `engines/spark.py` | the `[spark]` extra (`pip install "./connectors/readers/google_sheets[spark]"`); reads on the driver and pins the records for replay |
+
+The user guide (`guide.md`, shipped with the package) has the generated tables of connection fields and arguments.

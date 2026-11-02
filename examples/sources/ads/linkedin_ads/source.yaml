@@ -11,7 +11,7 @@ spec:
   config:
     account_ids: {type: list, items: string, description: Sponsored Ad Account IDs}
     api_version: {type: string, default: "202401", description: "LinkedIn Version header (YYYYMM)"}
-    start_date: {type: date, required: false, description: "The start date for performance metrics, e.g. 2026-01-01"}
+    start_date: {type: date, default: "-30d", description: "The start date for performance metrics, e.g. 2026-01-01"}
   secrets:
     linkedin_access_token: {type: string}
 

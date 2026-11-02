@@ -10,7 +10,7 @@ description: OpenAI Ads performance and metadata streams.
 spec:
   config:
     account_ids: {type: list, items: string, description: Ad account IDs}
-    start_date: {type: date, required: false, description: "The start date for performance metrics, e.g. 2026-01-01"}
+    start_date: {type: date, default: "-30d", description: "The start date for performance metrics, e.g. 2026-01-01"}
   secrets:
     openai_ads_key: {type: string}
 

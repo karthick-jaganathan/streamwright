@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-mongodb"
-version = "0.0.1"
+version = "0.0.2"
 description = "StreamWright - MongoDB connector (read-only document streaming from MongoDB collections and aggregation pipelines)"
 readme = "README.md"
 license = "Apache-2.0"
@@ -16,16 +16,18 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "streamwright~=0.1.0",
+    "streamwright~=0.1.9",
     "pymongo>=4.6.0",
 ]
+
+[project.optional-dependencies]
+spark = ["streamwright-spark[spark]~=0.1.0"]
 
 [project.urls]
 Homepage = "https://streamwright.web.app"
@@ -33,9 +35,15 @@ Documentation = "https://streamwright.web.app/docs/"
 Repository = "https://github.com/karthick-jaganathan/streamwright"
 "Issue Tracker" = "https://github.com/karthick-jaganathan/streamwright/issues"
 
+# Connector contract v1 (docs/design/connector-contract.md): one entry point, the CONNECTOR definition; engines load
+# its adapters (engines/source.py, engines/spark.py) when a job uses them.
 [project.entry-points."streamwright.connectors"]
-mongodb = "streamwright.connectors.mongodb.connector:MongoDBConnector"
+mongodb = "streamwright.connectors.mongodb:CONNECTOR"
 
 [tool.setuptools]
+# src layout: streamwright and streamwright.connectors are namespace packages shared with the other StreamWright distributions
 package-dir = {"" = "src"}
-packages = ["streamwright.connectors.mongodb"]
+packages = ["streamwright.connectors.mongodb", "streamwright.connectors.mongodb.engines"]
+
+[tool.setuptools.package-data]
+"streamwright.connectors.mongodb" = ["guide.md"]

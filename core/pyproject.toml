@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright"
-version = "0.1.8"
+version = "0.1.9"
 description = "Declarative data connectors — pull from APIs, files and databases with YAML, shape with SQL, write anywhere."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -16,18 +16,17 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "pyyaml==6.0.2",
     "requests>=2.25,<3",
     # `select`: the SQL that shapes each stream's records runs in an embedded DuckDB (which needs pytz for
     # timestamps with time zones)
-    "duckdb>=1.5.2",
+    "duckdb>=2.0,<2.1",
     "pytz",
 ]
 
@@ -46,17 +45,28 @@ Repository = "https://github.com/karthick-jaganathan/streamwright"
 streamwright = "streamwright.core.cli:main"
 sw = "streamwright.core.cli:main"
 
+[project.entry-points."streamwright.commands"]
+duckdb = "streamwright.core.cli.commands.jobs:register"
+
+[project.entry-points."streamwright.job_kinds"]
+DuckDBJob = "streamwright.core.jobs.duckdb.plugin:JOB_ENGINE"
+
+[project.entry-points."streamwright.duckdb.connectors"]
+# the DuckDBJob engine's built-in adapters; every other provider's adapter ships with its connector
+duckdb = "streamwright.core.jobs.duckdb.adapter:DuckDBCatalogAdapter"
+
 
 [tool.setuptools]
 # src layout: `streamwright` is a namespace package shared with the connector distributions (streamwright.connectors.*)
 package-dir = {"" = "src"}
-packages = [
-    "streamwright.core",
-    "streamwright.core.engine",
-    "streamwright.core.outputs",
-    "streamwright.core.net",
-    "streamwright.core.config",
-    "streamwright.core.validation",
-    "streamwright.core.runtime",
-]
 
+[tool.setuptools.packages.find]
+# every streamwright.core subpackage ships (jobs, sql, ...); `streamwright` itself stays a namespace
+where = ["src"]
+include = ["streamwright.core*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"streamwright.core" = ["py.typed"]
+"streamwright.core.sdk" = ["py.typed"]
+"streamwright.core.jobs.duckdb" = ["guide.md"]

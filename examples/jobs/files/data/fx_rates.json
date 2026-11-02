@@ -1,0 +1,14 @@
+[
+  {
+    "currency": "USD",
+    "rate_to_usd": 1.0
+  },
+  {
+    "currency": "CAD",
+    "rate_to_usd": 0.74
+  },
+  {
+    "currency": "GBP",
+    "rate_to_usd": 1.3
+  }
+]

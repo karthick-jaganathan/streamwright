@@ -1,0 +1,32 @@
+# Code standards (docs/design/connector-contract.md section 7), with scripts/check_code_standards.py for what ruff
+# cannot check. Blocking: `make lint` runs both, and `make test` and CI run `make lint`.
+line-length = 120
+target-version = "py311"
+# .contract-repos: CI checkouts of the companion repositories, which lint themselves
+extend-exclude = ["docs/_site", "**/build", "**/.venv", ".contract-repos"]
+
+[lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "C4", "PIE", "RET", "PL", "RUF", "N", "C90"]
+# PLC0415 (import outside top level), PLW0603 (global statement) and RUF012 (mutable class attribute) are selected
+# through PL and RUF; they are listed here to document that they are part of the standard.
+extend-select = ["PLC0415", "PLW0603", "RUF012"]
+ignore = [
+    "PLR0913",  # too many arguments: keyword-only parameters are the API style of the SDK
+    "PLR2004",  # magic value comparison: protocol constants read better inline
+    "UP031",    # printf-style formatting is the codebase's style
+]
+
+[lint.mccabe]
+max-complexity = 15
+
+[lint.pylint]
+max-branches = 15
+max-returns = 8
+max-statements = 60
+
+[lint.isort]
+known-first-party = ["streamwright", "streamwright_mcp"]
+split-on-trailing-comma = false
+
+[lint.per-file-ignores]
+"**/tests/**" = ["PLR2004", "N802"]

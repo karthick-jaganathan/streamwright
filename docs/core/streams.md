@@ -78,7 +78,8 @@ Steps run on a locked-down embedded DuckDB:
 ## `page` vs `run` mode
 
 - **`page`** reads one request, with no request partitions. The steps run on each page, each export is written per
-  page, and state is saved after each window.
+  page, and state is saved after each window. Python callers can inspect bookmarks and skipped partitions with
+  `SourceRunner.collect(stream, state=prior_state)` (see [Python API]({{ site.baseurl }}/core/python-api/)).
 - **`run`** can read several requests. Requests and steps run in dependency order (a request partitioned `from:` a step
   runs after it), each step once over everything the run read. Export keys must be unique and non-null, rows are
   written ordered by them, and state is saved after the exports. A request using {% raw %}`{{ window.* }}`{% endraw %}

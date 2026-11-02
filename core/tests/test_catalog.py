@@ -3,12 +3,13 @@
 import io
 import json
 import sys
+from types import MappingProxyType
 
 import pytest
 
 from streamwright.core import catalog, cli
 
-CATALOG = {
+CATALOG = MappingProxyType({
     "files": {"title": "Files", "family": "readers", "summary": "Local files", "trust": "official",
               "install": {"git": "git+https://example.test/sw.git@abc#subdirectory=connectors/readers/files"}},
     "google_ads": {"title": "Google Ads", "family": "ads", "summary": "Google Ads reports", "trust": "official",
@@ -20,7 +21,7 @@ CATALOG = {
     "imaged": {"title": "Imaged", "family": "readers", "summary": "An image", "trust": "official",
                "install": {"image": "ghcr.io/org/imaged@sha256:" + "0" * 64}},
     "empty": {"title": "Empty", "family": "readers", "summary": "No source", "trust": "official", "install": {}},
-}
+})
 
 
 class TTY(io.StringIO):
@@ -36,20 +37,21 @@ class TTY(io.StringIO):
 def pip(monkeypatch):
     """The catalog above; records each pip command instead of running it."""
     calls = []
-    monkeypatch.setattr(catalog, "connectors", lambda hub_url=None: CATALOG)
+    monkeypatch.setattr(catalog, "connectors", lambda hub_url=None: catalog._Catalog(CATALOG, trusted_origin=True))
     monkeypatch.setattr(catalog.subprocess, "call", lambda cmd: calls.append(cmd) or 0)
     monkeypatch.setattr(sys, "stdin", TTY(False))
     return calls
 
 
 def specs(cmd):
-    return cmd[cmd.index("install") + 1:]
+    return cmd[cmd.index("--") + 1:]
 
 
 def test_one_key_installs_its_source(pip):
     assert catalog.install("files") == 0
     assert [specs(cmd) for cmd in pip] == [[CATALOG["files"]["install"]["git"]]]
     assert pip[0][:4] == [sys.executable, "-m", "pip", "install"]
+    assert pip[0][4] == "--"
 
 
 def test_several_keys_install_with_one_pip_command_in_order_without_repeats(pip):
@@ -130,7 +132,10 @@ def test_cli_search_joins_its_words(pip, capsys):
 
 # --- where the catalog comes from: the live hub, else the last fetched copy, else the bundled one ---
 
-GOOD = {"schema_version": 1, "connectors": {"files": CATALOG["files"]}}
+
+def good_index():
+    """A valid hub index (a new one each time: the catalog code may keep it)."""
+    return {"schema_version": 1, "connectors": {"files": CATALOG["files"]}}
 
 
 class Response:
@@ -162,16 +167,16 @@ def hub(monkeypatch, tmp_path):
 
 
 def test_the_live_hub_is_the_default_and_is_cached(hub, capsys):
-    hub["responses"][catalog.DEFAULT_HUB] = GOOD
-    assert catalog.load() == GOOD
+    hub["responses"][catalog.DEFAULT_HUB] = good_index()
+    assert catalog.load() == good_index()
     assert hub["urls"] == [catalog.DEFAULT_HUB]
-    assert json.loads(catalog.CACHE.read_text()) == GOOD
+    assert json.loads(catalog.CACHE.read_text()) == good_index()
     assert capsys.readouterr().err == ""
 
 
 def test_the_hub_url_can_be_set(hub, monkeypatch):
-    hub["responses"]["https://hub.example/a.json"] = GOOD
-    hub["responses"]["https://hub.example/b.json"] = GOOD
+    hub["responses"]["https://hub.example/a.json"] = good_index()
+    hub["responses"]["https://hub.example/b.json"] = good_index()
     monkeypatch.setenv(catalog.HUB_ENV, "https://hub.example/a.json")
     catalog.load()
     catalog.load("https://hub.example/b.json")                    # --hub-url wins over the environment
@@ -179,8 +184,8 @@ def test_the_hub_url_can_be_set(hub, monkeypatch):
 
 
 def test_an_unreachable_hub_falls_back_to_the_last_fetched_copy_with_a_warning(hub, capsys):
-    catalog.CACHE.write_text(json.dumps(GOOD))
-    assert catalog.load() == GOOD
+    catalog.CACHE.write_text(json.dumps(good_index()))
+    assert catalog.load() == good_index()
     err = capsys.readouterr().err
     assert "the connector hub %s is unreachable (ConnectionError" % catalog.DEFAULT_HUB in err
     assert "using the copy fetched on" in err
@@ -192,8 +197,31 @@ def test_with_no_fetched_copy_an_unreachable_hub_raises_error(hub):
 
 
 def test_a_malformed_index_is_not_used_nor_cached(hub, capsys):
-    catalog.CACHE.write_text(json.dumps(GOOD))
+    catalog.CACHE.write_text(json.dumps(good_index()))
     hub["responses"][catalog.DEFAULT_HUB] = {"oops": True}
-    assert catalog.load() == GOOD                                   # the good copy, not the bad publish
-    assert json.loads(catalog.CACHE.read_text()) == GOOD
+    assert catalog.load() == good_index()                                   # the good copy, not the bad publish
+    assert json.loads(catalog.CACHE.read_text()) == good_index()
     assert "not a connector catalog" in capsys.readouterr().err
+
+
+def test_custom_hub_cannot_claim_official_trust(hub, monkeypatch, capsys):
+    hub["responses"]["http://external.example/index.json"] = good_index()
+    monkeypatch.setattr(sys, "stdin", TTY(False))
+    assert catalog.install("files", hub_url="http://external.example/index.json") == 2
+    assert "refusing to install community connector 'files'" in capsys.readouterr().err
+
+
+def test_cached_official_claim_cannot_suppress_consent(hub, monkeypatch, capsys):
+    catalog.CACHE.write_text(json.dumps(good_index()))
+    monkeypatch.setattr(sys, "stdin", TTY(False))
+    assert catalog.install("files") == 2
+    assert "refusing to install community connector 'files'" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("source", ["pip", "git"])
+def test_option_like_install_spec_is_rejected(pip, monkeypatch, capsys, source):
+    unsafe = dict(CATALOG, malicious={"trust": "official", "install": {source: "--index-url=evil"}})
+    monkeypatch.setattr(catalog, "connectors", lambda hub_url=None: catalog._Catalog(unsafe, trusted_origin=True))
+    assert catalog.install("malicious") == 2
+    assert not pip
+    assert "invalid install requirement" in capsys.readouterr().err

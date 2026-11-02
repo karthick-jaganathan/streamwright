@@ -163,3 +163,10 @@ credentials.json
 .scout/
 AGENTS.md
 CLAUDE.md
+
+# run output of the example jobs (tables they write next to themselves)
+examples/jobs/deltalake/data/
+
+# local review notes and agent tooling (not part of the project)
+CODE_REVIEW.md
+.agentic-devx/

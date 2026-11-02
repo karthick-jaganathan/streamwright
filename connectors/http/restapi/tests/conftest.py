@@ -15,7 +15,8 @@
 # **************************************************************************/
 
 import pytest
-from streamwright.core.runtime.testing import FakeApi
+
+from streamwright.core.sdk.testing import FakeApi
 
 
 @pytest.fixture

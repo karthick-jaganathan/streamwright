@@ -6,22 +6,29 @@ import json
 import logging
 import re
 import time
+from types import MappingProxyType
 
+import duckdb
 import pytest
 
 from streamwright.core import cli
 from streamwright.core.engine import sql
-from streamwright.core.outputs.output import open_output
 from streamwright.core.engine.runner import SourceError, SourceRunner, partition_key
+from streamwright.core.outputs.output import open_output
 from streamwright.core.runtime.testing import MemoryOutput, page_stream
 
-
 TODAY = datetime.date(2026, 10, 3)
-DAYS = ["2026-10-01", "2026-10-02", "2026-10-03"]
-CAMPAIGNS = [{"id": "c1", "name": "Brand", "account": "a1"}, {"id": "c2", "name": "Generic", "account": "a1"},
-             {"id": "c3", "name": "Other", "account": "a2"}]
-CLICKS = {"c1": 1, "c2": 11, "c3": 21}
-CURSOR = {"type": "cursor", "token_path": "next", "param": "cursor"}
+DAYS = ("2026-10-01", "2026-10-02", "2026-10-03")
+CAMPAIGNS = ({"id": "c1", "name": "Brand", "account": "a1"}, {"id": "c2", "name": "Generic", "account": "a1"},
+             {"id": "c3", "name": "Other", "account": "a2"})
+CLICKS = MappingProxyType({"c1": 1, "c2": 11, "c3": 21})
+
+
+def cursor_paginator():
+    """A cursor paginator: `next` holds the next page's `cursor`."""
+    return {"type": "cursor", "token_path": "next", "param": "cursor"}
+
+
 SELECT_PATH = ("transform", "steps", 0, "select")
 
 
@@ -246,7 +253,8 @@ def test_run_mode_request_reads_every_page_and_later_streams_reuse_its_names(api
     api.routes[("GET", "/other")] = lambda request: (200, {"data": [{"id": 9}]})
     select = "SELECT (record->>'id')::BIGINT AS id FROM records"
     source = source_with(api, run_mode(
-        "items", [{"name": "records", "http": {"path": "/items"}, "records": {"path": "data"}, "paginator": CURSOR}],
+        "items", [{"name": "records", "http": {"path": "/items"}, "records": {"path": "data"},
+                   "paginator": cursor_paginator()}],
         [{"name": "items", "select": select}], {"items": {"step": "items", "primary_key": ["id"]}}),
         page_stream("other", {"http": {"path": "/other"}}, select, records={"path": "data"}))
     output = run(source)
@@ -275,13 +283,13 @@ def test_each_stream_drops_its_tables_when_it_ends(api, monkeypatch):
                                          "SELECT (record->>'id')::BIGINT AS id FROM records",
                                          records={"path": "data"}))
     tables = []
-    run_stream = SourceRunner.run_stream
+    run_stream = SourceRunner._run_stream
 
     def run_and_list_tables(self, stream):
         run_stream(self, stream)
-        tables.append((stream["name"], [row[0] for row in self.workspace().connection.execute(
+        tables.append((stream["name"], [row[0] for row in self._workspace().connection.execute(
             "SELECT table_name FROM duckdb_tables()").fetchall()]))
-    monkeypatch.setattr(SourceRunner, "run_stream", run_and_list_tables)
+    monkeypatch.setattr(SourceRunner, "_run_stream", run_and_list_tables)
     run(source)
     assert tables == [("daily_reports", []), ("items", [])]
 
@@ -330,7 +338,7 @@ def test_page_mode_runs_steps_and_exports_per_page(api):
         data = pages.pop(0)
         return 200, dict({"data": data}, **({"next": "again"} if pages else {}))
     api.routes[("GET", "/items")] = page
-    source = source_with(api, page_stream("items", {"http": {"path": "/items"}, "paginator": CURSOR},
+    source = source_with(api, page_stream("items", {"http": {"path": "/items"}, "paginator": cursor_paginator()},
                                           "SELECT (record->>'id')::BIGINT AS id FROM records",
                                           records={"path": "data"}, primary_key=["id"]))
     assert records(run(source), "items") == [{"id": 2}, {"id": 1}]
@@ -364,7 +372,7 @@ def test_page_mode_windows_state_per_window_and_duplicate_keys_across_pages(api)
     api.routes[("GET", "/items")] = page
     source = source_with(api, page_stream(
         "items", {"name": "items_raw", "http": {"path": "/items", "params": {"day": "{{ window.start }}"}},
-                  "paginator": CURSOR},
+                  "paginator": cursor_paginator()},
         "SELECT (record->>'id')::BIGINT AS id, (record->>'day')::DATE AS day, record->>'page' AS page FROM items_raw",
         records={"path": "data"}, primary_key=["id"],
         incremental={"cursor_field": "day", "start": "2026-10-02", "window": "1d"}))
@@ -380,22 +388,22 @@ class CountingOutput(MemoryOutput):
     """MemoryOutput that counts the columns and schemas written of each export."""
 
     def __init__(self):
-        super(CountingOutput, self).__init__()
+        super().__init__()
         self.written = collections.Counter()
 
     def write_columns(self, name, columns):
         self.written[("columns", name)] += 1
-        super(CountingOutput, self).write_columns(name, columns)
+        super().write_columns(name, columns)
 
     def write_schema(self, name, schema, key_properties):
         self.written[("schema", name)] += 1
-        super(CountingOutput, self).write_schema(name, schema, key_properties)
+        super().write_schema(name, schema, key_properties)
 
 
 def test_page_mode_writes_each_export_schema_once_so_outputs_keep_every_page(api, tmp_path):
     pages = {"": {"data": [{"id": 1}, {"id": 2}], "next": "p2"}, "p2": {"data": [{"id": 3}]}}
     api.routes[("GET", "/items")] = lambda request: (200, pages[request["params"].get("cursor", "")])
-    stream = page_stream("items", {"http": {"path": "/items"}, "paginator": CURSOR},
+    stream = page_stream("items", {"http": {"path": "/items"}, "paginator": cursor_paginator()},
                          "SELECT (record->>'id')::BIGINT AS id FROM records", records={"path": "data"})
     stream["transform"]["steps"].append({"name": "doubled_rows", "select": "SELECT id * 2 AS doubled FROM items"})
     stream["export"]["doubled"] = {"step": "doubled_rows"}
@@ -421,7 +429,6 @@ def test_page_mode_writes_each_export_schema_once_so_outputs_keep_every_page(api
     output = open_output("duckdb:%s:client" % database, source)
     run(source, output=output)
     output.close()
-    import duckdb
     connection = duckdb.connect(str(database), read_only=True)
     try:
         assert connection.execute("SELECT id FROM client.items ORDER BY id").fetchall() == [(1,), (2,), (3,)]
@@ -434,10 +441,15 @@ def test_page_mode_writes_each_export_schema_once_so_outputs_keep_every_page(api
 # * `$name` config inputs in the steps
 # * ----------------------------------
 
-CONFIG_SPEC = {"config": {
-    "client": {"type": "string"}, "limit": {"type": "integer"}, "ratio": {"type": "number"},
-    "on": {"type": "boolean"}, "since": {"type": "date"}, "ids": {"type": "list", "items": "integer"},
-    "names": {"type": "list"}, "missing": {"type": "string", "required": False}}}
+
+def config_spec():
+    """spec.config of every input type."""
+    return {"config": {
+        "client": {"type": "string"}, "limit": {"type": "integer"}, "ratio": {"type": "number"},
+        "on": {"type": "boolean"}, "since": {"type": "date"}, "ids": {"type": "list", "items": "integer"},
+        "names": {"type": "list"}, "missing": {"type": "string", "required": False}}}
+
+
 PARAMETERS = ("SELECT $client AS client, $limit AS limit_value, $ratio AS ratio, $on AS on_value, $since AS since, "
               "$ids AS ids, $names AS names, $missing AS missing, (record->>'id')::BIGINT AS id FROM records "
               "WHERE (record->>'id')::BIGINT <= $limit")
@@ -450,7 +462,7 @@ def test_config_parameters_are_bound_values_with_their_config_types(api, mode):
     stream["transform"]["mode"] = mode
     config = {"client": "O'Brien'); DROP TABLE records; --", "limit": 5, "ratio": 2, "on": True,
               "since": datetime.date(2026, 10, 1), "ids": [1, 2], "names": [], "missing": None}
-    output = run(source_with(api, stream, spec=CONFIG_SPEC), config=config)
+    output = run(source_with(api, stream, spec=config_spec()), config=config)
     # values are data, never SQL; a value that is not given is null; every column has its config type
     assert records(output, "items") == [{
         "client": "O'Brien'); DROP TABLE records; --", "limit_value": 5, "ratio": 2.0, "on_value": True,
@@ -470,12 +482,13 @@ def test_steps_keep_their_column_types_when_config_values_are_null(api, mode):
     stream["transform"]["mode"] = mode
     stream["transform"]["steps"] += [
         # a lambda takes no subquery: this step's parameters are plain casts, and its table gets the planned types
-        {"name": "tagged", "select": "SELECT id, list_transform([id], x -> x + $limit) AS shifted, 'q-' || $client "
+        {"name": "tagged",
+         "select": "SELECT id, list_transform([id], lambda x: x + $limit) AS shifted, 'q-' || $client "
                                      "AS tag FROM items"},
         {"name": "tags", "select": "SELECT id, coalesce(label, 'none') AS label, coalesce(tag, 'none') AS tag "
                                    "FROM items JOIN tagged USING (id)"}]
     stream["export"].update(tagged={"step": "tagged"}, tags={"step": "tags"})
-    source = source_with(api, stream, spec=CONFIG_SPEC)
+    source = source_with(api, stream, spec=config_spec())
     columns = {"items": [("id", "BIGINT"), ("label", "VARCHAR"), ("first_id", "BIGINT")],
                "tagged": [("id", "BIGINT"), ("shifted", "BIGINT[]"), ("tag", "VARCHAR")],
                "tags": [("id", "BIGINT"), ("label", "VARCHAR"), ("tag", "VARCHAR")]}
@@ -494,18 +507,18 @@ def test_steps_keep_their_column_types_when_config_values_are_null(api, mode):
 def test_config_parameters_have_their_types_in_the_checks(api):
     def problems(query):
         return sql.check_source(source_with(api, page_stream("items", {"http": {"path": "/x"}}, query),
-                                            spec=CONFIG_SPEC))
+                                            spec=config_spec()))
     assert problems("SELECT $since + 1 AS next_day, $ids[1] + $limit AS n, $names AS names FROM records") == []
     # where DuckDB takes no subquery (lambdas, `= ANY(list)`, arguments that must be constants)
-    assert problems("SELECT list_transform($ids, x -> x + $limit) AS shifted, strftime($since, $client) AS day "
+    assert problems("SELECT list_transform($ids, lambda x: x + $limit) AS shifted, strftime($since, $client) AS day "
                     "FROM records WHERE $limit = ANY($ids)") == []
     (found,) = problems("SELECT $client + 1 AS x FROM records")
-    assert found[0] == ("streams", 0) + SELECT_PATH and "+(VARCHAR, INTEGER_LITERAL)" in found[1]
-    assert problems("SELECT ? AS x FROM records") == [(("streams", 0) + SELECT_PATH, (
+    assert found[0] == ("streams", 0, *SELECT_PATH) and "+(VARCHAR, INTEGER_LITERAL)" in found[1]
+    assert problems("SELECT ? AS x FROM records") == [(("streams", 0, *SELECT_PATH), (
         "parameters are config inputs named in the query, `$name`: not ? or $1"))]
     assert problems("SELECT $limit AS a, $LIMIT AS b FROM records") == [
-        (("streams", 0) + SELECT_PATH, "`$LIMIT` is not a config input (declare it in spec.config)"),
-        (("streams", 0) + SELECT_PATH, "`$LIMIT` and `$limit` are one parameter to DuckDB (names ignore case): use "
+        (("streams", 0, *SELECT_PATH), "`$LIMIT` is not a config input (declare it in spec.config)"),
+        (("streams", 0, *SELECT_PATH), "`$LIMIT` and `$limit` are one parameter to DuckDB (names ignore case): use "
                                        "one of them")]
 
 
@@ -515,16 +528,20 @@ def test_parameters_that_are_not_config_inputs_stop_the_run_and_secrets_are_neve
     source = source_with(api, stream, spec={"config": {"client": {"type": "string"}},
                                             "secrets": {"token": {"type": "string"}}})
     assert sql.check_source(source) == [
-        (("streams", 0) + SELECT_PATH, "`$nope` is not a config input (declare it in spec.config)"),
-        (("streams", 0) + SELECT_PATH, "`$token` is not a config input (declare it in spec.config)")]
+        (("streams", 0, *SELECT_PATH), "`$nope` is not a config input (declare it in spec.config)"),
+        (("streams", 0, *SELECT_PATH), "`$token` is not a config input (declare it in spec.config)")]
     with pytest.raises(SourceError, match=r"stream 'items': transform.steps\[0\].select: `\$nope` is not a config "
                                           r"input .*`\$token` is not a config input"):
         run(source, config={"client": "x", "token": "secret-token-1"})
     assert api.requests == []
 
 
-STATUSES = [{"id": 1, "status": "ACTIVE"}, {"id": 2, "status": "PAUSED"}, {"id": 3, "status": "REMOVED"}]
-LISTED = {"config": {"statuses": {"type": "list", "items": "string"}, "limit": {"type": "integer"}}}
+STATUSES = ({"id": 1, "status": "ACTIVE"}, {"id": 2, "status": "PAUSED"}, {"id": 3, "status": "REMOVED"})
+
+
+def listed_spec():
+    """spec.config with a list of statuses and a limit."""
+    return {"config": {"statuses": {"type": "list", "items": "string"}, "limit": {"type": "integer"}}}
 
 
 def status_stream(api, condition, mode="page"):
@@ -534,7 +551,7 @@ def status_stream(api, condition, mode="page"):
                          "SELECT (record->>'id')::BIGINT AS id FROM records WHERE " + condition,
                          records={"path": "data"})
     stream["transform"]["mode"] = mode
-    return source_with(api, stream, spec=LISTED)
+    return source_with(api, stream, spec=listed_spec())
 
 
 @pytest.mark.parametrize("mode", ["page", "run"])
@@ -552,7 +569,7 @@ def test_list_parameters_test_membership_with_any_list_contains_or_in(api, mode,
 
 
 def test_list_parameters_compared_as_one_value_are_reported_before_any_request(api):
-    problem = (("streams", 0) + SELECT_PATH, "`$statuses` is a list (VARCHAR[]), which IN and comparisons take as one "
+    problem = (("streams", 0, *SELECT_PATH), "`$statuses` is a list (VARCHAR[]), which IN and comparisons take as one "
                                              "value: use `= ANY($statuses)` or `list_contains($statuses, x)` (to "
                                              "compare whole lists, cast it: `$statuses::VARCHAR[]`)")
     # DuckDB casts each value to a list, which fails on the first record: the checks report it instead
@@ -573,20 +590,20 @@ def test_parameters_are_plain_casts_only_where_duckdb_takes_no_subquery(api):
     # and run
     stream = page_stream("items", {"http": {"path": "/items"}},
                          "SELECT (record->>'id')::BIGINT AS id, $limit AS lim, lim + 1 AS next, "
-                         "TRY(CAST($limit AS TINYINT)) AS small, list_transform([id], x -> x * $limit) AS scaled "
+                         "TRY(CAST($limit AS TINYINT)) AS small, list_transform([id], lambda x: x * $limit) AS scaled "
                          "FROM records", records={"path": "data"})
     stream["transform"]["steps"].append({"name": "joined", "select": "SELECT a.id, b.id AS other FROM items a FULL "
                                                                      "JOIN items b ON a.id = b.id AND b.lim = $limit"})
     stream["export"]["joined"] = {"step": "joined"}
     api.routes[("GET", "/items")] = lambda request: (200, {"data": STATUSES[:1]})
-    source = source_with(api, stream, spec=LISTED)
+    source = source_with(api, stream, spec=listed_spec())
     assert sql.check_source(source) == []
     output = run(source, config={"limit": 2})
     assert records(output, "items") == [{"id": 1, "lim": 2, "next": 3, "small": 2, "scaled": [2]}]
     assert records(output, "joined") == [{"id": 1, "other": 1}]
     # other errors are the query's, though plain casts would compile: `x IN ($limit)` compares text with a number
     assert sql.check_source(status_stream(api, "record->>'status' IN ($limit)")) == [(
-        ("streams", 0) + SELECT_PATH, "Binder Error: Cannot compare values of type VARCHAR and BIGINT in IN/ANY/ALL "
+        ("streams", 0, *SELECT_PATH), "Binder Error: Cannot compare values of type VARCHAR and BIGINT in IN/ANY/ALL "
                                       "clause - an explicit cast is required")]
 
 
@@ -747,7 +764,7 @@ def test_request_partition_sources_without_rows_and_values_matched_as_text(api):
     assert [request["params"]["campaign"] for request in api.calls("/ad_groups")] == ["c1"]
 
 
-class FakeApiStub(object):
+class FakeApiStub:
     url = "http://127.0.0.1:9"
 
 
@@ -765,7 +782,7 @@ def test_request_partitions_read_each_source_once_for_many_stream_partitions():
             "a%d" % account for account in range(1000)]}])
     runner = SourceRunner(source_with(FakeApiStub(), stream), {}, {"token": "secret-token-1"}, output=MemoryOutput(),
                           today=TODAY)
-    sandbox = runner.workspace()
+    sandbox = runner._workspace()
     try:
         sandbox.create_raw("raw_campaigns")
         sandbox.connection.execute(
@@ -773,19 +790,19 @@ def test_request_partitions_read_each_source_once_for_many_stream_partitions():
             "'a' || account), '{}', NULL, NULL, NULL FROM range(1000) a(account), range(100) c(campaign)")
         sandbox.connection.execute("CREATE TABLE campaign_rows AS SELECT 'a' || account AS account_id, "
                                    "'c' || campaign AS campaign_id FROM range(1000) a(account), range(100) c(campaign)")
-        partitions = runner.partitions(stream)
+        partitions = runner.partitions_planner.stream_partitions(stream)
         started = time.time()
         for request in stream["requests"][1:]:
-            resolve = runner.request_partitions(stream, request)
+            resolve = runner.partitions_planner.request_partitions(stream, request)
             found = [resolve(partition) for partition in partitions]
             assert sum(len(partitions_) for partitions_ in found) == 100000
             assert sorted(item["campaign_id"] for item in found[7]) == sorted("c%d" % n for n in range(100))
-            assert set(item["account_id"] for item in found[7]) == {"a7"}
+            assert {item["account_id"] for item in found[7]} == {"a7"}
         assert time.time() - started < 5  # it took minutes when each account read every row
         # with `batch_size`: still one read of the source, each account's own 100 campaigns in lists of up to 30
         request = {"name": "raw_batched", "http": {"path": "/batched"}, "partitions": [
             {"name": "campaign_ids", "from": "raw_campaigns", "field": "Id", "batch_size": 30}]}
-        resolve = runner.request_partitions(stream, request)
+        resolve = runner.partitions_planner.request_partitions(stream, request)
         found = [resolve(partition) for partition in partitions]
         assert sum(len(partitions_) for partitions_ in found) == 4000
         assert [len(item["campaign_ids"]) for item in found[7]] == [30, 30, 30, 10]
@@ -794,11 +811,11 @@ def test_request_partitions_read_each_source_once_for_many_stream_partitions():
         # from a step, scoped by the stream partition field it lists: the same lists of each account's own campaigns
         request = {"name": "raw_batched_rows", "http": {"path": "/batched"}, "partitions": [
             {"from": "campaign_rows", "fields": ["account_id", "campaign_id"], "batch_size": 30}]}
-        resolve = runner.request_partitions(stream, request)
+        resolve = runner.partitions_planner.request_partitions(stream, request)
         found = [resolve(partition) for partition in partitions]
         assert sum(len(partitions_) for partitions_ in found) == 4000
         assert [len(item["campaign_id"]) for item in found[7]] == [30, 30, 30, 10]
-        assert set(item["account_id"] for item in found[7]) == {"a7"}
+        assert {item["account_id"] for item in found[7]} == {"a7"}
         assert sorted(campaign for item in found[7] for campaign in item["campaign_id"]) == sorted(
             "c%d" % n for n in range(100))
         assert time.time() - started < 15
@@ -864,7 +881,7 @@ def test_batch_size_lists_each_stream_partitions_own_values_crossed_with_other_i
     campaigns = {"a1": [{"id": "c1"}, {"id": "c2"}, {"id": "c1"}, {}, {"id": "c3"}], "a2": [{"id": "c4"}], "a3": []}
     api.routes[("GET", "/campaigns")] = lambda request: (200, {"data": campaigns[request["params"]["account"]]})
     api.routes[("POST", "/ads")] = lambda request: (200, {"data": [
-        dict(campaign=campaign, kind=body(request)["kind"]) for campaign in body(request)["campaigns"]]})
+        {"campaign": campaign, "kind": body(request)["kind"]} for campaign in body(request)["campaigns"]]})
     source = source_with(api, run_mode("ads", [
         {"name": "raw_campaigns", "http": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"}},
          "records": {"path": "data"}},
@@ -907,8 +924,8 @@ def test_batch_size_lists_are_read_for_each_window_and_bookmarks_stay_per_stream
     calls = collections.Counter((tuple(request_["campaigns"]), request_["day"])
                                 for request_ in map(body, api.calls("/stats")))
     # per account: 3 lists x 3 windows; the campaign request (no window) once per account
-    assert calls == dict(((campaigns, day), 2) for campaigns in (("c0", "c1"), ("c2", "c3"), ("c4",))
-                         for day in DAYS)
+    assert calls == {(campaigns, day): 2 for campaigns in (("c0", "c1"), ("c2", "c3"), ("c4",))
+                         for day in DAYS}
     assert len(api.calls("/campaigns")) == 2
     assert len(records(output, "stats")) == 2 * 5 * 3
     assert output.states[-1] == {"bookmarks": {"stats": {'{"account": "a1"}': "2026-10-02",
@@ -1038,8 +1055,8 @@ def test_from_stream_children_take_the_values_of_their_parents_export_and_are_pa
     runner.run(["campaigns", "report"])  # their parent runs first, and writes its export
     assert list(output.schemas) == ["accounts", "campaigns", "report"]
     # distinct values of the fields the children need, not the parent's rows
-    assert dict((parent, dict((fields, rows.values) for fields, rows in found.items()))
-                for parent, found in runner.collected.items()) == {
+    assert {parent: {fields: rows.values for fields, rows in found.items()}
+                for parent, found in runner.collected.items()} == {
         "accounts": {("id",): [(1,), (2,)], ("account_id",): [("1",), ("2",)]}}
     # the children run the partitions they have, and are partial like their parent
     assert [request["params"]["account"] for request in api.calls("/campaigns")] == ["1", "1", "1", "2", "2", "2"]
@@ -1062,7 +1079,7 @@ def test_from_stream_parents_have_exactly_one_export_and_the_fields_are_its_colu
     source = source_with(api, parent, child)
     assert sql.check_source(source) == [(("streams", 1, "partitions", 0, "from_stream"), (
         "`from_stream` takes values from the export of stream 'accounts', which has 2 exports: it needs exactly one"))]
-    with pytest.raises(SourceError, match="stream 'campaigns': partitions\\[0\\].from_stream: `from_stream` takes "
+    with pytest.raises(SourceError, match=r"stream 'campaigns': partitions\[0\]\.from_stream: `from_stream` takes "
                                           "values from the export of stream 'accounts', which has 2 exports"):
         run(source, streams=["campaigns"])
     child["partitions"] = [{"from_stream": "accounts", "fields": ["account_id", "missing"]}]
@@ -1085,8 +1102,8 @@ def test_check_source_reports_paths_into_the_source(api):
     def select(position, text):
         return lambda stream: stream["transform"]["steps"][position].update(select=text)
     (found,) = problems(select(0, "SELECT * FROM nope"))
-    assert found[0] == ("streams", 0) + SELECT_PATH and "not nope" in found[1]
-    assert problems(select(0, "SELECT * FROM account_daily_rows")) == [(("streams", 0) + SELECT_PATH, (
+    assert found[0] == ("streams", 0, *SELECT_PATH) and "not nope" in found[1]
+    assert problems(select(0, "SELECT * FROM account_daily_rows")) == [(("streams", 0, *SELECT_PATH), (
         "step 'campaigns' reads later step(s) account_daily_rows: a step reads its stream's requests and earlier "
         "steps"))]
     # exports are not tables: a step reads steps
@@ -1105,7 +1122,7 @@ def test_check_source_reports_paths_into_the_source(api):
 
 
 def test_streams_take_one_form_and_page_mode_reads_one_request(api):
-    """What streamwright-validate rejects stops a run too, before any request (e.g. sources run from Python)."""
+    """What `streamwright validate` rejects stops a run too, before any request (e.g. sources run from Python)."""
     old = {"name": "old", "request": {"http": {"path": "/x"}}, "select": "SELECT 1 AS x FROM records"}
     assert set(sql.check_source({"streams": [old]})) == {
         (("streams", 0, "export"), "a stream needs at least one export: `export: {NAME: {step: STEP}}`"),
@@ -1195,7 +1212,7 @@ def test_check_source_rejects_duckdb_builtin_request_and_step_names():
                                                 "otherwise"),
         (("streams", 0, "transform", "steps", 0, "name"), "'duckdb_tables' is the name of a DuckDB built-in table or "
                                                           "view: name it otherwise")]
-    # names that streamwright-validate reports do not stop the DuckDB checks
+    # names that `streamwright validate` reports do not stop the DuckDB checks
     source = {"kind": "source", "name": "demo", "streams": [run_mode(
         "odd", [{"name": "raw", "http": {"path": "/x"}}, {"name": "bad name", "http": {}}, "junk", {"name": None}],
         [{"name": "rows", "select": "SELECT 1 AS id"}, {"name": 5, "select": "SELECT 2"}, "junk"],
@@ -1231,7 +1248,7 @@ def test_check_source_reports_tables_duckdb_cannot_make(monkeypatch):
         "report", [{"name": "raw", "http": {"path": "/x"}}],
         [{"name": "rows", "select": "SELECT 1 AS id"}, {"name": "more", "select": "SELECT * FROM rows"}],
         {"report": {"step": "more"}})]}
-    assert sql.check_source(source) == [(("streams", 0) + SELECT_PATH,
+    assert sql.check_source(source) == [(("streams", 0, *SELECT_PATH),
                                          "DuckDB cannot make the table of step 'rows': Catalog Error: no room")]
 
 

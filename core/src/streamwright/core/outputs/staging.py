@@ -34,24 +34,42 @@ import decimal
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
+from types import MappingProxyType
 
 from streamwright.core.runtime.templates import decimal_text, to_json, to_text
+from streamwright.core.sql.quote import sql_string
 
-
-__all__ = ["Staging", "storage_type", "columns_from_schema", "json_value", "staged_table", "typed_columns",
-           "canonical", "quote", "sql_string", "json_path", "decimal_columns", "decimals_as_text"]
+__all__ = [
+    "Staging",
+    "canonical",
+    "columns_from_schema",
+    "decimal_columns",
+    "decimals_as_text",
+    "json_path",
+    "json_value",
+    "quote",
+    "sql_string",
+    "staged_table",
+    "storage_type",
+    "typed_columns",
+]
 
 LOG = logging.getLogger("streamwright.output")  # (staging details, at DEBUG)
 _INTEGER_TYPES = ("TINYINT", "SMALLINT", "INTEGER", "BIGINT", "HUGEINT", "UTINYINT", "USMALLINT", "UINTEGER",
                   "UBIGINT", "UHUGEINT")
 _FLOAT_TYPES = ("FLOAT", "REAL", "DOUBLE", "DOUBLE PRECISION")
 _JSON_PREFIXES = ("STRUCT(", "MAP(", "UNION(")
-_TIMESTAMP_TYPES = {"TIMESTAMP_S": "TIMESTAMP", "TIMESTAMP_MS": "TIMESTAMP", "TIMESTAMP_NS": "TIMESTAMP"}
-_SCHEMA_TYPES = {"string": "VARCHAR", "integer": "BIGINT", "number": "DOUBLE", "boolean": "BOOLEAN",
-                 "object": "JSON", "array": "JSON"}
-_SCHEMA_FORMATS = {"date": "DATE", "date-time": "TIMESTAMP WITH TIME ZONE", "time": "TIME"}
+_TIMESTAMP_TYPES = MappingProxyType({"TIMESTAMP_S": "TIMESTAMP", "TIMESTAMP_MS": "TIMESTAMP",
+                                     "TIMESTAMP_NS": "TIMESTAMP"})
+_SCHEMA_TYPES = MappingProxyType({"string": "VARCHAR", "integer": "BIGINT", "number": "DOUBLE", "boolean": "BOOLEAN",
+                                  "object": "JSON", "array": "JSON"})
+# the types stored as they are (besides integers and floats)
+_KEPT_TYPES = frozenset({"BOOLEAN", "DATE", "TIME", "TIMESTAMP", "DECIMAL"})
+_SCHEMA_FORMATS = MappingProxyType({"date": "DATE", "date-time": "TIMESTAMP WITH TIME ZONE", "time": "TIME"})
+_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def quote(name):
@@ -59,9 +77,10 @@ def quote(name):
     return '"%s"' % str(name).replace('"', '""')
 
 
-def sql_string(value):
-    """A SQL string literal."""
-    return "'" + str(value).replace("'", "''") + "'"
+def checked_name(name, what):
+    if not (isinstance(name, str) and _NAME.match(name)):
+        raise ValueError("%s %r is not valid (use letters, digits and _, not starting with a digit)" % (what, name))
+    return name
 
 
 def json_path(name):
@@ -86,19 +105,9 @@ def storage_type(kind):
         return _TIMESTAMP_TYPES[kind]
     if kind.endswith("]") or kind == "JSON" or kind.startswith(_JSON_PREFIXES):
         return "JSON"
-    if base in _INTEGER_TYPES or base in _FLOAT_TYPES or base in ("BOOLEAN", "DATE", "TIME"):
+    if base in _INTEGER_TYPES or base in _FLOAT_TYPES or base in _KEPT_TYPES or kind == "TIMESTAMP WITH TIME ZONE":
         return kind
-    if base == "TIMESTAMP" or kind == "TIMESTAMP WITH TIME ZONE":
-        return kind
-    if base == "DECIMAL":
-        return kind
-    if base in ("ENUM", "VARCHAR"):
-        return "VARCHAR"
-    if base == "BLOB" or base == "BIT":
-        return "VARCHAR"
-    if base == "INTERVAL":
-        return "DOUBLE"
-    return "VARCHAR"
+    return "DOUBLE" if base == "INTERVAL" else "VARCHAR"
 
 
 def _schema_type(definition):
@@ -124,8 +133,8 @@ def decimals_as_text(record, columns):
     """The record, with the decimal.Decimal values of these columns as their exact text (decimal_text)."""
     if not columns:
         return record
-    texts = dict((column, decimal_text(record[column])) for column in columns
-                 if isinstance(record.get(column), decimal.Decimal) and record[column].is_finite())
+    texts = {column: decimal_text(record[column]) for column in columns
+                 if isinstance(record.get(column), decimal.Decimal) and record[column].is_finite()}
     return dict(record, **texts) if texts else record
 
 
@@ -158,7 +167,7 @@ def typed_columns(columns, whole_record=False):
     return ["ordinal AS _streamwright_ordinal"] + [json_value(column, kind) for column, kind in columns]
 
 
-class Staging(object):
+class Staging:
     """
     The records of a run's exports, staged in a private temporary folder (`directory`, removed by remove()) until the
     run ends. exports[name] = dict(path, handle, schema, keys, columns, count, whole_record, decimals): `columns` are
@@ -178,8 +187,8 @@ class Staging(object):
     def write_schema(self, name, schema, key_properties):
         path = os.path.join(self.directory, "%d.jsonl" % len(self.exports))
         self.exports[name] = {
-            "path": path, "handle": open(path, "w", encoding="utf-8"), "schema": schema,
-            "keys": list(key_properties or []), "columns": self.columns.get(name), "count": 0,
+            "path": path, "handle": open(path, "w", encoding="utf-8"),  # noqa: SIM115  open until close()
+            "schema": schema, "keys": list(key_properties or []), "columns": self.columns.get(name), "count": 0,
             "whole_record": self.columns.get(name) is None and not schema.get("properties"),
             "decimals": decimal_columns(self.columns.get(name))}
         LOG.debug("export %r: staging its records in %s", name, path, extra={"export": name})

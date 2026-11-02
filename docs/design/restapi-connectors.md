@@ -95,7 +95,7 @@ patch → `HttpClient.request` → `records.path` → paginator `next`.
 ### 4.1 `auth:` with an `http`-transport provider
 
 `provider` may now be combined with a built-in `type` **when the provider's `transport` is `"http"`**. The keys
-are exactly the existing `AUTH_TYPES` keys (`validation/schema.py`).
+are exactly the existing `AUTH_TYPES` keys (`validation/vocabulary.py`).
 
 ```yaml
 auth:
@@ -243,7 +243,7 @@ That is all: no base class, no hooks, no call object. A placeholder connector (�
 - Move `paginate` to `net/paginators.py`; re-export it from `net/http.py`.
 - No other behavior change.
 
-### 5.5 Validation (`validation/schema.py`, `validation/source.py`) and JSON Schemas
+### 5.5 Validation (`validation/vocabulary.py`, `validation/sections/`) and JSON Schemas (`validation/json_schemas.py`)
 
 - `HTTP_KEYS` += `paginator`, `records`, `params_encoding`; `HTTP_REQUEST_KEYS` += `params_encoding`.
 - `PAGINATOR_TYPES`: add the optional keys of §4.4 and the `link_header` type; check `in: body` ⇒ request has a

@@ -6,8 +6,9 @@ requests:
     sdk: microsoft_ads
     service: CampaignManagementService
     method: GetCampaignCriterionsByIds      # without criterion IDs: all of the campaign's criteria of this type
-    headers: {CustomerAccountId: "{{ partition.account_id }}"}
-    arguments: {CampaignId: "{{ partition.campaign_id }}", CriterionType: Location}
+    arguments:
+      account_id: "{{ partition.account_id }}"
+      request: {CampaignId: "{{ partition.campaign_id }}", CriterionType: Location}
     records: {path: CampaignCriterions.CampaignCriterion}   # two parts: CampaignCriterions and PartialErrors
 transform:
   mode: page

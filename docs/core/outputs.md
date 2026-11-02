@@ -184,11 +184,14 @@ streamwright run examples/sources/ads/google_ads --set customer_ids=... --output
 - Records are staged locally while the source runs; nothing is loaded unless the run succeeds.
 - The state is saved in the destination with the data, and every run takes it from there (each run uses a new dlt
   working folder).
+- Bookmarks are saved by a dedicated state resource even when every export was skipped to protect its previous
+  table. The state resource's small `_streamwright_bookmarks` table accompanies dlt's pipeline-state table.
 - So runs into different warehouses keep separate states, and any machine can run the next load.
 - `--state FILE` replaces it.
 - A failed load leaves nothing behind: the next run reads again from the last completed load.
 
 ### Good to know
 
-- dlt's usage telemetry is off unless the environment sets `RUNTIME__DLTHUB_TELEMETRY`.
+- The output does not modify process environment variables; configure dlt usage telemetry using dlt's own
+  `RUNTIME__DLTHUB_TELEMETRY` setting.
 - Run one load at a time per source and dataset.

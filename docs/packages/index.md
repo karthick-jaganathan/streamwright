@@ -20,19 +20,18 @@ command (`streamwright run`, `streamwright validate`, `streamwright connectors`)
 partitions, paginators, async jobs, incremental state, retries and rate limits, SQL transform steps on an embedded
 DuckDB, and the outputs (Singer, JSONL, CSV, TSV, Parquet, DuckDB, DuckLake and, with the `dlt` extra, dlt).
 
-Its modules (`streamwright.core.*`) include:
+Its packages (`streamwright.core.*`):
 
-| Module | Purpose |
+| Package | Purpose |
 |---|---|
-| `cli` | the `streamwright` command |
-| `engine.runner` | `SourceRunner`: runs a loaded source |
-| `validation.engine` | `streamwright validate`: YAML loading with locations, findings, the command and the JSON Schema export |
-| `validation.source` | `SourceChecker`: the checks of `kind: source` |
-| `validation.schema` | the source format's keys and the JSON Schemas |
-| `config.loader` | finds and loads a source folder (`source.yaml` + `streams/`) or a single-file source |
-| `config.reader` | `load_yaml` |
-| `outputs.output`, `outputs.warehouse`, `outputs.dlt_output`, `outputs.exporter` | the outputs, and atomic file writes |
-| `runtime.components` | the `Connector` and `QueryBuilder` base classes: component discovery and checks |
+| `sdk` | the public connector SDK, the only core surface connectors import: the contract (`ConnectorDefinition`, `Field`, `Operation`), the operation catalog (`sdk.operations.files`, `databases`, `tables`, `messages`, `http`), engine adapter protocols (`sdk.engines`) and contract test suites (`sdk.testing`) |
+| `io` | reusable connector behaviour as functions and frozen configs: files and object stores, attached databases, HTTP/SDK APIs, and each engine's `EngineCapabilities` |
+| `runtime` | the connector contract internals, plug-in discovery (`runtime.plugins`), connector definitions, logging (`runtime.logs`), redaction and templates |
+| `engine` | `SourceRunner` (`engine.runner`) and its collaborators: request readers, partitions, bookmarks, the SQL transform (`engine.sql`) |
+| `validation` | `streamwright validate`: the source checks (`validation.sections`), YAML locations, job manifests and their overlays, the JSON Schemas |
+| `jobs` | the engine-neutral `kind: *Job` framework (manifest, inputs, checks, plan, state store, batch runner, ingest planning, write rules) and the DuckDBJob engine (`jobs.duckdb`) |
+| `outputs` | Singer, JSONL/CSV/TSV/Parquet files, DuckDB, DuckLake and dlt outputs |
+| `config`, `net`, `sql`, `cli` | source loading and inputs; the HTTP client and retry policies; SQL quoting, conditions and analysis; the `streamwright` command |
 
 ## Connectors
 
@@ -44,10 +43,17 @@ Its modules (`streamwright.core.*`) include:
 | `files` | streamwright-files | local CSV, TSV, JSON, JSONL and Parquet files |
 | `s3` | streamwright-s3 | Amazon S3 and S3-compatible object storage |
 | `gcs` | streamwright-gcs | Google Cloud Storage |
-| `postgres` | streamwright-postgres | PostgreSQL (read-only queries) |
+| `azure_blob` | streamwright-azure-blob | Azure Blob Storage |
+| `postgres` | streamwright-postgres | PostgreSQL (read-only queries; `[state]` extra for the jobs state store) |
+| `mysql` | streamwright-mysql | MySQL (read-only queries) |
+| `deltalake` | streamwright-deltalake | Delta Lake tables (`[duckdb]` extra for DuckDBJob writes) |
+| `mongodb`, `google_sheets` | streamwright-mongodb, streamwright-google-sheets | MongoDB; Google Sheets |
+| `kafka`, `sqs` | streamwright-kafka, streamwright-sqs | message brokers |
+| `amazon_ads`, `apple_ads`, `linkedin_ads`, `openai_ads`, `restapi` | streamwright-<name> | declarative HTTP APIs |
 
-Each connector's README (`connectors/<name>/README.md`) has its options, error codes and logs; `connectors/README.md` describes
-the layout and how to write a connector.
+Each connector's README (`connectors/<group>/<name>/README.md`) has its options, error codes, logs and adapters (DuckDBJob
+and SparkJob, installed through the `[duckdb]` and `[spark]` extras); every package has a `pyproject.toml`, `README.md`, `LICENSE`
+and a `Makefile` that includes `connectors/connector.mk` (`scripts/check_connectors.py` checks them).
 
 ## Installation
 

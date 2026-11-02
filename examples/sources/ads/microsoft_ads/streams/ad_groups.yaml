@@ -6,8 +6,9 @@ requests:
     sdk: microsoft_ads
     service: CampaignManagementService
     method: GetAdGroupsByCampaignId
-    headers: {CustomerAccountId: "{{ partition.account_id }}"}    # the request names only the campaign
-    arguments: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
+    arguments:
+      account_id: "{{ partition.account_id }}"    # the request names only the campaign
+      request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
     records: {path: AdGroup}
 transform:
   mode: page

@@ -3,7 +3,7 @@
 requests:
   - name: raw_products
     sdk: files
-    service: file
+    service: object
     method: read
     arguments:
       path: products.parquet

@@ -37,13 +37,11 @@ BETWEEN bound) is missing. Grammar: https://developers.google.com/google-ads/api
 import datetime
 import difflib
 import re
+from types import MappingProxyType
 
-from streamwright.core.config.inputs import InputError, as_date
-from streamwright.core.runtime.components import QueryBuilder
-from streamwright.core.engine.queries import QueryError
+from streamwright.core.sdk import InputError, QueryBuilder, QueryError, as_date
 
-
-__all__ = ["GaqlBuilder", "gaql", "OPERATORS", "VALUE_TYPES"]
+__all__ = ["OPERATORS", "VALUE_TYPES", "GaqlBuilder", "gaql"]
 
 KEYS = ("select", "from", "where", "order_by", "limit")
 WHERE_KEYS = ("field", "op", "type", "value", "skip_if_empty")
@@ -57,7 +55,7 @@ _FIELD = re.compile(r"^[a-z][a-zA-Z0-9._]*$")
 _RESOURCE = re.compile(r"^[a-z][a-zA-Z0-9_]*$")
 _ENUM = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 _ORDERING = re.compile(r"^(\S+)(?:\s+(ASC|DESC))?$", re.I)
-_ESCAPES = {"\\": "\\\\", "'": "\\'", "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+_ESCAPES = MappingProxyType({"\\": "\\\\", "'": "\\'", "\n": "\\n", "\r": "\\r", "\t": "\\t"})
 
 
 def _operator(item):
@@ -65,7 +63,7 @@ def _operator(item):
 
 
 def _empty(value):
-    return value is None or value == "" or value == []
+    return value is None or value in ("", [])
 
 
 def _skipped(item):
@@ -92,7 +90,7 @@ def _suggest(word, choices):
 # * --------------------------
 
 def _check_keys(mapping, allowed, required, path, what):
-    problems = [(path + (key,), "unknown key %r%s; %s does not support it" % (key, _suggest(key, allowed), what))
+    problems = [((*path, key), "unknown key %r%s; %s does not support it" % (key, _suggest(key, allowed), what))
                 for key in mapping if key not in allowed]
     problems += [(path, "%s needs `%s`" % (what, key)) for key in required if key not in mapping]
     return problems
@@ -136,26 +134,26 @@ def _check_where(items):
         problems += _check_keys(item, WHERE_KEYS, ("field", "op", "type"), path, "a where item")
         field = item.get("field")
         if "field" in item and not _reference(field) and not (isinstance(field, str) and _FIELD.match(field)):
-            problems.append((path + ("field",), "%r is not a field name" % (field,)))
+            problems.append(((*path, "field"), "%r is not a field name" % (field,)))
         op = _operator(item)
         if "op" in item and op not in OPERATORS:
-            problems.append((path + ("op",), "unknown operator %r%s; one of: %s" % (
+            problems.append(((*path, "op"), "unknown operator %r%s; one of: %s" % (
                 item["op"], _suggest(op, OPERATORS), ", ".join(OPERATORS))))
         if "type" in item and item["type"] not in VALUE_TYPES:
-            problems.append((path + ("type",), "unknown value type %r%s; one of: %s" % (
+            problems.append(((*path, "type"), "unknown value type %r%s; one of: %s" % (
                 item["type"], _suggest(item["type"], VALUE_TYPES), ", ".join(VALUE_TYPES))))
         if "skip_if_empty" in item and not isinstance(item["skip_if_empty"], bool):
-            problems.append((path + ("skip_if_empty",), "`skip_if_empty` must be true or false"))
+            problems.append(((*path, "skip_if_empty"), "`skip_if_empty` must be true or false"))
         value = item.get("value")
         if op in NO_VALUE_OPERATORS:
             if "value" in item:
-                problems.append((path + ("value",), "`%s` takes no value" % op))
+                problems.append(((*path, "value"), "`%s` takes no value" % op))
         elif "op" in item and op in OPERATORS and "value" not in item:
             problems.append((path, "`%s` needs a `value`" % op))
         elif op == "BETWEEN" and not _reference(value) and not (isinstance(value, list) and len(value) == 2):
-            problems.append((path + ("value",), "`BETWEEN` needs a list of two values"))
+            problems.append(((*path, "value"), "`BETWEEN` needs a list of two values"))
         elif op in LIST_OPERATORS and not _reference(value) and not isinstance(value, list):
-            problems.append((path + ("value",), "`%s` needs a list or a list reference" % op))
+            problems.append(((*path, "value"), "`%s` needs a list or a list reference" % op))
     return problems
 
 
@@ -177,19 +175,19 @@ def _value(kind, value, field):
     if value is None:
         raise QueryError("gaql: %s has an empty value" % field)
     if kind == "int":
-        if isinstance(value, bool) or isinstance(value, float) and not value.is_integer():
+        if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
             raise QueryError("gaql: %s expects a whole number, got %r" % (field, value))
         try:
             return str(int(str(value).strip()) if not isinstance(value, float) else int(value))
         except ValueError:
-            raise QueryError("gaql: %s expects a whole number, got %r" % (field, value))
+            raise QueryError("gaql: %s expects a whole number, got %r" % (field, value)) from None
     if kind == "date":
         if not isinstance(value, (datetime.date, str)):
             raise QueryError("gaql: %s expects a date, got %r" % (field, value))
         try:
             return _text(as_date(value).isoformat())
         except InputError as exc:
-            raise QueryError("gaql: %s: %s" % (field, exc))
+            raise QueryError("gaql: %s: %s" % (field, exc)) from None
     if kind == "enum":
         text = str(value)
         if not _ENUM.match(text):
@@ -253,10 +251,7 @@ def gaql(spec):
 
 
 class GaqlBuilder(QueryBuilder):
-    """`{gaql: {...}}` in a request: registered in the streamwright.query_builders entry-point group."""
-
-    name = "gaql"
-    connector = "google_ads"
+    """`{gaql: {...}}` in a request: the query builder the google_ads definition lists (`query_builders`)."""
 
     def check(self, spec):
         return check(spec)

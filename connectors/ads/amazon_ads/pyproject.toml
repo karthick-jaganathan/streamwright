@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-amazon-ads"
-version = "0.0.1"
+version = "0.0.2"
 description = "StreamWright - Amazon Ads connector"
 readme = "README.md"
 license = "Apache-2.0"
@@ -16,14 +16,13 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "streamwright~=0.1.0",
+    "streamwright~=0.1.9",
 ]
 
 [project.urls]
@@ -33,8 +32,11 @@ Repository = "https://github.com/karthick-jaganathan/streamwright"
 "Issue Tracker" = "https://github.com/karthick-jaganathan/streamwright/issues"
 
 [project.entry-points."streamwright.connectors"]
-amazon_ads = "streamwright.connectors.amazon_ads.connector:AmazonAdsConnector"
+amazon_ads = "streamwright.connectors.amazon_ads:CONNECTOR"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
 packages = ["streamwright.connectors.amazon_ads"]
+
+[tool.setuptools.package-data]
+"streamwright.connectors.amazon_ads" = ["guide.md"]

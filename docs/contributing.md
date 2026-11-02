@@ -14,7 +14,7 @@ We welcome contributions to the StreamWright project! This guide will help you g
 
 ### Prerequisites
 
-- Python 3.10 or higher
+- Python 3.11 or higher
 - Git
 - Basic understanding of data pipelines and ETL processes
 - Familiarity with YAML configuration files and SQL

@@ -6,8 +6,9 @@ requests:
     sdk: microsoft_ads
     service: CampaignManagementService
     method: GetKeywordsByAdGroupId
-    headers: {CustomerAccountId: "{{ partition.account_id }}"}
-    arguments: {AdGroupId: "{{ partition.ad_group_id }}"}
+    arguments:
+      account_id: "{{ partition.account_id }}"
+      request: {AdGroupId: "{{ partition.ad_group_id }}"}
     records: {path: Keyword}
 transform:
   mode: page

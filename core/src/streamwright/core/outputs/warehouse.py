@@ -18,27 +18,8 @@
 """
 DuckDB and DuckLake warehouse outputs for `streamwright run`.
 
-DuckLake (`--output ducklake:CATALOG[:SCHEMA]`) reads these environment variables (all optional):
-
-- STREAMWRIGHT_DUCKLAKE_DATA_PATH: where DuckLake writes its data (Parquet) files, a local folder or `s3://bucket/prefix/`
-  (DuckLake's default: next to the catalog).
-- Object storage, set up (httpfs loaded, a temporary DuckDB `s3` secret) when the data path is `s3://...` or any
-  STREAMWRIGHT_DUCKLAKE_S3_* variable is set; values are bound parameters, never in a query's text, and credentials are
-  never logged or shown in a message:
-  - STREAMWRIGHT_DUCKLAKE_S3_KEY_ID, STREAMWRIGHT_DUCKLAKE_S3_SECRET (both or neither), STREAMWRIGHT_DUCKLAKE_S3_SESSION_TOKEN: credentials;
-  - STREAMWRIGHT_DUCKLAKE_S3_REGION: e.g. us-east-1;
-  - STREAMWRIGHT_DUCKLAKE_S3_ENDPOINT: host[:port] of an S3-compatible store, no scheme (e.g. localhost:4566 for LocalStack);
-  - STREAMWRIGHT_DUCKLAKE_S3_URL_STYLE: path or vhost;
-  - STREAMWRIGHT_DUCKLAKE_S3_USE_SSL: true or false.
-- STREAMWRIGHT_DUCKLAKE_DATA_INLINING_ROW_LIMIT: DuckLake's data inlining (inserts of fewer rows are kept in the catalog
-  instead of a data file); 0 turns it off. Defaults to 0 when the data path is on object storage (every load writes
-  data files to the bucket), to DuckLake's default otherwise.
-- A Postgres catalog: CATALOG `postgres:DSN`, a libpq connection string such as
-  `postgres:dbname=lake host=localhost user=streamwright` (DuckDB's postgres extension is loaded; Postgres catalogs take
-  concurrent writers). The DSN cannot hold a password: STREAMWRIGHT_DUCKLAKE_CATALOG_PASSWORD gives it, as a temporary
-  DuckDB postgres secret (a bound parameter, never logged).
-- STREAMWRIGHT_DUCKLAKE_CATALOG_SCHEMA: the schema of the catalog's own tables (DuckLake's METADATA_SCHEMA), e.g. to keep a
-  Postgres catalog in a schema of its own.
+DuckLake catalogs: extensions, settings (environment variables), secrets and ATTACH are in
+streamwright.core.outputs.ducklake.
 """
 
 import datetime
@@ -47,43 +28,36 @@ import logging
 import os
 import re
 
-from streamwright.core.engine import sql
-from streamwright.core.outputs.output import log_summary
-from streamwright.core.outputs.staging import Staging, canonical as _canonical, json_path as _json_path, quote as _quote, \
-    sql_string as _sql_string, staged_table, typed_columns
+import duckdb
+
+from streamwright.core.outputs.base import log_summary
+from streamwright.core.outputs.ducklake import (
+    S3_CREDENTIALS,
+    attach_query,
+    ducklake_settings,
+    is_postgres,
+    load_ducklake,
+    load_extension,
+    mask_values,
+    postgres_secret_query,
+    s3_secret_query,
+)
+from streamwright.core.outputs.loading import LoadingOutput
+from streamwright.core.outputs.staging import Staging, checked_name, staged_table, typed_columns
+from streamwright.core.outputs.staging import canonical as _canonical
+from streamwright.core.outputs.staging import json_path as _json_path
+from streamwright.core.outputs.staging import quote as _quote
+from streamwright.core.outputs.staging import sql_string as _sql_string
 from streamwright.core.runtime.templates import to_text
 
-
 __all__ = ["DuckDBOutput", "DuckLakeOutput"]
+
 
 LOG = logging.getLogger("streamwright.output")
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _STATE_TABLE = "_streamwright_state"
 _LEGACY_STATE_TABLE = "_adapt_state"  # the state table before the StreamWright rename; read once, then superseded
-
-POSTGRES_PREFIX = "postgres:"
-DATA_PATH_ENV = "STREAMWRIGHT_DUCKLAKE_DATA_PATH"
-INLINING_ENV = "STREAMWRIGHT_DUCKLAKE_DATA_INLINING_ROW_LIMIT"
-CATALOG_PASSWORD_ENV = "STREAMWRIGHT_DUCKLAKE_CATALOG_PASSWORD"
-CATALOG_SCHEMA_ENV = "STREAMWRIGHT_DUCKLAKE_CATALOG_SCHEMA"
-S3_SECRET_NAME = "streamwright_ducklake_s3"
-# environment variable -> the DuckDB s3 secret's parameter
-S3_CREDENTIALS = {"STREAMWRIGHT_DUCKLAKE_S3_KEY_ID": "KEY_ID", "STREAMWRIGHT_DUCKLAKE_S3_SECRET": "SECRET",
-                  "STREAMWRIGHT_DUCKLAKE_S3_SESSION_TOKEN": "SESSION_TOKEN"}
-S3_SETTINGS = {"STREAMWRIGHT_DUCKLAKE_S3_REGION": "REGION", "STREAMWRIGHT_DUCKLAKE_S3_ENDPOINT": "ENDPOINT",
-               "STREAMWRIGHT_DUCKLAKE_S3_URL_STYLE": "URL_STYLE", "STREAMWRIGHT_DUCKLAKE_S3_USE_SSL": "USE_SSL"}
-_URL_STYLES = ("path", "vhost")
-_ENDPOINT = re.compile(r"^[A-Za-z0-9._\-]+(:[0-9]+)?$")
-_REGION = re.compile(r"^[A-Za-z0-9_\-]+$")
-_BUCKET = re.compile(r"^s3://([A-Za-z0-9][A-Za-z0-9._\-]*)(/|$)")
-_DSN_PASSWORD = re.compile(r"(^|[\s?&])password\s*=", re.IGNORECASE)
 _MISSING_CATALOG = "creating a new DuckLake is explicitly disabled"
-
-
-def _checked(name, what):
-    if not (isinstance(name, str) and _NAME.match(name)):
-        raise ValueError("%s %r is not valid (use letters, digits and _, not starting with a digit)" % (what, name))
-    return name
 
 
 def _key_value(alias, key, whole_record):
@@ -96,161 +70,20 @@ def _table_name(schema, name):
     return "%s.%s" % (_quote(schema), _quote(name))
 
 
-def _load_extension(connection, name):
-    """Loads a DuckDB extension, installing it first (once, from DuckDB's repository) when it is missing."""
-    installed = connection.execute("SELECT bool_or(installed) FROM duckdb_extensions() "
-                                   "WHERE extension_name = ? OR list_contains(aliases, ?)", [name, name]).fetchone()
-    if not (installed and installed[0]):
-        connection.execute("INSTALL %s" % name)
-    connection.execute("LOAD %s" % name)
-
-
-def _load_ducklake(connection):
-    """Loads DuckDB's ducklake extension, installing it first (once, from DuckDB's repository) when it is missing."""
-    _load_extension(connection, "ducklake")
-
-
-def _is_postgres(catalog):
-    return catalog.startswith(POSTGRES_PREFIX)
-
-
-def _flag(name, value):
-    text = value.strip().lower()
-    if text not in ("true", "false"):
-        raise ValueError("%s: expected true or false" % name)
-    return text == "true"
-
-
-def ducklake_settings(environ, catalog):
-    """
-    The DuckLake connection settings of `environ` (see the module's doc) for `catalog`, checked: a dict of data_path,
-    s3 (None, or the s3 secret's parameter -> value), s3_scope, inlining (None or a row limit), catalog_password and
-    catalog_schema. ValueError (naming the variable, never a credential's value) when a setting is wrong.
-    """
-    def value(name):
-        text = environ.get(name)
-        return text if text is not None and text.strip() != "" else None
-
-    data_path = value(DATA_PATH_ENV)
-    data_path = os.path.expanduser(data_path) if data_path is not None else None
-    on_s3 = data_path is not None and data_path.lower().startswith("s3://")
-    names = list(S3_CREDENTIALS) + list(S3_SETTINGS)
-    s3 = None
-    if on_s3 or any(value(name) is not None for name in names):
-        s3 = {}
-        for name, parameter in list(S3_CREDENTIALS.items()) + list(S3_SETTINGS.items()):
-            text = value(name)
-            if text is None:
-                continue
-            if name in S3_SETTINGS:
-                text = text.strip()
-            if parameter == "USE_SSL":
-                s3[parameter] = _flag(name, text)
-                continue
-            if parameter == "URL_STYLE" and text not in _URL_STYLES:
-                raise ValueError("%s: expected one of: %s" % (name, ", ".join(_URL_STYLES)))
-            if parameter == "ENDPOINT" and not _ENDPOINT.match(text):
-                raise ValueError("%s: expected a host and an optional port, e.g. localhost:4566 or "
-                                 "storage.example.com (no scheme: %s picks https or http)" % (
-                                     name, "STREAMWRIGHT_DUCKLAKE_S3_USE_SSL"))
-            if parameter == "REGION" and not _REGION.match(text):
-                raise ValueError("%s: expected a region, e.g. us-east-1" % name)
-            s3[parameter] = text
-        if ("KEY_ID" in s3) != ("SECRET" in s3):
-            raise ValueError("STREAMWRIGHT_DUCKLAKE_S3_KEY_ID and STREAMWRIGHT_DUCKLAKE_S3_SECRET go together: set both or neither")
-        if "SESSION_TOKEN" in s3 and "KEY_ID" not in s3:
-            raise ValueError("STREAMWRIGHT_DUCKLAKE_S3_SESSION_TOKEN needs STREAMWRIGHT_DUCKLAKE_S3_KEY_ID and "
-                             "STREAMWRIGHT_DUCKLAKE_S3_SECRET")
-    scope = None
-    if on_s3:
-        bucket = _BUCKET.match(data_path)
-        if not bucket:
-            raise ValueError("%s: expected s3://BUCKET/PREFIX/" % DATA_PATH_ENV)
-        scope = "s3://%s/" % bucket.group(1)
-    inlining = value(INLINING_ENV)
-    if inlining is not None:
-        if not inlining.strip().isdigit():
-            raise ValueError("%s: expected a whole number >= 0 (0 turns data inlining off)" % INLINING_ENV)
-        inlining = int(inlining.strip())
-    elif on_s3:
-        inlining = 0
-    postgres = _is_postgres(catalog)
-    if postgres:
-        if not catalog[len(POSTGRES_PREFIX):].strip():
-            raise ValueError("a postgres DuckLake catalog needs a connection string, e.g. "
-                             "ducklake:postgres:dbname=lake host=localhost user=streamwright")
-        if _DSN_PASSWORD.search(catalog[len(POSTGRES_PREFIX):]):
-            raise ValueError("the postgres DuckLake catalog's connection string holds a password: give it in %s "
-                             "instead" % CATALOG_PASSWORD_ENV)
-    password = environ.get(CATALOG_PASSWORD_ENV) or None
-    if password is not None and not postgres:
-        raise ValueError("%s is for a postgres catalog (ducklake:postgres:DSN)" % CATALOG_PASSWORD_ENV)
-    schema = value(CATALOG_SCHEMA_ENV)
-    if schema is not None:
-        _checked(schema.strip(), CATALOG_SCHEMA_ENV)
-        schema = schema.strip()
-    return {"data_path": data_path, "s3": s3, "s3_scope": scope, "inlining": inlining, "catalog_password": password,
-            "catalog_schema": schema}
-
-
-def s3_secret_query(s3, scope=None):
-    """(query, parameters) that create the temporary DuckDB s3 secret; every value is a bound parameter."""
-    parts, parameters = ["TYPE s3"], []
-    for parameter in list(S3_CREDENTIALS.values()) + list(S3_SETTINGS.values()):
-        if parameter in s3:
-            parts.append("%s ?" % parameter)
-            parameters.append(s3[parameter])
-    if scope:
-        parts.append("SCOPE ?")
-        parameters.append(scope)
-    return "CREATE OR REPLACE TEMPORARY SECRET %s (%s)" % (S3_SECRET_NAME, ", ".join(parts)), parameters
-
-
-def postgres_secret_query(password):
-    """
-    (query, parameters) that create DuckDB's default postgres secret, which the postgres extension adds to every
-    connection string (the DuckLake catalog's too): the password stays out of the ATTACH's text.
-    """
-    return "CREATE TEMPORARY SECRET (TYPE postgres, PASSWORD ?)", [password]
-
-
-def attach_query(catalog, settings, read_only=False):
-    """The ATTACH of the DuckLake catalog (its options are not secrets: they are in the query's text)."""
-    options = []
-    if settings["data_path"]:
-        options.append("DATA_PATH %s" % _sql_string(settings["data_path"]))
-    if settings["catalog_schema"]:
-        options.append("METADATA_SCHEMA %s" % _sql_string(settings["catalog_schema"]))
-    if settings["inlining"] is not None:
-        options.append("DATA_INLINING_ROW_LIMIT %d" % settings["inlining"])
-    if read_only:
-        options.append("READ_ONLY")
-    attach_options = " (%s)" % ", ".join(options) if options else ""
-    return "ATTACH %s AS %s%s" % (_sql_string("ducklake:" + catalog), _quote("streamwright_ducklake"), attach_options)
-
-
-def _masked(text, values):
-    for value in sorted((v for v in values if v), key=len, reverse=True):
-        text = text.replace(value, "***")
-    return text
-
-
-class _WarehouseOutput(object):
+class _WarehouseOutput(LoadingOutput):
     """Common staging and load logic for DuckDB and DuckLake."""
 
     kind = "warehouse"
 
     def __init__(self, path, schema, source):
-        _checked(schema, "schema")
+        super().__init__(source)
+        checked_name(schema, "schema")
         self.path = os.path.expanduser(path)
         self.schema = schema
         self.source_name = source["name"]
         # unkeyed exports that hold a window of their data are appended, the others replaced
-        self.incremental = sql.incremental_exports(source)
         self.staging = Staging("streamwright-%s-" % self.kind)
         self.streams = self.staging.exports  # name -> dict(path, handle, schema, keys, columns, count, whole_record)
-        self.partial = set()
-        self.state = None
         self.status = None  # "loaded" once close() has loaded the run, "failed" if it loaded nothing
 
     def write_columns(self, name, columns):
@@ -262,34 +95,17 @@ class _WarehouseOutput(object):
     def write_record(self, name, record):
         self.staging.write_record(name, record)
 
-    def write_state(self, state):
-        self.state = state
-
-    def mark_partial(self, name):
-        self.partial.add(name)
-
-    def disposition(self, name, keys):
-        if keys:
-            return "merge"
-        return "append" if name in self.incremental else "replace"
-
-    def _kept(self, name, keys):
-        """Whether the table keeps its rows: an unkeyed full-refresh export of a stream that lacks partitions."""
-        return name in self.partial and self.disposition(name, keys) == "replace"
-
     def summary(self):
         """
-        One entry per export (see streamwright.core.outputs.output): export, records, table (SCHEMA.EXPORT), disposition (merge,
-        replace, append, or skipped: the table kept its rows), primary_key, and state (SCHEMA._streamwright_state) once the
-        load saved it. No entries after a failed run or load: nothing was loaded.
+        One entry per export (see streamwright.core.outputs.output): export, records, table (SCHEMA.EXPORT), disposition
+        (merge, replace, append, or skipped: the table kept its rows), primary_key, and state
+        (SCHEMA._streamwright_state) once the load saved it. No entries after a failed run or load: nothing was loaded.
         """
         if self.status == "failed":
             return []
         entries = []
         for name, stream in self.streams.items():
-            entry = {"export": name, "records": stream["count"], "table": "%s.%s" % (self.schema, name),
-                     "disposition": "skipped" if self._kept(name, stream["keys"]) else self.disposition(
-                         name, stream["keys"]), "primary_key": list(stream["keys"])}
+            entry = self._summary_entry(name, stream["count"], stream["keys"], "%s.%s" % (self.schema, name))
             if self.status == "loaded" and self.state is not None:
                 entry["state"] = "%s.%s" % (self.schema, _STATE_TABLE)
             entries.append(entry)
@@ -337,16 +153,23 @@ class _WarehouseOutput(object):
         finally:
             connection.close()
 
+    def _mask(self, exc):
+        """`exc`, or (when its message shows a credential) an error with the credentials masked; see DuckLakeOutput."""
+        return exc
+
     def _table_columns(self, connection, name):
-        try:
-            rows = connection.execute("DESCRIBE %s" % _table_name(self.schema, name)).fetchall()
-        except Exception:
+        """The columns of the table `name` (name -> canonical type), or None when it does not exist."""
+        # (looked up, not tried: a failed DESCRIBE aborts the transaction the load runs in)
+        found = connection.execute("SELECT 1 FROM duckdb_tables() WHERE database_name = current_database() AND "
+                                   "schema_name = ? AND table_name = ?", [self.schema, name]).fetchone()
+        if found is None:
             return None
-        return dict((row[0], _canonical(row[1])) for row in rows)
+        rows = connection.execute("DESCRIBE %s" % _table_name(self.schema, name)).fetchall()
+        return {row[0]: _canonical(row[1]) for row in rows}
 
     def _ensure_table(self, connection, name, columns):
         existing = self._table_columns(connection, name)
-        target = dict((column, _canonical(kind)) for column, kind in columns)
+        target = {column: _canonical(kind) for column, kind in columns}
         if existing is None:
             connection.execute("CREATE TABLE IF NOT EXISTS %s (%s)" % (
                 _table_name(self.schema, name), ", ".join("%s %s" % (_quote(column), kind)
@@ -422,7 +245,7 @@ class _WarehouseOutput(object):
         connection.execute("DELETE FROM %s WHERE source = $source" % table, {"source": self.source_name})
         connection.execute("INSERT INTO %s (source, state, loaded_at) VALUES ($source, $state::JSON, $loaded_at)" %
                            table, {"source": self.source_name, "state": json.dumps(self.state, default=to_text),
-                                   "loaded_at": datetime.datetime.now(datetime.timezone.utc)})
+                                   "loaded_at": datetime.datetime.now(datetime.UTC)})
 
     def _state_connection(self):
         """A read-only connection to the destination, or None when it does not exist yet."""
@@ -441,8 +264,13 @@ class _WarehouseOutput(object):
                 try:
                     row = connection.execute("SELECT state FROM %s WHERE source = $source" % _table_name(
                         self.schema, state_table), {"source": self.source_name}).fetchone()
-                except Exception:
+                except duckdb.CatalogException:
                     continue
+                except Exception as exc:
+                    masked = self._mask(exc)
+                    if masked is exc:
+                        raise
+                    raise masked from None
                 if row:
                     break
             if not row:
@@ -463,10 +291,9 @@ class DuckDBOutput(_WarehouseOutput):
             raise ValueError("schema %r has the name of the database file %s: DuckDB cannot tell them apart; "
                              "give the file another name or pass a schema (duckdb:%s:SCHEMA)" % (
                                  schema, database, path))
-        super(DuckDBOutput, self).__init__(path, schema, source)
+        super().__init__(path, schema, source)
 
     def _connect(self, read_only=False):
-        import duckdb
         return duckdb.connect(self.path, read_only=read_only)
 
 
@@ -479,9 +306,9 @@ class DuckLakeOutput(_WarehouseOutput):
     kind = "ducklake"
 
     def __init__(self, path, schema, source):
-        postgres = _is_postgres(path)
+        postgres = is_postgres(path)
         self.settings = ducklake_settings(os.environ, path)
-        super(DuckLakeOutput, self).__init__(path, schema, source)
+        super().__init__(path, schema, source)
         if postgres:
             self.path = path  # a connection string, not a file: no ~ to expand
         self.postgres = postgres
@@ -494,21 +321,20 @@ class DuckLakeOutput(_WarehouseOutput):
     def _mask(self, exc):
         """`exc`, or (when its message shows a credential) a RuntimeError with the credentials masked."""
         text = str(exc)
-        masked = _masked(text, self._secrets())
+        masked = mask_values(text, self._secrets())
         return exc if masked == text else RuntimeError(masked)
 
     def _connect(self, read_only=False):
-        import duckdb
         connection = duckdb.connect(":memory:")
         try:
-            _load_ducklake(connection)
+            load_ducklake(connection)
             s3 = self.settings["s3"]
             if s3 is not None:
-                _load_extension(connection, "httpfs")
+                load_extension(connection, "httpfs")
                 if s3:
                     connection.execute(*s3_secret_query(s3, self.settings["s3_scope"]))
             if self.postgres:
-                _load_extension(connection, "postgres")
+                load_extension(connection, "postgres")
                 if self.settings["catalog_password"]:
                     connection.execute(*postgres_secret_query(self.settings["catalog_password"]))
             LOG.debug("ducklake: catalog %s, data path %s, s3 %s, data inlining row limit %s", self._destination(),
@@ -528,7 +354,7 @@ class DuckLakeOutput(_WarehouseOutput):
 
     def _load(self):
         try:
-            super(DuckLakeOutput, self)._load()
+            super()._load()
         except Exception as exc:
             masked = self._mask(exc)
             if masked is exc:
@@ -537,7 +363,7 @@ class DuckLakeOutput(_WarehouseOutput):
 
     def _state_connection(self):
         if not self.postgres:
-            return super(DuckLakeOutput, self)._state_connection()
+            return super()._state_connection()
         try:
             return self._connect(read_only=True)
         except Exception as exc:

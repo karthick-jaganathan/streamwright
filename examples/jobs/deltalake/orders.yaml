@@ -1,0 +1,89 @@
+# ==============================================================================
+# Pipeline: Delta Lake Direct Ingestion & ACID Upsert
+# Engine:   StreamWright DuckDBJob (Zero-JVM In-Process Lakehouse Engine)
+# Pattern:  DuckDB SQL Transformations -> Zero-Copy Apache Arrow Table 
+#           -> delta-rs (deltalake) ACID Table Merge with Partitioning
+# ==============================================================================
+
+kind: DuckDBJob
+version: 1
+name: deltalake_orders
+description: Demonstrates in-process ACID Delta Lake table management (partitioning, schema evolution, and merge/upsert) using DuckDB and deltalake (delta-rs), under the same write rules as SparkJob (shared core/jobs/write_rules).
+
+connections:
+  # Lakehouse storage connection: can be local path, AWS S3 (s3://), GCS (gs://), or Azure (abfs://)
+  lake_delta:
+    provider: deltalake
+    roots: ["data/lake/"]
+
+steps:
+  # Step 1: Synthesize incoming transactional orders
+  - name: incoming_orders
+    sql: |
+      SELECT 
+        1001 AS order_id, 
+        'cust_01' AS customer_id, 
+        'PROD-LAPTOP' AS item_sku,
+        1299.99 AS amount, 
+        'CONFIRMED' AS status,
+        DATE '2026-10-23' AS order_date,
+        TIMESTAMP '2026-10-23 09:30:00' AS updated_at
+      UNION ALL
+      SELECT 
+        1002 AS order_id, 
+        'cust_02' AS customer_id, 
+        'PROD-MOUSE' AS item_sku,
+        29.99 AS amount, 
+        'PENDING' AS status,
+        DATE '2026-10-23' AS order_date,
+        TIMESTAMP '2026-10-23 09:35:00' AS updated_at
+      UNION ALL
+      SELECT 
+        1003 AS order_id, 
+        'cust_03' AS customer_id, 
+        'PROD-KEYBOARD' AS item_sku,
+        89.50 AS amount, 
+        'SHIPPED' AS status,
+        DATE '2026-10-22' AS order_date,
+        TIMESTAMP '2026-10-22 14:15:00' AS updated_at
+
+  # Step 2: Enrichment and financial calculations
+  - name: enriched_orders
+    sql: |
+      SELECT 
+        order_id,
+        customer_id,
+        item_sku,
+        amount,
+        ROUND(amount * 0.08, 2) AS tax,
+        ROUND(amount * 1.08, 2) AS total_amount,
+        status,
+        order_date,
+        updated_at
+      FROM incoming_orders
+
+outputs:
+  # Output 1: ACID Merge / Upsert into Partitioned Delta Lake Table
+  # The merge, overwrite and schema-evolution rules are the ones SparkJob enforces (core/jobs/write_rules.py)
+  - name: orders_delta_merge
+    connection: lake_delta
+    step: enriched_orders
+    path: orders_delta          # relative to the connection's first root
+    mode: merge
+    condition: "target.order_id = source.order_id"
+    target_predicate: "target.order_date IN ({{ enriched_orders.order_date }})"
+    partition_by: [order_date]
+    schema_evolution: add_columns
+    when_matched:
+      - action: update
+        set:
+          amount: source.amount
+          tax: source.tax
+          total_amount: source.total_amount
+          status: source.status
+          updated_at: source.updated_at
+    when_not_matched:
+      - action: insert
+
+runtime:
+  threads: 4

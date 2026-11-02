@@ -23,6 +23,18 @@ streamwright run examples/sources/ads/google_ads --set customer_ids=1112223333 >
 
 `SOURCE` is a source folder (or its `source.yaml`), or a single-file source.
 
+For a manifest with a different `kind`, `run`, `validate` and `plan` dispatch to the
+installed `streamwright.job_kinds` entry point of that name: a `JobEngine` object
+(`streamwright.core.jobs.engine`: `kind`, `main(argv)`, `validate_job`, `validate_job_text`,
+`json_schema`, `guide`, `describe_connector`), which the MCP server uses too. `sw duckdb` is
+shorthand for the installed `DuckDBJob` engine. Other command packages can register subcommands via
+`streamwright.commands` entry points exposing `register(subparsers)`; the core does not
+import engine CLIs directly. Missing job kinds return an install hint.
+
+Connector catalog entries marked `trust: official` bypass confirmation **only** when read
+live from the default HTTPS hub. Custom hubs and cached indexes require `--yes` or
+interactive confirmation; option-like pip/git requirements are refused.
+
 ### Options
 
 **Inputs and state**
@@ -144,7 +156,9 @@ A step `SELECT record FROM raw_campaigns` gives one `VARCHAR` column, `record`, 
 
 By default the files are named `<export>.<date>.<time>.<unique>.jsonl` (or `.csv`, `.tsv`, `.parquet`).
 
-`--file-name TEMPLATE` names the export files instead: a relative path inside `DIR`, extension included, made from:
+`--file-name TEMPLATE` names the export files instead: a relative path inside `DIR`, extension included. The YAML can
+name them too, with the same template: an export's `file_name`, or a `source.yaml` default `export: {file_name: ...}`;
+`--file-name` replaces both. The template is made from:
 
 | Reference | Value |
 |---|---|
@@ -152,6 +166,7 @@ By default the files are named `<export>.<date>.<time>.<unique>.jsonl` (or `.csv
 | {% raw %}`{{ source }}`{% endraw %} | the source's name |
 | {% raw %}`{{ today }}`{% endraw %} | YYYY-MM-DD |
 | {% raw %}`{{ timestamp }}`{% endraw %} | the run's start in UTC, YYYYMMDDTHHMMSSZ |
+| {% raw %}`{{ format }}`{% endraw %} | the output's extension: `jsonl`, `csv`, `tsv` or `parquet` |
 | {% raw %}`{{ config.NAME }}`{% endraw %} | config values, never secrets |
 
 {% raw %}

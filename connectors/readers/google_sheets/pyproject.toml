@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-google-sheets"
-version = "0.0.1"
+version = "0.0.2"
 description = "StreamWright - Google Sheets connector (read-only row streaming from spreadsheets via Google Sheets API v4)"
 readme = "README.md"
 license = "Apache-2.0"
@@ -16,17 +16,18 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "streamwright~=0.1.0",
+    "streamwright~=0.1.9",
     "google-auth>=2.20.0",
-    "requests>=2.28.0",
 ]
+
+[project.optional-dependencies]
+spark = ["streamwright-spark[spark]~=0.1.0"]
 
 [project.urls]
 Homepage = "https://streamwright.web.app"
@@ -35,8 +36,11 @@ Repository = "https://github.com/karthick-jaganathan/streamwright"
 "Issue Tracker" = "https://github.com/karthick-jaganathan/streamwright/issues"
 
 [project.entry-points."streamwright.connectors"]
-google_sheets = "streamwright.connectors.google_sheets.connector:GoogleSheetsConnector"
+google_sheets = "streamwright.connectors.google_sheets:CONNECTOR"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["streamwright.connectors.google_sheets"]
+packages = ["streamwright.connectors.google_sheets", "streamwright.connectors.google_sheets.engines"]
+
+[tool.setuptools.package-data]
+"streamwright.connectors.google_sheets" = ["guide.md"]

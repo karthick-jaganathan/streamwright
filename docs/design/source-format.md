@@ -439,18 +439,19 @@ requests:
         service: ReportingService
         method: SubmitGenerateReport
         arguments:
-          ReportRequest:
-            "@type": CampaignPerformanceReportRequest   # SOAP type, built by the connector
-            Aggregation: Daily
-            Format: Csv
-            ExcludeReportHeader: true
-            ExcludeReportFooter: true
-            Columns: [TimePeriod, AccountId, CampaignId, CampaignName, Impressions, Clicks, Spend]
-            Scope: {AccountIds: ["{{ partition.account_id }}"]}
-            Time: {CustomDateRangeStart: "{{ window.start }}", CustomDateRangeEnd: "{{ window.end }}"}
+          request:
+            ReportRequest:
+              "@type": CampaignPerformanceReportRequest   # SOAP type, built by the connector
+              Aggregation: Daily
+              Format: Csv
+              ExcludeReportHeader: true
+              ExcludeReportFooter: true
+              Columns: [TimePeriod, AccountId, CampaignId, CampaignName, Impressions, Clicks, Spend]
+              Scope: {AccountIds: ["{{ partition.account_id }}"]}
+              Time: {CustomDateRangeStart: "{{ window.start }}", CustomDateRangeEnd: "{{ window.end }}"}
       poll:
         method: PollGenerateReport
-        arguments: {ReportRequestId: "{{ submit.result }}"}
+        arguments: {request: {ReportRequestId: "{{ submit.result }}"}}
         every: 15s
         timeout: 30m
         done_when: {path: Status, equals: Success}
@@ -476,7 +477,7 @@ export:
 ```
 
 The ad groups of each campaign: the export of the `campaigns` stream supplies (account, campaign) pairs, and each
-request names its account in the `CustomerAccountId` header, since the operation only takes the campaign's ID.
+request names its account in `arguments.account_id` (the `CustomerAccountId` SOAP header), since the operation only takes the campaign's ID.
 
 ```yaml
 # microsoft_ads/streams/ad_groups.yaml
@@ -487,8 +488,9 @@ requests:
     sdk: microsoft_ads
     service: CampaignManagementService
     method: GetAdGroupsByCampaignId
-    headers: {CustomerAccountId: "{{ partition.account_id }}"}    # the request names only the campaign
-    arguments: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
+    arguments:
+      account_id: "{{ partition.account_id }}"    # the request names only the campaign
+      request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
     records: {path: AdGroup}
 transform:
   mode: page
@@ -527,8 +529,9 @@ requests:
     service: CampaignManagementService
     method: GetCampaignsByAccountId
     arguments:
-      AccountId: "{{ partition.account_id }}"
-      CampaignType: [Search, Shopping, DynamicSearchAds, Audience, PerformanceMax]
+      request:
+        AccountId: "{{ partition.account_id }}"
+        CampaignType: [Search, Shopping, DynamicSearchAds, Audience, PerformanceMax]
     records: {path: Campaign}
   - name: raw_ad_groups
     partitions:
@@ -536,8 +539,9 @@ requests:
     sdk: microsoft_ads
     service: CampaignManagementService
     method: GetAdGroupsByCampaignId
-    headers: {CustomerAccountId: "{{ partition.account_id }}"}
-    arguments: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
+    arguments:
+      account_id: "{{ partition.account_id }}"
+      request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
     records: {path: AdGroup}
 transform:
   mode: run                        # two requests, the second partitioned by a step: in dependency order
@@ -590,15 +594,15 @@ spec:
   config:
     account_ids: {type: list, items: string, description: Ad account IDs without the act_ prefix}
     start_date: {type: date, default: "-30d"}
+    app_id: {type: string, required: false}
   secrets:
     access_token: {type: string}
-    app_id: {type: string, required: false}
     app_secret: {type: string, required: false}
 
 auth:
   provider: meta_ads               # registered by the streamwright-meta-ads connector
   access_token: "{{ secrets.access_token }}"
-  app_id: "{{ secrets.app_id }}"
+  app_id: "{{ config.app_id }}"
   app_secret: "{{ secrets.app_secret }}"
   api_version: v26.0
 ```
@@ -621,6 +625,7 @@ requests:
     arguments:
       id: "act_{{ partition.account_id }}"
       fields: [account_id, campaign_id, campaign_name, date_start, impressions, clicks, spend]
+      action_report_time: conversion   # an undeclared (vendor) Graph API argument, forwarded verbatim (contract §6a)
       params:
         level: campaign
         time_increment: 1
@@ -695,7 +700,7 @@ A glob reads every file it matches, in name order; `filename` adds each file's p
 requests:
   - name: raw_orders
     sdk: files
-    service: file
+    service: object
     method: read
     arguments:
       path: "orders/*.csv"
@@ -717,6 +722,7 @@ export:
   orders:
     step: orders
     primary_key: [order_id]
+    file_name: "{{ source }}/orders/{{ today }}.{{ format }}"  # with a file output, e.g. out/files_demo/orders/2026-10-04.csv
 ```
 
 A path can use references, so an incremental stream reads one file per day; a day without its file is skipped with a
@@ -731,7 +737,7 @@ incremental:
 requests:
   - name: raw_customers
     sdk: files
-    service: file
+    service: object
     method: read
     arguments:
       path: "customers/{{ window.start }}.jsonl"
@@ -815,6 +821,12 @@ spec:
     bucket_root: {type: string, default: "s3://acme-data/exports/", description: "The URL prefix objects are read from (s3://bucket/prefix/)"}
     region: {type: string, default: us-east-1, description: The bucket's region}
     start_date: {type: date, default: "2026-10-01", description: First day of customers' daily objects}
+    # Optional overrides for an S3-compatible store (MinIO, LocalStack, Ceph, ...). Left unset they are omitted and
+    # the connection talks to Amazon S3. Set them at run time, e.g. for LocalStack:
+    #   --set endpoint=127.0.0.1:4566 --set url_style=path --set use_ssl=false
+    endpoint: {type: string, required: false, description: "S3-compatible endpoint as host[:port] (no scheme)"}
+    url_style: {type: string, required: false, description: "path (most S3-compatible stores) or vhost"}
+    use_ssl: {type: boolean, required: false, description: "false: plain HTTP to the endpoint"}
   secrets:
     s3_key_id: {type: string, description: The access key id}
     s3_secret: {type: string, description: The secret access key}
@@ -825,6 +837,9 @@ auth:
   key_id: "{{ secrets.s3_key_id }}"    # credentials: secret references only, never written in the source
   secret: "{{ secrets.s3_secret }}"
   region: "{{ config.region }}"        # settings: literal values or references
+  endpoint: "{{ config.endpoint }}"    # S3-compatible overrides; each is dropped when its config input is unset
+  url_style: "{{ config.url_style }}"
+  use_ssl: "{{ config.use_ssl }}"
 ```
 
 `match` picks objects by a regex, fully matched against each key relative to the `path` folder, in key order; other
@@ -1169,12 +1184,12 @@ convention a request is named `raw_<entity>`, e.g. `raw_campaigns`.
 | `partitions` | optional request-level partitions, only with `transform.mode: run` (below) |
 
 - `http`: `path` (joined to `http.base_url`), `method` (default GET), `params`, `headers`, `json`.
-- `sdk`: `sdk` (connector), `service`, `method`, `arguments` and optional `headers`, per-request headers the connector
-  takes (e.g. Microsoft Ads' `CustomerAccountId`; others stop the run before it starts). The connector allows only
+- `sdk`: `sdk` (connector), `service`, `method` and `arguments`. An sdk request takes no `headers`: per-request values
+  (an account, a customer) are the operation's arguments, e.g. Microsoft Ads' `account_id`. The connector allows only
   read-only calls and converts responses to plain data, read with the request's `records` like HTTP responses
-  (replacing the legacy `post_processor`). An async job's `poll` uses its `submit` headers.
+  (replacing the legacy `post_processor`).
 - Reader connectors: `sdk` can also name a connector that reads files, objects or a database rather than an API SDK.
-  `sdk: files` (`service: file`, `method: read`) reads local csv, tsv, json, jsonl and parquet files, and `sdk: s3`
+  `sdk: files` (`service: object`, `method: read`) reads local csv, tsv, json, jsonl and parquet files, and `sdk: s3`
   and `sdk: gcs` (`service: object`, `method: read`) read the same formats from object storage, all with
   `arguments: {path, format, options, on_missing, match, recursive}`: `path` is a file, a glob or a list of them, or,
   with `match` (a literal Python regex fully matched against each file's path relative to the `path` folder), a
@@ -1424,6 +1439,12 @@ stream, a file, or a table in DuckDB, DuckLake or a dlt destination.
 | `step` | the step whose rows are written: a step of this stream, not a request (for the records as returned, a step `SELECT record FROM <request>`) |
 | `primary_key` | optional; columns of the step, for de-duplication and merges downstream |
 | `description` | optional text |
+| `file_name` | optional; the export's file inside a file output's directory (folders allowed), a template like `--file-name`'s (`{{ export }}`, `{{ source }}`, `{{ today }}`, `{{ timestamp }}`, `{{ format }}` (the output's extension: jsonl, csv, tsv or parquet), `{{ config.<name> }}`), e.g. `"{{ config.client }}/campaigns_{{ today }}.{{ format }}"` |
+
+A `source.yaml` may give every export a default with a top-level `export: {file_name: TEMPLATE}` (e.g.
+`"{{ source }}/{{ export }}_{{ today }}.{{ format }}"`); an export's own `file_name` replaces it, and a run's `--file-name`
+replaces both. File names apply to the file outputs (`jsonl`, `csv`, `tsv`, `parquet`) only; the other outputs do
+not use them. `streamwright validate` checks the references.
 
 - Export names are unique in the source (names ignore case). An export can have its own stream's name, or the name
   of one of its stream's steps or requests, but not another stream's name. By convention, a stream with one export
@@ -1455,12 +1476,25 @@ Keys of earlier versions of the format are errors, each with a hint:
 ### Errors, retries and rate limits
 
 `retry` (`codes`: status codes or provider error codes, `max_attempts`, `backoff`, `max_delay`) and `rate_limit`
-(`requests` per period) are set in `http` or per stream. SDK connectors map their errors onto the same policy: they
-retry their APIs' throttling and temporary errors themselves, and `retry.codes` adds provider error codes; a streamed
-SDK response that fails after records were read is not retried. The `rate_limit` in `http` is shared by all of the
-source's streams; a stream's own `rate_limit` replaces it for that stream. When retries run out the stream fails,
-unless the stream sets `on_partition_error: skip`: then the partition is skipped, and the stream is incomplete (see
-[Execution semantics](#execution-semantics)).
+(`requests` per period) are set in `http` or per stream. SDK connectors map their errors onto the same policy: an error
+carries every provider code it has (e.g. Google Ads error names and the gRPC status, a Graph API code and subcode),
+and it is retried when one of them is in the connector's `retry_codes` (declared in its spec and listed in
+its guide). A stream's `retry.codes` replace those defaults: then only the listed codes are
+retried (compared as text, so `613` and `"613"` match), and codeless failures such as a dropped connection are still
+retried. A streamed SDK response that fails after records were read is not retried. The `rate_limit` in `http` is shared by all of the
+source's streams; a stream's own `rate_limit` replaces it for that stream. A stream's `timeout` (seconds, or a
+duration like `30s`) bounds each HTTP call.
+
+This is the one *execution policy* vocabulary of connector contract v1.2 §6a — `retry`, `rate_limit`,
+`paginator`, `on_error` and `timeout` mean the same on a source stream, a DuckDBJob/SparkJob step and an output,
+with identical defaults. When retries run out the stream fails, unless the stream tolerates the error:
+
+- `on_error: skip` (the released alias `on_partition_error: skip` keeps working) — the failing partition is skipped
+  and the stream is reported incomplete (see [Execution semantics](#execution-semantics));
+- `on_error: warn` — the failing partition is skipped and logged, but the stream is **not** marked incomplete;
+- `on_error: fail` (the default) — the stream fails.
+
+A stream sets `on_error` or its released alias `on_partition_error`, not both.
 
 ### Client settings and secrets
 
@@ -1500,7 +1534,9 @@ same name is replaced; `state.json` keeps its name, so a path is not `state.json
 that name (in any case), and a folder `DIR/state.json` stops any run. A template with other references, or that does
 not give such paths, stops the run (exit status 2) before any request; a symbolic link that leads a path outside
 `DIR` by the time the files are renamed into place fails the run, and no file is written.
-`--file-name` works only with these four file outputs, and gives the whole path, extension included.
+`--file-name` works only with these four file outputs, and gives the whole path, extension included. Without it, an
+export's `file_name` (else the source's `export.file_name`) names its file with the same template, references and
+checks; exports without one keep the default name.
 
 `tsv` files hold the values of `csv` files (a header row; a null is an empty field, a list is comma-joined, a mapping
 is JSON), tab-separated; a field with a tab, a quote or a line break is quoted (the csv module's `excel-tab`
@@ -1551,12 +1587,12 @@ the run failed, `error` (redacted and cut as log lines are).
 
 ## Security
 
-1. YAML cannot name Python modules or classes. Components are registered through Python entry points:
-   connectors (auth providers and the SDK calls they allow, group `streamwright.connectors`) and query builders (group
-   `streamwright.query_builders`); paginators are built in. Sdk requests name API services and methods, and each connector
+1. YAML cannot name Python modules or classes. Connectors are registered through Python entry points (group
+   `streamwright.connectors`, the connector's definition: auth keys, the SDK calls it allows and its query builders,
+   see [the connector contract](connector-contract.md)); paginators are built in. Sdk requests name API services and methods, and each connector
    allows only read-only ones. Records are shaped by SQL that runs in a locked-down DuckDB (see `transform`).
-2. Platforms allow-list components (`streamwright run --allow-connector NAME` and `streamwright validate --allow-connector NAME`, for
-   connectors and query builders alike, e.g. `google_ads` and `gaql`), and each connector runs in its own environment.
+2. Platforms allow-list connectors (`streamwright run --allow-connector NAME` and `streamwright validate --allow-connector NAME`;
+   a connector's query builders come with it, e.g. `gaql` with `google_ads`), and each connector runs in its own environment.
 3. `{{ secrets.* }}` is only allowed inside `auth` (a validation error elsewhere), so secrets cannot leak into URLs,
    parameters or output. Secret values, and the tokens a run obtains (OAuth access, refresh and ID tokens, and the
    tokens connectors register with `context.secret()`), are redacted from errors and from every log line: streamwright's and
@@ -1730,4 +1766,5 @@ starts.
 | 20 | Batched request partitions | `batch_size: N` on a request partition (`{name, values}`, `{name, from, field}`, or `{from, fields}` with exactly one field that is not a stream partition): one request per list of up to `N` distinct values, which the name holds, e.g. GAQL `campaign.id IN (...)`; a step's values in a partitioned stream are batched only with `{from, fields}` listing the stream partition fields, so each stream partition lists only its own; not on stream partitions, and windows and state stay per stream partition. `streamwright connectors` lists only the installed connectors and their SDK loggers; query builders such as `gaql` are still used and checked by `streamwright validate` (decided on 2026-10-05) | APIs that filter by a list read a large account in a few calls (1000 campaigns' ad groups in 5 GAQL queries, not 1000), within the query's limits, without a new request type. Stream partitions stay single values, so bookmarks do not change. `streamwright connectors` answers which connectors and SDK loggers are installed |
 | 21 | File and object storage sources | Files and objects are read by reader connectors, not a request kind of the core, one connector per kind of storage: `files` (`streamwright-files`) reads local folders only (`auth: {provider: files, roots: [...]}`; no URLs, no `httpfs`, no credentials, external access always off), and `s3` (`streamwright-s3`) and `gcs` (`streamwright-gcs`) read `s3://` and `gs://` prefixes through DuckDB's `httpfs` (`auth: {provider: s3, roots, key_id, secret, ...}`, or `provider: gcs`; credentials from secrets only). Requests (`method: read`) read csv, tsv, json, jsonl and parquet with DuckDB's readers, each row one record, picked by a path, a glob or a list, or by a `match` regex fully matched below a folder (`recursive` for sub-folders). Every path, and every file or key a glob, a regex or a listing selects, is checked inside a root before anything is read; `s3` and `gcs` refuse any `?` or `%` in a URL and check scheme, bucket and prefix exactly. There is no `https` reader (decided on 2026-10-05, replacing a first version in which `files` also read `s3://`, `gs://` and `https://` roots with credentials blocks) | A connector keeps the core unchanged and each reader optional, allow-listed (`--allow-connector files`) and versioned like the ad APIs, and partitions, windows, `batch_size`, retries and steps work as they are. Split connectors keep local reading free of network access and credentials, and give each object store only its own scheme and settings. DuckDB already shapes records, reads every format and streams large files in bounded memory; refusing `?` and `%` closes httpfs' URL settings (`?s3_endpoint=` would send signed requests to another host), and the roots in `auth` give deployments one place to decide what can be read. A regex picks files a glob cannot (date folders, no `_SUCCESS` markers) |
 | 22 | Database sources | PostgreSQL is read by the `postgres` connector (`streamwright-postgres`), not a request kind of the core: `auth: {provider: postgres, dsn: "{{ secrets.* }}"}` and `sdk: postgres` requests, `method: query` (one SELECT in DuckDB's SQL over the attached database, with `$name` values bound from `params`) or `method: table`. The database is attached `READ_ONLY` through DuckDB's postgres scanner and a temporary DuckDB secret holding the DSN; write keywords, other statements, functions that run text of their own and DuckDB's system and catalog views (`duckdb_*`, `pragma_*`, `system`, `pg_catalog`, `information_schema`, `SHOW`, `DESCRIBE`, `SUMMARIZE`) are refused before a query runs, and an unconstrained `numeric` is read as exact text (decided on 2026-10-05) | The same connector model as files and the ad APIs, with no new driver: DuckDB's scanner pushes filters down, pages large results and binds values, a list included (`= ANY($ids)` for `batch_size`). Read-only is enforced three times (the query check, the attach and a locked connection), so a write fails even when the role could write. Attaching through a secret keeps the DSN out of DuckDB's views, and refusing them keeps queries to the database's own tables; the DSN stays a redacted secret |
+| 23 | Python and DuckDB versions (replaces 12) | Python 3.11+ for streamwright, the connectors, Spark and MCP, with DuckDB 2.0 (`duckdb>=2.0,<2.1`) (decided on 2026-11-02) | The engines are developed and tested on DuckDB 2.0, which needs Python 3.11; a range down to 1.5 let Python 3.10 install an untested DuckDB whose parser and option names differ |
 {% endraw %}

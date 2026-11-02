@@ -1,23 +1,27 @@
 import datetime
 import gzip
-import logging
 import io
 import json
+import logging
+import sys
 import zipfile
+from unittest.mock import MagicMock
 
 import pytest
 import yaml
 
 from streamwright.core import cli
-from streamwright.core.net import downloads
-from streamwright.core.runtime import components
-from streamwright.core.runtime.components import Connector, ConnectorError, ComponentLoadError, QueryBuilder
-from streamwright.core.engine.queries import BuiltQuery
 from streamwright.core.engine.runner import SourceError, SourceRunner
+from streamwright.core.io.api_calls import make_caller
+from streamwright.core.net import downloads
+from streamwright.core.runtime import components, plugins
+from streamwright.core.runtime.components import ComponentLoadError, ConnectorError, QueryBuilder
 from streamwright.core.runtime.testing import FakeClock, MemoryOutput, page_stream
+from streamwright.core.sdk.contract import ConnectorDefinition, Field, Operation
 from streamwright.core.validation import engine
 
 TODAY = datetime.date(2026, 10, 3)
+VENDOR = None  # the FakeVendor of the running test (the `fake` fixture sets it)
 
 
 # * ---------------------------
@@ -27,54 +31,57 @@ TODAY = datetime.date(2026, 10, 3)
 class FakeSdkError(Exception):
 
     def __init__(self, message, code):
-        super(FakeSdkError, self).__init__(message)
+        super().__init__(message)
         self.code = code
 
 
-class FakeConnector(Connector):
+class FakeVendor:
     """Answers `handlers[method](arguments) -> responses`; `failures[method]` are raised by the next calls."""
 
-    name = "fake"
-    auth_required = ("token",)
-    auth_optional = ("region",)
-
     def __init__(self):
-        self.handlers, self.failures, self.calls, self.connected, self.checked = {}, {}, [], [], []
+        self.handlers, self.failures, self.calls, self.connected, self.streams = {}, {}, [], [], []
 
-    def check_request(self, request):
-        self.checked.append(request)
-        if request.get("service") != "Reports":
-            return ["service %r is not supported (supported: Reports)" % request.get("service")]
-        return []
 
-    def connect(self, auth, context):
-        self.connected.append(auth)
-        if auth["token"] == "expired-token":
-            raise FakeSdkError("token expired-token was rejected", "AUTH")
-        return {"token": auth["token"]}
+def translate_error(exc):
+    if isinstance(exc, FakeSdkError):
+        return ConnectorError(str(exc), code=exc.code, retryable=exc.code == "BUSY")
+    return None
 
-    def request(self, client, request, context):
-        assert client == {"token": self.connected[-1]["token"]}
-        self.calls.append(request)
-        method = request["method"]
+
+class FakeSession:
+    def __init__(self, vendor):
+        self.vendor = vendor
+
+    def read(self, operation, arguments, context):
+        vendor = self.vendor
+        vendor.calls.append({"service": operation.service, "method": operation.method, "arguments": dict(arguments)})
+        vendor.streams.append((context.where or {}).get("stream"))
 
         def send():
-            if self.failures.get(method):
-                raise self.failures[method].pop(0)
-            return self.handlers[method](request["arguments"])
-        for response in context.call(send):
-            yield response
+            if vendor.failures.get(operation.method):
+                raise vendor.failures[operation.method].pop(0)
+            return vendor.handlers[operation.method](arguments)
+        yield from make_caller(context, translate_error)(send)
 
-    def error(self, exc):
-        if isinstance(exc, FakeSdkError):
-            return ConnectorError(str(exc), code=exc.code, retryable=exc.code == "BUSY")
-        return None
+    def close(self):
+        self.vendor = None
+
+
+class FakeSourceAdapter:
+    def open(self, connection, context):
+        VENDOR.connected.append(dict(connection))
+        if connection["token"] == "expired-token":
+            raise ConnectorError("token %s was rejected" % connection["token"], code="AUTH")
+        return FakeSession(VENDOR)
+
+
+def check_region(connection):
+    region = connection.get("region")
+    return [] if region in (None, "eu", "us") else ["region %r is not served" % region]
 
 
 class FakeQueryBuilder(QueryBuilder):
     """`{fake_query: {select: [...], where: {field: value}}}` -> SELECT a, b WHERE field = 'value' (quotes doubled)."""
-
-    name = "fake_query"
 
     def check(self, spec):
         if not isinstance(spec, dict):
@@ -91,16 +98,32 @@ class FakeQueryBuilder(QueryBuilder):
         return "SELECT %s%s" % (", ".join(spec["select"]), " WHERE " + where if where else "")
 
 
+def _reports(method, *arguments):
+    return Operation(service="Reports", method=method, arguments=arguments)
+
+
+FAKE = ConnectorDefinition(
+    name="fake", title="Fake", family="test",
+    connection=(Field("token", "string", required=True, secret=True), Field("region", "string")),
+    operations=(_reports("list", Field("account", ("string", "mapping")), Field("query", "string")),
+                _reports("submit", Field("account", "string")), _reports("status", Field("id", ("string", "integer"))),
+                _reports("rows", Field("report", "string"))),
+    adapters={"source": __name__ + ":FakeSourceAdapter"},
+    validator=__name__ + ":check_region",
+    query_builders={"fake_query": __name__ + ":FakeQueryBuilder"},
+)
+
+
 @pytest.fixture
-def fake():
-    connector, builder = FakeConnector(), FakeQueryBuilder()
-    components.register(connector)
-    components.register(builder)
-    yield connector
+def fake(monkeypatch):
+    vendor = FakeVendor()
+    monkeypatch.setattr(sys.modules[__name__], "VENDOR", vendor)
+    components.register(FAKE)
+    yield vendor
     components.unregister("fake")
-    components.unregister("fake_query")
 
 
+SUPPORTED = "Reports.list, Reports.submit, Reports.status, Reports.rows"
 ROWS = "SELECT (record->>'id')::BIGINT AS id, partition->>'account' AS account FROM records"
 
 
@@ -140,17 +163,48 @@ def test_sdk_requests_are_rendered_and_queries_built(fake):
                                               {"id": 1, "account": "a2"}, {"id": 2, "account": "a2"}]
     assert fake.calls[0] == {"service": "Reports", "method": "list", "arguments": {
         "account": "a1", "query": "SELECT clicks WHERE name = 'it''s'"}}
-    # the connector's checks see the builder's call as the query it will be
-    assert fake.checked[0]["arguments"]["query"] == BuiltQuery("fake_query")
     assert fake.connected == [{"token": "secret-token-1"}]  # one connection per run
+
+
+def test_rendered_dates_in_text_arguments_are_iso_text(fake):
+    """`{{ today }}` renders to a date: a text argument gets its ISO text (it failed the rendered-argument check)."""
+    fake.handlers["submit"] = lambda arguments: [{"rows": [{"id": 1}]}]
+    source = fake_source()
+    request_of(source).update({"method": "submit", "arguments": {"account": "{{ today }}"}})
+    run(source)
+    assert fake.calls[0]["arguments"] == {"account": TODAY.isoformat()}
+
+
+def test_each_request_reads_with_its_own_streams_context(fake):
+    """The session opens once, with the first stream's context; each read uses the context of its own stream."""
+    fake.handlers["list"] = lambda arguments: [{"rows": [{"id": 1}]}]
+    source = fake_source()
+    source["streams"].append(fake_stream("quota", retry={"codes": ["QUOTA"], "max_attempts": 2,
+                                                         "backoff": "constant"}))
+    output, clock = MemoryOutput(), FakeClock()
+    runner = SourceRunner(source, {"name": "n"}, {"token": "t"}, output=output, today=TODAY, clock=clock,
+                          sleep=clock.sleep)
+    runner.run(["rows"])
+    fake.failures["list"] = [FakeSdkError("over quota", "QUOTA")]  # retried only by the `quota` stream's policy
+    runner.run(["quota"])
+    assert fake.streams == ["rows", "rows", "quota", "quota"] and clock.sleeps == [1]
+    stats = runner.metrics.streams
+    assert stats["rows"].requests == {"records": 2} and (stats["quota"].requests, stats["quota"].retries) == (
+        {"records": 3}, 1)  # the `requests` of the run summary, counted for the stream that reads
 
 
 def test_connector_errors_follow_the_retry_policy(fake):
     fake.handlers["list"] = lambda arguments: [{"rows": [{"id": 1}]}]
     fake.failures["list"] = [FakeSdkError("busy", "BUSY"), FakeSdkError("over quota", "QUOTA")]
     clock = FakeClock()
-    output = run(fake_source(retry={"codes": ["QUOTA"], "max_attempts": 3, "backoff": "constant"}), clock=clock)
+    output = run(fake_source(retry={"codes": ["BUSY", "QUOTA"], "max_attempts": 3, "backoff": "constant"}),
+                 clock=clock)
     assert len(output.records) == 2 and clock.sleeps == [1, 1]
+
+    # a stream's codes replace the defaults: BUSY, flagged transient by the connector, is no longer retried
+    fake.failures["list"] = [FakeSdkError("busy", "BUSY")]
+    with pytest.raises(SourceError, match="busy"):
+        run(fake_source(retry={"codes": ["QUOTA"]}))
 
     fake.failures["list"] = [FakeSdkError("bad request for secret-token-1", "INVALID")]
     with pytest.raises(SourceError) as error:
@@ -168,6 +222,23 @@ def test_exceptions_that_are_not_api_errors_fail_the_run(fake):
         run(fake_source(on_partition_error="skip"))
 
 
+def test_run_time_checks_the_declared_auth_and_the_resolved_values_before_connecting(fake):
+    fake.handlers["list"] = lambda arguments: [{"rows": [{"id": 1}]}]
+    source = fake_source()
+    source["auth"]["region"] = "{{ config.region }}"
+
+    def run_in(region, secrets):
+        SourceRunner(source, {"name": "n", "region": region}, secrets, output=MemoryOutput(), today=TODAY).run()
+    run_in("eu", {"token": "secret-token-1"})
+    assert fake.connected == [{"token": "secret-token-1", "region": "eu"}]
+    with pytest.raises(SourceError, match="region 'mars' is not served"):
+        run_in("mars", {"token": "secret-token-1"})
+    assert len(fake.connected) == 1
+    source["auth"]["token"] = "secret-token-1"                 # a written credential is refused at run time too
+    with pytest.raises(SourceError, match=r"auth.token: must be one \{\{ secrets.NAME \}\} reference"):
+        run_in("eu", {})
+
+
 def test_connect_failures_stop_the_run(fake):
     with pytest.raises(SourceError) as error:
         run(fake_source(on_partition_error="skip"), token="expired-token")
@@ -175,9 +246,9 @@ def test_connect_failures_stop_the_run(fake):
 
 
 def test_requests_and_auth_must_match(fake):
-    with pytest.raises(SourceError, match="http requests need a built-in `auth.type`"):
+    with pytest.raises(SourceError, match=r"http requests need a built-in `auth.type`"):
         run(fake_source(request={"http": {"path": "/rows"}}))
-    with pytest.raises(SourceError, match="needs 'token'"):
+    with pytest.raises(SourceError, match=r"auth.token: is required"):
         SourceRunner(dict(fake_source(), auth={"provider": "fake"}), {"name": "x"}, {}, output=MemoryOutput()).run()
 
 
@@ -187,23 +258,30 @@ def test_requests_and_auth_must_match(fake):
 
 def test_connectors_are_found_through_entry_points(tmp_path, monkeypatch):
     (tmp_path / "streamwright_test_connector.py").write_text(
-        "from streamwright.core.runtime.components import Connector\n\n\n"
-        "class EntryConnector(Connector):\n    name = 'entry_test'\n")
+        "from streamwright.core.sdk.contract import ConnectorDefinition\n\n"
+        "CONNECTOR = ConnectorDefinition('entry_test', 'Entry', 'test', connection=(), operations=(), adapters={})\n\n"
+        "class OldConnector:\n    name = 'old'\n")
     dist = tmp_path / "streamwright_test_connector-0.1.dist-info"
     dist.mkdir()
-    (dist / "METADATA").write_text("Metadata-Version: 2.1\nName: streamwright-test-connector\nVersion: 0.1\n")
+    (dist / "METADATA").write_text(
+        "Metadata-Version: 2.1\nName: streamwright-test-connector\nVersion: 0.1\n"
+        "StreamWright-SDK-Version: 1.0\n")
     (dist / "entry_points.txt").write_text(
-        "[streamwright.connectors]\nentry_test = streamwright_test_connector:EntryConnector\nbroken = streamwright_test_connector:Missing\n"
-        "wrong = streamwright_test_connector:EntryConnector\n")
+        "[streamwright.connectors]\nentry_test = streamwright_test_connector:CONNECTOR\n"
+        "broken = streamwright_test_connector:Missing\nwrong = streamwright_test_connector:CONNECTOR\n"
+        "old = streamwright_test_connector:OldConnector\n")
     monkeypatch.syspath_prepend(str(tmp_path))
     try:
-        assert {"entry_test", "broken", "wrong"} <= set(components.available())
-        connector = components.load("entry_test")
-        assert connector.name == "entry_test" and components.load("entry_test") is connector
-        with pytest.raises(ComponentLoadError, match="could not be loaded: AttributeError"):
+        assert {"entry_test", "broken", "wrong", "old"} <= set(components.available())
+        definition = components.load("entry_test")
+        assert definition.name == "entry_test" and components.load("entry_test") is definition
+        with pytest.raises(ComponentLoadError, match=r"could not be loaded .*AttributeError"):
             components.load("broken")
-        with pytest.raises(ComponentLoadError, match="is not a 'wrong' connector"):
+        with pytest.raises(ComponentLoadError, match="'wrong' defines the connector 'entry_test'"):
             components.load("wrong")
+        with pytest.raises(ComponentLoadError, match=r"old \(streamwright-test-connector\) targets the pre-contract "
+                                                     r"connector API; it needs an update to connector contract v1"):
+            components.load("old")
         with pytest.raises(ComponentLoadError, match="install it with: pip install streamwright-not-there"):
             components.load("not_there")
         with pytest.raises(ComponentLoadError, match="not in the allowed list"):
@@ -212,18 +290,25 @@ def test_connectors_are_found_through_entry_points(tmp_path, monkeypatch):
         components.unregister("entry_test")
 
 
+def test_query_builders_of_connectors_that_are_not_allowed_are_never_imported(fake, monkeypatch):
+    untrusted = MagicMock()
+    untrusted.name = "untrusted"
+    monkeypatch.setattr(plugins, "entry_point_source", lambda: {plugins.CONNECTORS: [untrusted]})
+    assert components.query_builders(allowed=["fake"]) == {"fake_query": FAKE}
+    untrusted.load.assert_not_called()
+    assert components.query_builders(allowed=["other"]) == {}
+
+
 def test_sources_are_checked_against_their_connector(fake):
     source = fake_source()
     source["auth"] = {"provider": "fake", "tokn": "x"}
     request_of(source)["service"] = "Admin"
     assert components.check_source(source) == [
-        "auth: provider 'fake' needs 'token'",
-        "auth: provider 'fake' does not support 'tokn' (supported: token, region)",
-        "stream 'rows': requests[0]: service 'Admin' is not supported (supported: Reports)"]
+        "auth.token: is required",
+        "auth.tokn: unknown vendor argument (did you mean 'token'?)",
+        "stream 'rows': requests[0]: fake: Admin.list is not supported (supported: " + SUPPORTED + ")"]
     assert components.check_source(fake_source(), allowed=["other"]) == [
-        "connector 'fake' is not in the allowed list (other)",
-        "stream 'rows': requests[0].arguments.query.fake_query: query builder 'fake_query' is not in the allowed "
-        "list (other)"]
+        "connector 'fake' is not in the allowed list (other)"]
     assert components.check_source(fake_source()) == []
 
 
@@ -237,11 +322,11 @@ def test_every_request_of_a_stream_is_checked_as_streamwright_run_checks_it(fake
     assert components.component_problems(source) == [
         (("streams", 0, "requests", 1, "arguments", "query", "fake_query", "select"),
          "fake_query: `select` must be a list of fields", False),
-        (("streams", 0, "requests", 1), "service 'Admin' is not supported (supported: Reports)", False)]
+        (("streams", 0, "requests", 1), "fake: Admin.list is not supported (supported: " + SUPPORTED + ")", False)]
     messages = components.check_source(source)
     assert messages == [
         "stream 'rows': requests[1].arguments.query.fake_query.select: fake_query: `select` must be a list of fields",
-        "stream 'rows': requests[1]: service 'Admin' is not supported (supported: Reports)"]
+        "stream 'rows': requests[1]: fake: Admin.list is not supported (supported: " + SUPPORTED + ")"]
     with pytest.raises(SourceError) as error:  # a run checks the same, before any call
         run(source)
     assert all(message in str(error.value) for message in messages) and fake.calls == []
@@ -272,34 +357,15 @@ def job_source(**job):
                                         coalesce((record->>'Clicks')::BIGINT, 0) AS clicks FROM records""")
 
 
-def test_request_headers_reach_the_connector_and_its_polls(fake):
-    fake.request_headers = ("Account",)
-    fake.handlers["list"] = lambda arguments: [{"rows": [{"id": 1}]}]
-    source = fake_source()
-    request_of(source)["headers"] = {"Account": "{{ partition.account }}"}
-    run(source)
-    assert [call["headers"] for call in fake.calls] == [{"Account": "a1"}, {"Account": "a2"}]
-
-    fake.calls.clear()
-    fake.handlers["submit"] = lambda arguments: ["job-1"]
-    fake.handlers["status"] = lambda arguments: [{"Status": "Success"}]  # no file: no data
-    source = job_source()
-    request_of(source)["async_job"]["submit"]["headers"] = {"Account": "{{ partition.account }}"}
-    run(source)
-    assert [(call["method"], call["headers"]) for call in fake.calls] == [("submit", {"Account": "a1"}),
-                                                                          ("status", {"Account": "a1"})]
-
-
-def test_headers_a_connector_does_not_take_stop_the_run(fake):
+def test_sdk_requests_take_no_headers(fake):
+    """Per-request values are an operation's arguments: `headers` on an sdk request stop the run before any call."""
     source = fake_source()
     request_of(source)["headers"] = {"Account": "a1"}
-    problem = ("stream 'rows': requests[0]: fake: Reports.list does not take the header(s) Account (fake requests "
-               "take no headers)")
+    problem = ("stream 'rows': requests[0]: fake: Reports.list: sdk requests take no `headers`; per-request values "
+               "are the operation's `arguments`")
     assert components.check_source(source) == [problem]
-    with pytest.raises(SourceError, match=r"does not take the header\(s\) Account"):
+    with pytest.raises(SourceError, match="sdk requests take no `headers`"):
         run(source)
-    fake.request_headers = ("Region",)
-    assert components.check_source(source) == [problem.replace("fake requests take no headers", "headers: Region")]
     assert fake.calls == []
 
 
@@ -405,7 +471,7 @@ def test_cli_runs_connectors_and_checks_them_first(fake, tmp_path, monkeypatch, 
     request_of(source)["service"] = "Admin"
     caplog.clear()
     assert cli.main(["run", str(write_source(tmp_path, monkeypatch, source))]) == 2
-    assert "stream 'rows': requests[0]: service 'Admin' is not supported" in caplog.text and len(fake.calls) == 2
+    assert "stream 'rows': requests[0]: fake: Admin.list is not supported" in caplog.text and len(fake.calls) == 2
 
     source["auth"]["provider"] = "not_installed"
     for item in source["streams"]:
@@ -422,8 +488,8 @@ def test_cli_runs_connectors_and_checks_them_first(fake, tmp_path, monkeypatch, 
 # * query builders
 # * --------------
 
-def test_query_builders_are_components(fake, capsys):
-    assert "fake_query" in components.available("query builder") and "fake_query" not in components.available()
+def test_query_builders_come_with_their_connector(fake, capsys):
+    assert components.query_builders()["fake_query"] is FAKE and "fake_query" not in components.available()
     assert cli.main(["connectors"]) == 0
     assert "fake_query" not in capsys.readouterr().out  # streamwright connectors lists connectors only
     source = fake_source()
@@ -434,41 +500,17 @@ def test_query_builders_are_components(fake, capsys):
     with pytest.raises(SourceError, match=r"stream 'rows': requests\[0\].arguments.query.fake_query.select: "
                                           r"fake_query: `select`"):
         run(source)
-    query["fake_query"] = {"select": ["clicks"]}
-    assert components.check_source(source, allowed=["fake"]) == [
-        "stream 'rows': requests[0].arguments.query.fake_query: query builder 'fake_query' is not in the allowed "
-        "list (fake)"]
-    output, clock = MemoryOutput(), FakeClock()
-    with pytest.raises(SourceError, match="query builder 'fake_query' is not in the allowed list"):
-        SourceRunner(source, {}, {"token": "t"}, output=output, today=TODAY, clock=clock, sleep=clock.sleep,
-                     allowed_connectors=["fake"]).run()
     assert fake.calls == []
 
 
-def test_allowed_connector_automatically_allows_its_query_builders(fake):
-    source = fake_source()
+def test_an_allowed_connector_brings_its_query_builders(fake):
     fake.handlers["list"] = lambda arguments: [{"rows": [{"id": 1}]}]
-
-    # 1. Declared via connector.query_builders
-    fake.query_builders = ("fake_query",)
+    source = fake_source()
     assert components.check_source(source, allowed=["fake"]) == []
     output, clock = MemoryOutput(), FakeClock()
     SourceRunner(source, {"name": "test"}, {"token": "t"}, output=output, today=TODAY, clock=clock,
                  sleep=clock.sleep, allowed_connectors=["fake"]).run()
     assert len(output.records) == 2
-
-    # 2. Declared via builder.connector
-    fake.query_builders = ()
-    builder = components.load("fake_query", kind="query builder")
-    builder.connector = "fake"
-    try:
-        assert components.check_source(source, allowed=["fake"]) == []
-        output2 = MemoryOutput()
-        SourceRunner(source, {"name": "test"}, {"token": "t"}, output=output2, today=TODAY, clock=clock,
-                     sleep=clock.sleep, allowed_connectors=["fake"]).run()
-        assert len(output2.records) == 2
-    finally:
-        builder.connector = None
 
 
 def test_runs_check_every_stream_before_the_first_request(fake):
@@ -476,13 +518,13 @@ def test_runs_check_every_stream_before_the_first_request(fake):
     fake.handlers["list"] = lambda arguments: [{"rows": [{"id": 1}]}]
     source = fake_source()
     source["streams"] = [fake_stream("first"), fake_stream("second")]
-    request_of(source)["arguments"]["query"] = "plain text"
+    request_of(source, stream=1)["arguments"]["query"] = {"fake_query": {"where": {}}}
     output, clock = MemoryOutput(), FakeClock()
-    with pytest.raises(SourceError, match="stream 'second': .*query builder 'fake_query' is not in the allowed list"):
+    with pytest.raises(SourceError, match=r"stream 'second': .*fake_query: `select` must be a list of fields"):
         SourceRunner(source, {"name": "x"}, {"token": "t"}, output=output, today=TODAY, clock=clock,
                      sleep=clock.sleep, allowed_connectors=["fake"]).run()
     request_of(source, stream=1)["service"] = "Admin"
-    with pytest.raises(SourceError, match=r"stream 'second': requests\[0\]: service 'Admin' is not supported"):
+    with pytest.raises(SourceError, match=r"stream 'second': requests\[0\]: fake: Admin.list is not supported"):
         run(source)
     assert fake.calls == [] and output.records == [] and fake.connected == []
 
@@ -530,7 +572,7 @@ def test_streamwright_validate_runs_the_component_checks(fake, tmp_path, capsys)
     path.write_text(yaml.safe_dump(source, sort_keys=False))
     line, column = next((number, text.index("fake_query") + 1)
                         for number, text in enumerate(path.read_text().splitlines(), 1) if "fake_query:" in text)
-    assert engine.main([str(path)]) == 0  # streamwright-validate: the builder's mapping is just data to it
+    assert engine.main([str(path)]) == 0  # `streamwright validate`: the builder's mapping is just data to it
     capsys.readouterr()
     assert cli.main(["validate", str(path)]) == 1
     out = capsys.readouterr().out

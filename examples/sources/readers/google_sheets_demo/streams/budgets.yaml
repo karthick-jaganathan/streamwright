@@ -26,6 +26,6 @@ transform:
         WHERE record->>'campaign_id' IS NOT NULL
 
 export:
-  campaign_budgets:
+  budgets:
     step: budgets
     primary_key: [campaign_id, budget_month]

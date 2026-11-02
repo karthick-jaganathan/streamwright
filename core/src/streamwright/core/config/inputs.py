@@ -21,20 +21,28 @@ import datetime
 import os
 import re
 import stat
+from types import MappingProxyType
 
 import yaml
 
-from streamwright.core.validation import schema
+from streamwright.core.validation import vocabulary
 
-
-__all__ = ["InputError", "SECRET_ENV_PREFIX", "parse_duration", "as_date", "resolve_inputs", "read_values_file",
-           "read_config_file", "secrets_from_env"]
+__all__ = [
+    "SECRET_ENV_PREFIX",
+    "InputError",
+    "as_date",
+    "parse_duration",
+    "read_config_file",
+    "read_values_file",
+    "resolve_inputs",
+    "secrets_from_env",
+]
 
 SECRET_ENV_PREFIX = "STREAMWRIGHT_SECRET_"
 CONFIG_FILE_SECTIONS = ("config", "streams")
 
 _DURATION = re.compile(r"^([0-9]+)([smhd])$")
-_UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+_UNIT_SECONDS = MappingProxyType({"s": 1, "m": 60, "h": 3600, "d": 86400})
 _OFFSET = re.compile(r"^(-?[0-9]+)d$")
 _TRUE = ("true", "1", "yes", "y", "on")
 _FALSE = ("false", "0", "no", "n", "off")
@@ -82,8 +90,8 @@ def _coerce_scalar(kind, value, today):
             raise InputError("expected a whole number, got %r" % value)
         try:
             return int(str(value).strip())
-        except ValueError:
-            raise InputError("expected a whole number, got %r" % (value,))
+        except ValueError as exc:
+            raise InputError("expected a whole number, got %r" % (value,)) from exc
     if kind == "number":
         if isinstance(value, bool):
             raise InputError("expected a number, got %r" % value)
@@ -91,8 +99,8 @@ def _coerce_scalar(kind, value, today):
             return value
         try:
             return float(str(value).strip())
-        except ValueError:
-            raise InputError("expected a number, got %r" % (value,))
+        except ValueError as exc:
+            raise InputError("expected a number, got %r" % (value,)) from exc
     if kind == "boolean":
         if isinstance(value, bool):
             return value
@@ -124,8 +132,8 @@ def resolve_inputs(definitions, provided, section, today=None, hide_values=False
     """
     definitions = definitions or {}
     values, problems = {}, []
-    for name, definition in definitions.items():
-        definition = definition or {}
+    for name, declared in definitions.items():
+        definition = declared or {}
         if provided.get(name) is not None:
             raw = provided[name]
         elif definition.get("default") is not None:
@@ -153,12 +161,12 @@ def resolve_inputs(definitions, provided, section, today=None, hide_values=False
 
 def _read_mapping(path):
     try:
-        with open(path, "r", encoding="utf-8") as stream:
+        with open(path, encoding="utf-8") as stream:
             return yaml.safe_load(stream)
-    except (IOError, OSError) as exc:
-        raise InputError("cannot read %r: %s" % (path, exc))
+    except OSError as exc:
+        raise InputError("cannot read %r: %s" % (path, exc)) from exc
     except yaml.YAMLError as exc:
-        raise InputError("%r is not valid YAML/JSON: %s" % (path, exc))
+        raise InputError("%r is not valid YAML/JSON: %s" % (path, exc)) from exc
 
 
 def _is_values(data):
@@ -213,7 +221,7 @@ def secrets_from_env(names, environ=None):
     Other STREAMWRIGHT_SECRET_* variables are ignored: they may belong to other sources.
     """
     environ = os.environ if environ is None else environ
-    declared = dict((name.lower(), name) for name in names)
+    declared = {name.lower(): name for name in names}
     found = {}
     for key, value in environ.items():
         if key.startswith(SECRET_ENV_PREFIX) and key[len(SECRET_ENV_PREFIX):].lower() in declared:
@@ -223,6 +231,6 @@ def secrets_from_env(names, environ=None):
 
 def check_names(values):
     """Raises InputError for names that cannot be referenced as {{ config.<name> }}."""
-    bad = [name for name in values if not re.match(schema.NAME_PATTERN, str(name))]
+    bad = [name for name in values if not re.match(vocabulary.NAME_PATTERN, str(name))]
     if bad:
         raise InputError("invalid input names: %s" % ", ".join(map(repr, bad)))

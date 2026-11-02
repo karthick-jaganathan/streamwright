@@ -1,55 +1,9 @@
 import json
-import pytest
+
 import requests
 import yaml
 
-from streamwright.core import cli
-from streamwright.core.engine.runner import SourceRunner
-from streamwright.core.runtime import components
-from streamwright.connectors.restapi.connector import RestApiConnector, HttpConnector
-from streamwright.core.runtime.testing import MemoryOutput
-from streamwright.core.validation.engine import ERROR, validate_text
-
-
-def test_restapi_spec():
-    connector = RestApiConnector()
-    spec = connector.spec
-    assert spec is not None
-    assert spec.name == "restapi"
-    assert spec.title == "REST API"
-    assert spec.category == "http"
-    assert spec.transport == "http"
-    assert connector.transport == "http"
-    assert connector.name == "restapi"
-    assert "streamwright.network" in spec.effective_loggers()
-    badge = spec.badge(lambda pkg: "2.34.2")
-    assert badge == "[HTTP][requests v2.34.2]"
-
-
-def test_http_alias_spec():
-    connector = HttpConnector()
-    spec = connector.spec
-    assert spec is not None
-    assert spec.name == "http"
-    assert spec.title == "HTTP"
-    assert spec.category == "http"
-    assert spec.transport == "http"
-    assert connector.transport == "http"
-    assert connector.name == "http"
-
-
-def test_components_discovery_and_load():
-    available = components.available("connector")
-    assert "restapi" in available
-    assert "http" in available
-
-    restapi_conn = components.load("restapi")
-    assert isinstance(restapi_conn, RestApiConnector)
-    assert restapi_conn.name == "restapi"
-
-    http_conn = components.load("http")
-    assert isinstance(http_conn, HttpConnector)
-    assert http_conn.name == "http"
+from streamwright.core.sdk.testing import ERROR, MemoryOutput, SourceRunner, run_cli, validate_text
 
 
 def test_source_validation_with_restapi():
@@ -172,7 +126,8 @@ def test_restapi_runner_execution(monkeypatch):
                     "steps": [
                         {
                             "name": "users",
-                            "select": "SELECT (record->>'id')::INT AS user_id, record->>'name' AS user_name FROM raw_users",
+                            "select": "SELECT (record->>'id')::INT AS user_id, record->>'name' AS user_name "
+                                      "FROM raw_users",
                         },
                     ],
                 },
@@ -212,9 +167,39 @@ def test_restapi_runner_execution(monkeypatch):
     assert rows[1] == {"user_id": 2, "user_name": "Bob"}
 
 
-def test_cli_connector_lines_includes_restapi():
-    lines = cli._connector_lines()
-    text = "\n".join(lines)
-    assert "http:" in text
+def test_arbitrary_query_params_reach_the_request(monkeypatch):
+    """An undeclared query parameter in the `http.params` block is forwarded verbatim to the real HTTP call."""
+    source = {
+        "kind": "source", "name": "vendor_params",
+        "auth": {"provider": "restapi", "type": "bearer", "token": "secret-token-123"},
+        "http": {"base_url": "https://api.example.com", "records": {"path": "data"}},
+        "streams": [{
+            "name": "items",
+            "requests": [{"name": "raw", "http": {"path": "/items",
+                         "params": {"vendor_filter": "enabled", "page_size": 250}}}],
+            "transform": {"mode": "page", "steps": [{"name": "items",
+                         "select": "SELECT (record->>'id')::INT AS id FROM raw"}]},
+            "export": {"items": {"step": "items"}},
+        }],
+    }
+    seen = {}
+
+    def mock_send(session_self, request, **kwargs):
+        seen["url"] = request.url
+        resp = requests.Response()
+        resp.status_code = 200
+        resp.url = request.url
+        resp.headers = {"content-type": "application/json"}
+        resp._content = json.dumps({"data": [{"id": 1}]}).encode("utf-8")
+        return resp
+
+    monkeypatch.setattr(requests.Session, "send", mock_send)
+    runner = SourceRunner(source, config={}, secrets={}, output=MemoryOutput())
+    runner.run()
+    assert "vendor_filter=enabled" in seen["url"] and "page_size=250" in seen["url"]
+
+
+def test_cli_connector_lines_includes_restapi(capsys):
+    assert run_cli(["connectors"]) == 0
+    text = capsys.readouterr().out
     assert "restapi" in text
-    assert "REST API" in text

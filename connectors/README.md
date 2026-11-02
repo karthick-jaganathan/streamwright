@@ -58,7 +58,7 @@ streamwright run examples/sources/ads/google_ads --set customer_ids=1112223333 -
 
 - `files` reads local csv, tsv, json, jsonl and parquet files only (no URLs, no `httpfs`, no credentials, external
   access always off): `auth: {provider: files, roots: [...]}` lists the local folders that can be read, and requests
-  are `sdk: files`, `method: read`, `arguments: {path, format, options, on_missing, match, recursive}`. `path` is a
+  are `sdk: files`, `service: object`, `method: read`, `arguments: {path, format, options, on_missing, match, recursive}` (DuckDBJob's `provider: files` is this connector too). `path` is a
   file, a glob or a list; or, with `match` (a Python regex fully matched against each file's path relative to it), a
   folder, searched in its sub-folders too with `recursive: true`. Example:
   [examples/sources/readers/files_demo](../examples/sources/readers/files_demo/), which runs offline.
@@ -81,17 +81,17 @@ There is no `https` reader. Allow them like the others: `streamwright run --allo
 ## Layout
 
 ```text
-connectors/<name>/
-├── pyproject.toml              distribution streamwright-<name>; entry point <name> in the streamwright.connectors group
-│                               (and its query builders, if any, in streamwright.query_builders)
+connectors/<family>/<name>/
+├── pyproject.toml              distribution streamwright-<name>; one entry point: <name> = "streamwright.connectors.<name>:CONNECTOR"
 ├── README.md                   auth keys, allowed calls, records, errors and logs
-├── Makefile, LICENSE, setup.py
+├── Makefile, LICENSE
 ├── src/streamwright/connectors/<name>/   import streamwright.connectors.<name> (streamwright and streamwright.connectors are namespace packages)
-│   ├── __init__.py
-│   └── connector.py               the Connector subclass
-└── tests/                      offline tests: the real SDK against fakes
-    ├── conftest.py             the `api` fixture (streamwright.core.runtime.testing.FakeApi)
-    └── test_<name>.py
+│   ├── __init__.py             exports CONNECTOR only
+│   ├── spec.py                 the ConnectorDefinition (pure data; query builders and engine limits included)
+│   ├── client.py               vendor knowledge, shared by every engine
+│   ├── guide.md                user documentation (package data)
+│   └── engines/                source.py, duckdb.py, spark.py: one adapter per engine (none for HTTP connectors)
+└── tests/                      test_spec.py, test_client.py, engines/test_<engine>.py
 ```
 
 Example sources are the folders in [examples/sources/](../examples/sources/), where CI validates them; the
@@ -104,13 +104,14 @@ Example sources are the folders in [examples/sources/](../examples/sources/), wh
 
    ```toml
    [project.entry-points."streamwright.connectors"]
-   <name> = "streamwright.connectors.<name>.connector:<Name>Connector"
+   <name> = "streamwright.connectors.<name>:CONNECTOR"
    ```
 
-2. Implement the connector contract ([Writing a connector](https://karthick-jaganathan.github.io/streamwright/core/connectors-and-readers/#writing-a-connector)): define
-   `spec = ConnectorSpec(name="<name>", title="...", category="...", transport="...")`, allow only
-   read-only calls, wrap every API call in `context.call(...)`, map SDK errors in `error()`, and pass tokens the
-   connector obtains at run time to `context.secret(value)` (they are `***` in every log line and error).
+2. Implement the connector contract ([docs/design/connector-contract.md](../docs/design/connector-contract.md)):
+   `spec.py` declares the connection fields, the operations (from the catalog `streamwright.core.sdk.operations`,
+   read-only for sources) and the engine adapters; each session reads with the request's context (`context.call(...)`
+   for rate limits and retries), raises `ConnectorError` for the vendor's errors, and passes tokens the connector
+   obtains at run time to `context.secret(value)` (they are `***` in every log line and error).
 3. Test offline with `streamwright.core.runtime.testing` (`FakeApi`, `MemoryOutput`, `FakeClock`, and `page_stream` for a stream
    with one request, step and export), starting each test module with `pytest.importorskip("<sdk module>")` so the
    core CI job, which has no SDKs, skips it.

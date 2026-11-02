@@ -20,35 +20,36 @@
 import copy
 import hashlib
 import json
-from typing import Any, Dict, List, NamedTuple, Optional
+from types import MappingProxyType
+from typing import Any, NamedTuple
 
+from streamwright.core.net.errors import HttpError
 from streamwright.core.runtime.templates import get_path
 
-
 __all__ = [
-    "PagePatch",
-    "Paginator",
+    "PAGINATORS",
+    "CursorPaginator",
+    "LinkHeaderPaginator",
     "NoPaginator",
     "OffsetPaginator",
     "PageNumberPaginator",
-    "CursorPaginator",
-    "LinkHeaderPaginator",
-    "PAGINATORS",
-    "paginator_for",
-    "paginate",
-    "set_dotted_path",
+    "PagePatch",
+    "Paginator",
     "apply_patch",
+    "paginate",
+    "paginator_for",
     "parse_next_link",
+    "set_dotted_path",
 ]
 
 
 class PagePatch(NamedTuple):
-    params: Dict[str, Any]
-    body: Dict[str, Any]
-    url: Optional[str] = None
+    params: dict[str, Any]
+    body: dict[str, Any]
+    url: str | None = None
 
 
-def set_dotted_path(target: Dict[str, Any], dotted_path: str, value: Any) -> None:
+def set_dotted_path(target: dict[str, Any], dotted_path: str, value: Any) -> None:
     """Sets a value in a nested mapping by dotted key path."""
     parts = dotted_path.split(".")
     curr = target
@@ -59,7 +60,7 @@ def set_dotted_path(target: Dict[str, Any], dotted_path: str, value: Any) -> Non
     curr[parts[-1]] = value
 
 
-def apply_patch(rendered_request: Dict[str, Any], patch: PagePatch) -> Dict[str, Any]:
+def apply_patch(rendered_request: dict[str, Any], patch: PagePatch) -> dict[str, Any]:
     """Applies a PagePatch to a rendered request dictionary."""
     out = dict(rendered_request)
     if patch.url:
@@ -74,7 +75,7 @@ def apply_patch(rendered_request: Dict[str, Any], patch: PagePatch) -> Dict[str,
     return out
 
 
-def parse_next_link(link_header: Optional[str]) -> Optional[str]:
+def parse_next_link(link_header: str | None) -> str | None:
     """Extracts next-page URL from an RFC 8288 Link header."""
     if not link_header:
         return None
@@ -87,12 +88,12 @@ def parse_next_link(link_header: Optional[str]) -> Optional[str]:
             url = url_part[1:-1]
             for param in sections[1:]:
                 clean = param.lower().replace(" ", "").replace("'", '"')
-                if clean == 'rel="next"' or clean == "rel=next":
+                if clean in {'rel="next"', "rel=next"}:
                     return url
     return None
 
 
-def _lookup(data: Any, path: Optional[str]) -> Any:
+def _lookup(data: Any, path: str | None) -> Any:
     if not path or not data:
         return None
     try:
@@ -108,47 +109,47 @@ class Paginator:
     page) carries over.
     """
 
-    def __init__(self, spec: Dict[str, Any]):
+    def __init__(self, spec: dict[str, Any]):
         self.update_spec(spec)
 
-    def update_spec(self, spec: Dict[str, Any]) -> None:
+    def update_spec(self, spec: dict[str, Any]) -> None:
         self.spec = dict(spec or {})
         self.configure(self.spec)
 
-    def configure(self, spec: Dict[str, Any]) -> None:
+    def configure(self, spec: dict[str, Any]) -> None:
         pass
 
     def first(self) -> PagePatch:
         return PagePatch(params={}, body={}, url=None)
 
-    def next(self, response: Any, records: List[Any], headers: Any) -> Optional[PagePatch]:
+    def next(self, response: Any, records: list[Any], headers: Any) -> PagePatch | None:
         raise NotImplementedError
 
     def progress_marker(self, patch: PagePatch) -> Any:
-        """The value that must change from page to page (a cursor or next URL); None when the paginator always advances."""
+        """
+        The value that must change from page to page (a cursor or next URL); None when the paginator always advances.
+        """
         return patch.url or None
 
-    def _patch(self, mapping: Dict[str, Any]) -> PagePatch:
+    def _patch(self, mapping: dict[str, Any]) -> PagePatch:
         if self.spec.get("in", "query") == "body":
             return PagePatch(params={}, body=mapping, url=None)
         return PagePatch(params=mapping, body={}, url=None)
 
 
 class NoPaginator(Paginator):
-    def next(self, response: Any, records: List[Any], headers: Any) -> Optional[PagePatch]:
+    def next(self, response: Any, records: list[Any], headers: Any) -> PagePatch | None:
         return None
 
 
 def _whole_number(value: Any, name: str) -> int:
-    from streamwright.core.net.http import HttpError
-
     try:
         return int(value)
-    except (TypeError, ValueError):
-        raise HttpError("paginator `%s` must be a whole number, got %r" % (name, value))
+    except (TypeError, ValueError) as exc:
+        raise HttpError("paginator `%s` must be a whole number, got %r" % (name, value)) from exc
 
 
-def _reached(response: Any, path: Optional[str], position: int, inclusive: bool) -> bool:
+def _reached(response: Any, path: str | None, position: int, inclusive: bool) -> bool:
     """True when the total at `path` in the response (when there is one) says `position` is past the last page."""
     if not path:
         return False
@@ -163,7 +164,7 @@ def _reached(response: Any, path: Optional[str], position: int, inclusive: bool)
 class OffsetPaginator(Paginator):
     current_offset = None
 
-    def configure(self, spec: Dict[str, Any]) -> None:
+    def configure(self, spec: dict[str, Any]) -> None:
         self.offset_param = str(spec.get("offset_param") or "offset")
         self.limit_param = str(spec.get("limit_param") or "limit")
         self.page_size = _whole_number(spec.get("page_size", 100), "page_size")
@@ -174,7 +175,7 @@ class OffsetPaginator(Paginator):
         self.current_offset = self.start
         return self._patch({self.offset_param: self.current_offset, self.limit_param: self.page_size})
 
-    def next(self, response: Any, records: List[Any], headers: Any) -> Optional[PagePatch]:
+    def next(self, response: Any, records: list[Any], headers: Any) -> PagePatch | None:
         if not records:
             return None
         self.current_offset += len(records)
@@ -192,7 +193,7 @@ class OffsetPaginator(Paginator):
 class PageNumberPaginator(Paginator):
     current_page = None
 
-    def configure(self, spec: Dict[str, Any]) -> None:
+    def configure(self, spec: dict[str, Any]) -> None:
         self.page_param = str(spec.get("page_param") or "page")
         self.size_param = spec.get("size_param")
         self.page_size = _whole_number(spec["page_size"], "page_size") if spec.get("page_size") is not None else None
@@ -209,7 +210,7 @@ class PageNumberPaginator(Paginator):
         self.current_page = self.start
         return self._page(self.current_page)
 
-    def next(self, response: Any, records: List[Any], headers: Any) -> Optional[PagePatch]:
+    def next(self, response: Any, records: list[Any], headers: Any) -> PagePatch | None:
         if not records:
             return None
         if self.size_param and self.page_size is not None and len(records) < self.page_size:
@@ -224,15 +225,13 @@ class PageNumberPaginator(Paginator):
 
 
 class CursorPaginator(Paginator):
-    def configure(self, spec: Dict[str, Any]) -> None:
+    def configure(self, spec: dict[str, Any]) -> None:
         self.token_path = spec.get("token_path")
         self.param = spec.get("param")
         self.next_url_path = spec.get("next_url_path")
         self.has_more_path = spec.get("has_more_path")
 
-    def next(self, response: Any, records: List[Any], headers: Any) -> Optional[PagePatch]:
-        from streamwright.core.net.http import HttpError
-
+    def next(self, response: Any, records: list[Any], headers: Any) -> PagePatch | None:
         if not records:
             return None
         if self.has_more_path and not _lookup(response, self.has_more_path):
@@ -257,7 +256,7 @@ class CursorPaginator(Paginator):
 
 
 class LinkHeaderPaginator(Paginator):
-    def next(self, response: Any, records: List[Any], headers: Any) -> Optional[PagePatch]:
+    def next(self, response: Any, records: list[Any], headers: Any) -> PagePatch | None:
         if not records:
             return None
         url = parse_next_link(_header(headers, "Link"))
@@ -266,7 +265,7 @@ class LinkHeaderPaginator(Paginator):
         return PagePatch(params={}, body={}, url=url)
 
 
-def _header(headers: Any, name: str) -> Optional[str]:
+def _header(headers: Any, name: str) -> str | None:
     """A response header, case-insensitively (requests' headers already are; plain dicts in tests are not)."""
     if not headers:
         return None
@@ -280,19 +279,17 @@ def _header(headers: Any, name: str) -> Optional[str]:
     return None
 
 
-PAGINATORS = {
+PAGINATORS = MappingProxyType({
     "none": NoPaginator,
     "offset": OffsetPaginator,
     "page_number": PageNumberPaginator,
     "cursor": CursorPaginator,
     "link_header": LinkHeaderPaginator,
-}
+})
 
 
-def paginator_for(spec: Optional[Dict[str, Any]]) -> Paginator:
+def paginator_for(spec: dict[str, Any] | None) -> Paginator:
     """Returns a Paginator instance for a paginator configuration dictionary."""
-    from streamwright.core.net.http import HttpError
-
     if not spec:
         return NoPaginator({})
     kind = spec.get("type", "none")
@@ -310,8 +307,6 @@ def paginate(send, spec_for, select):
     spec_for(response) returns the paginator config (response is None before the first page).
     select(response) returns the page's records.
     """
-    from streamwright.core.net.http import HttpError
-
     initial_spec = spec_for(None) if callable(spec_for) else spec_for
     paginator = paginator_for(initial_spec or {"type": "none"})
 

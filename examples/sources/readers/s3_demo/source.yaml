@@ -17,6 +17,12 @@ spec:
     bucket_root: {type: string, default: "s3://acme-data/exports/", description: "The URL prefix objects are read from (s3://bucket/prefix/)"}
     region: {type: string, default: us-east-1, description: The bucket's region}
     start_date: {type: date, default: "2026-10-01", description: First day of customers' daily objects}
+    # Optional overrides for an S3-compatible store (MinIO, LocalStack, Ceph, ...). Left unset they are omitted and
+    # the connection talks to Amazon S3. Set them at run time, e.g. for LocalStack:
+    #   --set endpoint=127.0.0.1:4566 --set url_style=path --set use_ssl=false
+    endpoint: {type: string, required: false, description: "S3-compatible endpoint as host[:port] (no scheme)"}
+    url_style: {type: string, required: false, description: "path (most S3-compatible stores) or vhost"}
+    use_ssl: {type: boolean, required: false, description: "false: plain HTTP to the endpoint"}
   secrets:
     s3_key_id: {type: string, description: The access key id}
     s3_secret: {type: string, description: The secret access key}
@@ -27,3 +33,6 @@ auth:
   key_id: "{{ secrets.s3_key_id }}"    # credentials: secret references only, never written in the source
   secret: "{{ secrets.s3_secret }}"
   region: "{{ config.region }}"        # settings: literal values or references
+  endpoint: "{{ config.endpoint }}"    # S3-compatible overrides; each is dropped when its config input is unset
+  url_style: "{{ config.url_style }}"
+  use_ssl: "{{ config.use_ssl }}"

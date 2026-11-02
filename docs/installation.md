@@ -13,7 +13,7 @@ its own package in `connectors/<name>/`.
 
 ## Prerequisites
 
-- Python 3.10 or newer, and pip
+- Python 3.11 or newer, and pip
 - `make` (optional: every target below is a plain `pip install`)
 - Git
 

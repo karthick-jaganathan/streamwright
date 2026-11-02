@@ -41,6 +41,10 @@ An `streamwright.network` line at `INFO` comes after its stream, request, partit
 
 `streamwright run` and `streamwright validate` take the same logging options.
 
+Embedded callers may nest `streamwright.core.runtime.logs.LogSetup` instances. Each
+execution context gets its own active secret redactor; closing setups out of order defers
+global logging restoration until the inner setup closes.
+
 ### `--log-level LEVEL`
 
 - Sets the level of the `streamwright` loggers.

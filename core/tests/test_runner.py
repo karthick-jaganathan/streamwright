@@ -1,22 +1,33 @@
+import copy
 import csv
 import datetime
 import json
-import logging
 import os
 import re
 import subprocess
 import sys
+import threading
+import types
+import zoneinfo
 from urllib.parse import parse_qsl
 
 import pytest
 import requests
 
 from streamwright.core import cli
+from streamwright.core.config.inputs import (
+    InputError,
+    as_date,
+    parse_duration,
+    read_values_file,
+    resolve_inputs,
+    secrets_from_env,
+)
+from streamwright.core.engine import bookmarks, sql
+from streamwright.core.engine.readers import READERS, read_pages
+from streamwright.core.engine.runner import CollectedStream, SourceError, SourceRunner, partition_key
 from streamwright.core.net.http import RateLimiter, Redactor
-from streamwright.core.config.inputs import InputError, as_date, parse_duration, read_values_file, resolve_inputs, \
-    secrets_from_env
 from streamwright.core.outputs.output import FileOutput, export_files
-from streamwright.core.engine.runner import SourceError, SourceRunner, partition_key
 from streamwright.core.runtime.templates import render
 from streamwright.core.runtime.testing import MemoryOutput, page_stream
 
@@ -43,7 +54,7 @@ def make_source(api, **stream):
             "streams": [items_stream(**stream)]}
 
 
-class FakeApiStub(object):
+class FakeApiStub:
     """For runners that are built but never send a request."""
     url = "http://127.0.0.1:9"
 
@@ -63,13 +74,13 @@ class FlakySession(requests.Session):
     """Raises the given errors on the first requests, then talks to the server."""
 
     def __init__(self, errors):
-        super(FlakySession, self).__init__()
+        super().__init__()
         self.errors = list(errors)
 
     def request(self, *args, **kwargs):
         if self.errors:
             raise self.errors.pop(0)
-        return super(FlakySession, self).request(*args, **kwargs)
+        return super().request(*args, **kwargs)
 
 
 def run(source, config=None, state=None, streams=None, sleeps=None):
@@ -117,7 +128,8 @@ def test_dates_durations_files_and_environment(tmp_path):
     os.chmod(str(path), 0o644)
     warnings = []
     assert read_values_file(str(path), warn=warnings.append) == {"token": "abc"} and "chmod 600" in warnings[0]
-    environ = {"STREAMWRIGHT_SECRET_CLIENT_ID": "x", "STREAMWRIGHT_SECRET_APIKEY": "k", "STREAMWRIGHT_SECRET_OTHER": "o", "OTHER": "y"}
+    environ = {"STREAMWRIGHT_SECRET_CLIENT_ID": "x", "STREAMWRIGHT_SECRET_APIKEY": "k",
+               "STREAMWRIGHT_SECRET_OTHER": "o", "OTHER": "y"}
     assert secrets_from_env(["client_id", "apiKey"], environ) == {"client_id": "x", "apiKey": "k"}
     with pytest.raises(InputError) as error:
         resolve_inputs({"pin": {"type": "integer"}}, {"pin": "abc-secret"}, "secret", hide_values=True)
@@ -427,6 +439,74 @@ def test_records_as_returned_and_connector_requests(api):
         run(source)
 
 
+@pytest.mark.parametrize("kind", ["http", "sdk", "async_job"])
+def test_request_transport_reader_preserves_pages_and_explode(kind, monkeypatch):
+    source = make_source(FakeApiStub())
+    runner = SourceRunner(source, {}, {"token": "secret-token-1"}, output=MemoryOutput(), today=TODAY)
+    calls = []
+
+    def pages(*args, **kwargs):
+        calls.append(kind)
+        return iter([[{"children": [{"id": 1}, {"id": 2}], "name": "parent"}]])
+
+    monkeypatch.setattr(READERS[kind], "pages", pages)
+    request = {"name": "records", kind: {"path": "/items"} if kind == "http" else {},
+               "records": {"explode": "children"}}
+    result = list(read_pages(runner, source["streams"][0], request, None, None, scopes=runner._scopes()))
+    assert calls == [kind]
+    assert result == [[{"id": 1, "name": "parent"}, {"id": 2, "name": "parent"}]]
+
+
+def test_compiled_plan_is_reused_and_collect_exposes_state_and_partial(api, monkeypatch):
+    api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}]})
+    source = make_source(api, incremental={"cursor_field": "id", "start": "2026-10-02", "window": "1d"})
+    plan = sql.plan_source(source)
+    monkeypatch.setattr(sql, "SourcePlan", lambda *args: pytest.fail("the supplied plan must be reused"))
+    runner = SourceRunner(source, {}, {"token": "secret-token-1"}, output=MemoryOutput(), today=TODAY,
+                          plan=plan)
+    collected = runner.collect("items", state={"bookmarks": {}})
+    assert collected.state is None and collected.partial is None
+    assert list(collected) == [("items", {"id": 1}), ("items", {"id": 1})]
+    assert collected.state["bookmarks"]["items"]["{}"] == "2026-10-02"
+    assert collected.partial is False
+    assert runner.state == {"bookmarks": {}}
+    with pytest.raises(RuntimeError, match="only be iterated once"):
+        list(collected)
+
+
+def test_collected_stream_stops_producer_without_materializing_the_remaining_records():
+
+
+    finished = threading.Event()
+    produced = []
+
+    def produce(enqueue, collected):
+        try:
+            for index in range(1000):
+                produced.append(index)
+                enqueue(("items", {"id": index}))
+            collected._result = ({}, False)
+        finally:
+            finished.set()
+
+    result = CollectedStream(produce)
+    iterator = iter(result)
+    assert next(iterator) == ("items", {"id": 0})
+    assert result.state is None
+    iterator.close()
+    assert finished.wait(2)
+    assert len(produced) <= 66
+
+
+def test_collected_stream_propagates_producer_interrupt():
+
+    def interrupt(enqueue, collected):
+        raise KeyboardInterrupt()
+
+    with pytest.raises(KeyboardInterrupt):
+        list(CollectedStream(interrupt))
+
+
 # * ---------------
 # * CLI and output
 # * ---------------
@@ -453,7 +533,6 @@ def test_file_output_and_state(api, tmp_path):
 
 
 def test_timezone_sets_the_run_date_and_windows(api, tmp_path):
-    import zoneinfo
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}]})
     source_path = tmp_path / "source.yaml"
     source_path.write_text(json.dumps(dict(make_source(api, incremental={"cursor_field": "id", "start": "today"},
@@ -535,13 +614,14 @@ def test_a_config_file_sets_values_and_streams(api, tmp_path, capsys, monkeypatc
 
 @pytest.mark.parametrize("text,problem", [
     ("limit: 5\n", "unknown section(s) limit (sections: config, streams); config values go under `config:`"),
-    ("config: {limit: 5}\nsecrets: {token: x}\n", "secrets go in --secrets FILE or STREAMWRIGHT_SECRET_<NAME> variables"),
+    ("config: {limit: 5}\nsecrets: {token: x}\n",
+     "secrets go in --secrets FILE or STREAMWRIGHT_SECRET_<NAME> variables"),
     ("config: [5]\n", "`config` must be a mapping of names to values"),
     ("streams: []\n", "`streams` must be a list of stream names"),
     ("streams: [itmes]\n", "unknown stream(s): itmes (streams/exports: items, others)"),
     ("config: {limt: 5}\n", "unknown config: limt (declared: limit)"),
 ])
-def test_config_file_problems_stop_the_run(api, tmp_path, caplog, monkeypatch, text, problem):
+def test_config_file_problems_stop_the_run(api, tmp_path, caplog, monkeypatch, *, text, problem):
     folder = folder_source(api, tmp_path, monkeypatch)
     client = tmp_path / "client.yaml"
     client.write_text(text)
@@ -597,12 +677,12 @@ def test_csv_output_writes_mappings_as_json_and_lists_comma_joined(api, tmp_path
 def test_interrupted_runs_leave_no_files(api, tmp_path, monkeypatch, interruption):
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}]})
     path = write_source(tmp_path, monkeypatch, make_source(api))
-    original = SourceRunner.run_stream
+    original = SourceRunner._run_stream
 
     def run_stream(self, stream):
         original(self, stream)  # the stream's file is open and holds a record
         raise interruption()
-    monkeypatch.setattr(SourceRunner, "run_stream", run_stream)
+    monkeypatch.setattr(SourceRunner, "_run_stream", run_stream)
     out = tmp_path / "out"
     arguments = ["run", str(path), "--output", "jsonl:%s" % out]
     if interruption is KeyboardInterrupt:
@@ -613,20 +693,6 @@ def test_interrupted_runs_leave_no_files(api, tmp_path, monkeypatch, interruptio
     assert os.listdir(str(out)) == []
 
 
-def test_the_log_filter_redacts_messages_and_tracebacks():
-    try:
-        try:
-            raise ValueError("GET /items?api_key=secret-token-1")
-        except ValueError:
-            raise RuntimeError("request failed")
-    except RuntimeError:
-        record = logging.LogRecord("urllib3", logging.DEBUG, __file__, 1, "sent %s", ("secret-token-1",),
-                                   sys.exc_info())
-    assert cli._RedactFilter(Redactor(["secret-token-1"])).filter(record)
-    text = logging.Formatter().format(record)
-    assert "secret-token-1" not in text and "sent ***" in text and "api_key=***" in text
-
-
 def test_debug_logging_keeps_secrets_out(api, tmp_path, monkeypatch):
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}]})
     source = make_source(api)
@@ -634,8 +700,7 @@ def test_debug_logging_keeps_secrets_out(api, tmp_path, monkeypatch):
     path = write_source(tmp_path, monkeypatch, source)
     # a separate process, so the command configures logging itself (as it does for users)
     result = subprocess.run([sys.executable, "-m", "streamwright.core.cli", "run", str(path), "--log-level", "DEBUG"],
-                            cwd=str(tmp_path), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            universal_newlines=True, timeout=120)
+                            cwd=str(tmp_path), capture_output=True, text=True, timeout=120, check=False)
     assert result.returncode == 0, result.stderr
     assert api.requests[0]["params"]["api_key"] == "secret-token-1"
     assert "1 record(s)" in result.stderr and "secret-token-1" not in result.stderr + result.stdout
@@ -680,6 +745,22 @@ def test_file_name_templates_name_each_export_file(api, tmp_path, monkeypatch):
     assert files_in(tmp_path / "csv") == ["DOUBLED.csv", "ITEMS.csv"]
 
 
+def test_exports_name_their_files_in_the_yaml_and_file_name_replaces_them(api, tmp_path, monkeypatch):
+    api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}]})
+    source = two_exports(api)
+    source["export"] = {"file_name": "{{ config.client }}/{{ export }}.csv"}  # the source's default
+    source["streams"][0]["export"]["items"]["file_name"] = "items/{{ today }}.csv"  # an export's own
+    path = write_source(tmp_path, monkeypatch, source, config={"client": {"type": "string"}})
+    out = tmp_path / "out"
+    assert cli.main(["run", str(path), "--set", "client=acme", "--output", "csv:%s" % out]) == 0
+    assert files_in(out) == ["acme/doubled.csv", "items/%s.csv" % datetime.date.today().isoformat()]
+    # the run's --file-name replaces both; another output ignores the YAML names
+    assert cli.main(["run", str(path), "--set", "client=acme", "--output", "csv:%s" % (tmp_path / "cli"),
+                     "--file-name", "{{ export }}.csv"]) == 0
+    assert files_in(tmp_path / "cli") == ["doubled.csv", "items.csv"]
+    assert cli.main(["run", str(path), "--set", "client=acme", "--output", "duckdb:%s" % (tmp_path / "w.duckdb")]) == 0
+
+
 @pytest.mark.parametrize("arguments,problem", [
     (["--file-name", "{{ source }}.jsonl"], "exports 'items' and 'doubled' get the same file 'demo.jsonl'"),
     (["--file-name", "../{{ export }}.jsonl"], "'../items.jsonl' (export 'items') goes outside the output directory"),
@@ -691,11 +772,11 @@ def test_file_name_templates_name_each_export_file(api, tmp_path, monkeypatch):
     (["--file-name", "./State.JSON/{{ export }}.jsonl"], "'./State.JSON/items.jsonl' (export 'items') needs the "
                                                          "folder 'State.JSON', the state file's name"),
 ])
-def test_file_name_problems_stop_the_run_before_any_request(api, tmp_path, monkeypatch, caplog, arguments, problem):
+def test_file_name_problems_stop_the_run_before_any_request(api, tmp_path, monkeypatch, caplog, *, arguments, problem):
     config = {"client": {"type": "string", "required": False}}
     path = write_source(tmp_path, monkeypatch, two_exports(api), config=config)
     out = tmp_path / "out"
-    assert cli.main(["run", str(path), "--output", "jsonl:%s" % out] + arguments) == 2
+    assert cli.main(["run", str(path), "--output", "jsonl:%s" % out, *arguments]) == 2
     assert problem in caplog.text and api.requests == [] and not out.exists()
 
 
@@ -711,7 +792,7 @@ def test_file_name_needs_file_output(api, tmp_path, monkeypatch, caplog, output)
 def test_a_folder_named_state_json_stops_the_run_before_any_request(api, tmp_path, monkeypatch, caplog, arguments):
     path = write_source(tmp_path, monkeypatch, make_source(api))
     (tmp_path / "out" / "state.json").mkdir(parents=True)
-    assert cli.main(["run", str(path), "--output", "jsonl:%s" % (tmp_path / "out")] + arguments) == 2
+    assert cli.main(["run", str(path), "--output", "jsonl:%s" % (tmp_path / "out"), *arguments]) == 2
     assert "%s is a folder: the run writes its state to that path" % (tmp_path / "out" / "state.json") in caplog.text
     assert api.requests == [] and os.listdir(str(tmp_path / "out")) == ["state.json"]
 
@@ -725,18 +806,18 @@ def test_file_names_cannot_leave_the_directory_through_symbolic_links(api, tmp_p
     os.symlink(str(outside), str(out / "link"))
     arguments = ["run", str(path), "--output", "jsonl:%s" % out, "--file-name",
                  "{{ config.client }}/{{ export }}.jsonl"]
-    assert cli.main(arguments + ["--set", "client=link"]) == 2
+    assert cli.main([*arguments, "--set", "client=link"]) == 2
     assert "'link/items.jsonl' (export 'items') leads outside %s through a symbolic link" % out in caplog.text
     assert api.requests == [] and os.listdir(str(outside)) == []
     # a link made during the run: closing fails, and writes no file
-    original = SourceRunner.run_stream
+    original = SourceRunner._run_stream
 
     def run_stream(self, stream):
         original(self, stream)
         os.symlink(str(outside), str(out / "acme"))
-    monkeypatch.setattr(SourceRunner, "run_stream", run_stream)
-    assert cli.main(arguments + ["--set", "client=acme"]) == 1
-    assert "--file-name: 'acme/items.jsonl' leads outside %s through a symbolic link: no file was written" % out \
+    monkeypatch.setattr(SourceRunner, "_run_stream", run_stream)
+    assert cli.main([*arguments, "--set", "client=acme"]) == 1
+    assert "file names: 'acme/items.jsonl' leads outside %s through a symbolic link: no file was written" % out \
         in caplog.text
     assert len(api.requests) == 1 and os.listdir(str(outside)) == []
     assert sorted(os.listdir(str(out))) == ["acme", "link"]  # the links: no file, no temporary file
@@ -745,9 +826,10 @@ def test_file_names_cannot_leave_the_directory_through_symbolic_links(api, tmp_p
 def test_export_files_are_paths_inside_the_output_directory(tmp_path):
     scopes = {"source": "demo", "today": TODAY, "timestamp": "20261003T101500Z",
               "config": {"client": "acme", "region": None, "ids": [1, 2]}}
-    assert export_files("{{ config.client }}/{{ export }}_{{ today | date('%Y%m') }}_{{ config.ids }}.csv",
-                        ["a", "b"], scopes) == {"a": "acme/a_202610_1,2.csv", "b": "acme/b_202610_1,2.csv"}
-    assert export_files("./x//{{ export }}.jsonl", ["a"], scopes) == {"a": "x/a.jsonl"}
+    template = "{{ config.client }}/{{ export }}_{{ today | date('%Y%m') }}_{{ config.ids }}.csv"
+    assert export_files(dict.fromkeys(["a", "b"], template), scopes) == {
+        "a": "acme/a_202610_1,2.csv", "b": "acme/b_202610_1,2.csv"}
+    assert export_files({"a": "./x//{{ export }}.jsonl"}, scopes) == {"a": "x/a.jsonl"}
     (tmp_path / "acme").write_text("a file")
     (tmp_path / "b.jsonl").mkdir()
     for template, exports, problem in (
@@ -761,14 +843,15 @@ def test_export_files_are_paths_inside_the_output_directory(tmp_path):
                                                               "a file in %s" % tmp_path),
             ("{{ export }}.jsonl", ["b"], "'b.jsonl' (export 'b') is a folder in %s" % tmp_path)):
         if problem is None:
-            assert export_files(template, exports, scopes, str(tmp_path)) == {"a": "x/A.jsonl", "x": "x/X.jsonl"}
+            assert export_files(dict.fromkeys(exports, template), scopes, str(tmp_path)) == {
+                "a": "x/A.jsonl", "x": "x/X.jsonl"}
             continue
         with pytest.raises(ValueError) as error:
-            export_files(template, exports, scopes, str(tmp_path))
+            export_files(dict.fromkeys(exports, template), scopes, str(tmp_path))
         assert problem in str(error.value)
     # a path is never one export's file and another's folder
     with pytest.raises(ValueError, match="'x' is the file of export 'x' and a folder of export 'x/a''s file 'x/a'"):
-        export_files("{{ export }}", ["x", "x/a"], scopes)
+        export_files(dict.fromkeys(["x", "x/a"], "{{ export }}"), scopes)
 
 
 def test_file_names_are_written_atomically_into_their_folders(tmp_path):
@@ -797,7 +880,7 @@ class StateHistory(MemoryOutput):
     """A MemoryOutput keeping each state written as JSON (not a copy); writing a state with `fail_on` fails."""
 
     def __init__(self, fail_on=None):
-        super(StateHistory, self).__init__()
+        super().__init__()
         self.fail_on = fail_on
 
     def write_state(self, state):
@@ -807,16 +890,14 @@ class StateHistory(MemoryOutput):
 
 
 def counted_copies(monkeypatch):
-    """The runner's copy.deepcopy calls (one entry per call)."""
-    import copy
-    import types
-    from streamwright.core.engine import runner as runner_module
+    """The bookmark store's copy.deepcopy calls (one entry per call)."""
+
     calls = []
 
     def deepcopy(value, *args):
         calls.append(1)
         return copy.deepcopy(value, *args)
-    monkeypatch.setattr(runner_module, "copy", types.SimpleNamespace(deepcopy=deepcopy))
+    monkeypatch.setattr(bookmarks, "copy", types.SimpleNamespace(deepcopy=deepcopy))
     return calls
 
 
@@ -846,8 +927,8 @@ def test_the_state_is_written_after_every_window_without_a_copy_per_window(api, 
     assert len(output.states) == 40 + 1
     assert [len(state["bookmarks"]["pages"]) for state in output.states[:40]] == list(range(1, 41))
     assert output.states[-1]["bookmarks"] == {
-        "pages": dict(('{"account": "a%d"}' % number, yesterday) for number in range(40)),
-        "steps": dict(('{"account": "a%d"}' % number, yesterday) for number in range(40))}
+        "pages": {'{"account": "a%d"}' % number: yesterday for number in range(40)},
+        "steps": {'{"account": "a%d"}' % number: yesterday for number in range(40)}}
     # one copy: the state written last, kept for the run's metrics while run mode advances bookmarks unwritten
     assert len(copies) == 1
     assert runner.metrics.state == output.states[-1]

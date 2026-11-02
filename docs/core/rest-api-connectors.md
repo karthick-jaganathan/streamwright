@@ -9,7 +9,7 @@ nav_order: 5
 
 StreamWright features a unified, declarative HTTP engine for REST API connectors. Rather than writing custom Python networking loops, pagination code, or retry mechanisms in connector packages, REST connectors are declarative: network endpoints, headers, query parameters, paginators, records paths, and authentication are expressed in `source.yaml` and stream YAML definitions.
 
-Connector packages serve as light distribution vehicles (installable via `pip install streamwright-<network>-ads`) that expose package metadata and declare `transport = "http"`.
+Connector packages serve as light distribution vehicles (installable via `pip install streamwright-<network>-ads`): a connector definition that offers the catalog's `http.request` operation and declares the authentication the API takes.
 
 ---
 
@@ -17,31 +17,32 @@ Connector packages serve as light distribution vehicles (installable via `pip in
 
 A REST connector package has three minimal components:
 
-1. **Python connector class**: subclassing `Connector` with `transport = "http"`.
-2. **`pyproject.toml`**: declaring the package and entry point under `streamwright.connectors`.
+1. **`spec.py`**: a `ConnectorDefinition` offering `http.REQUEST`, its adapter core's `HttpSourceAdapter` (plus `client.py` and `guide.md`, see [the connector contract]({{ site.baseurl }}/design/connector-contract/)).
+2. **`pyproject.toml`**: declaring the package and its one entry point, `<name> = "streamwright.connectors.<name>:CONNECTOR"`.
 3. **Example source directory**: demonstrating valid `source.yaml` and stream configurations.
 
-### 1.1 The Connector Class
+### 1.1 The Connector Definition
 
 ```python
-# src/streamwright/connectors/my_network/connector.py
-from streamwright.core.runtime.components import Connector
+# src/streamwright/connectors/my_network/spec.py
+from streamwright.core.sdk.contract import ConnectorDefinition
+from streamwright.core.sdk.operations import http
 
-__all__ = ["MyNetworkConnector"]
+__all__ = ["CONNECTOR"]
 
-class MyNetworkConnector(Connector):
-    """
-    MyNetwork Ads REST API connector metadata.
-    Transport is handled declaratively by StreamWright's HTTP engine.
-    """
-    name = "my_network"
-    transport = "http"
-    category = "advertising"
-    summary = "MyNetwork Ads"
+CONNECTOR = ConnectorDefinition(
+    name="my_network",
+    title="MyNetwork Ads",
+    family="advertising",
+    summary="MyNetwork Ads, declared in the source's `http:` block",
+    connection=http.auth_fields(("bearer",)),          # the auth types (and credential keys) the API takes
+    operations=(http.REQUEST,),
+    adapters={"source": "streamwright.core.io.http:HttpSourceAdapter"},
+)
 ```
 
-Because `transport = "http"`, StreamWright's runner:
-- Skips SDK `connect()` initialization.
+Because the definition offers `http.request`, StreamWright's runner:
+- Opens no connector session.
 - Rejects any requests declaring `sdk: my_network`.
 - Directs all calls through `HttpClient` and `Authenticator`.
 
@@ -56,7 +57,7 @@ dependencies = [
 ]
 
 [project.entry-points."streamwright.connectors"]
-my_network = "streamwright.connectors.my_network.connector:MyNetworkConnector"
+my_network = "streamwright.connectors.my_network:CONNECTOR"
 ```
 
 Notice that `requests` is **not** a dependency of the connector package itself—networking is handled by StreamWright core.
@@ -105,7 +106,7 @@ http:
 
 ### 2.1 Supported Auth Types
 
-When `provider: <name>` has `transport: "http"`, `type` defines the authentication mechanism:
+When `provider: <name>` offers `http.request`, `type` (one of the types its `http.auth_fields` declare) defines the authentication mechanism:
 - `bearer`: `token: "{{ secrets.my_token }}"` (sent in `Authorization: Bearer <token>`).
 - `api_key`: `name: "X-API-Key"`, `value: "{{ secrets.api_key }}"`, optional `in: header | query`.
 - `basic`: `username: "{{ secrets.username }}"`, `password: "{{ secrets.password }}"`.

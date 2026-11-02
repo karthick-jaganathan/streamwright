@@ -9,6 +9,7 @@ description: Read-only streams from Delta Lake tables (local or cloud object sto
 spec:
   config:
     table_path: {type: string, description: "Delta table URI, e.g. s3://bucket/events or /data/events"}
+    roots: {type: list, items: string, description: "the folders / URL prefixes the tables may be read from, e.g. s3://bucket/"}
     aws_region: {type: string, default: "us-east-1", required: false}
   secrets:
     aws_access_key_id: {type: string, required: false}
@@ -16,6 +17,7 @@ spec:
 
 auth:
   provider: deltalake
+  roots: "{{ config.roots }}"
   aws_access_key_id: "{{ secrets.aws_access_key_id }}"
   aws_secret_access_key: "{{ secrets.aws_secret_access_key }}"
   aws_region: "{{ config.aws_region }}"

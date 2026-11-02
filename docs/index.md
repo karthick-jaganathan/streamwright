@@ -12,7 +12,7 @@ permalink: /
 
   <div class="badges">
     <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License">
-    <img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python">
+    <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python">
     <img src="https://img.shields.io/badge/GitHub-StreamWright--ETL-blue.svg" alt="GitHub">
   </div>
 

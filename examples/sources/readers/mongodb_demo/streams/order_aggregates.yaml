@@ -2,7 +2,7 @@ description: MongoDB aggregation pipeline stream for order totals by category.
 
 requests:
   - name: raw_order_aggregates
-    service: database
+    service: collection
     method: aggregate
     sdk: mongodb
     arguments:

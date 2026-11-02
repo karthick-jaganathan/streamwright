@@ -26,17 +26,28 @@ The files of a source (`kind: source`): one YAML file, or a source folder.
 
 A folder is read as one source, so its streams share the inputs, the sign-in and the rate limit, can use each
 other as `from_stream` parents. A source.yaml without a streams/ folder next to it, like any
-other file, is a single-file source that lists its `streams`. Used by streamwright-validate and by the
+other file, is a single-file source that lists its `streams`. Used by `streamwright validate` and by the
 runtime (streamwright run).
 """
 
 import os
 
+import yaml
+
 from streamwright.core.config.reader import load_yaml
 
-
-__all__ = ["SourceFilesError", "SourceLayout", "SOURCE_FILES", "STREAMS_FOLDER", "MODELS_FOLDER", "find_source",
-           "source_folder", "assemble", "load_source", "missing_path_message"]
+__all__ = [
+    "MODELS_FOLDER",
+    "SOURCE_FILES",
+    "STREAMS_FOLDER",
+    "SourceFilesError",
+    "SourceLayout",
+    "assemble",
+    "find_source",
+    "load_source",
+    "missing_path_message",
+    "source_folder",
+]
 
 SOURCE_FILES = ("source.yaml", "source.yml")
 STREAMS_FOLDER = "streams"
@@ -52,7 +63,7 @@ class SourceFilesError(ValueError):
     """The path is not a source, or the files of a source folder do not make one source."""
 
 
-class SourceLayout(object):
+class SourceLayout:
     """The files of a source: one file (`folder` is None), or a source folder with one file per stream."""
 
     def __init__(self, source_file, folder=None, stream_files=(), problems=()):
@@ -174,12 +185,12 @@ def assemble(layout, source, documents):
     """
     problems, paths = [], {}
     parts = ((layout.stream_files, documents[:len(layout.stream_files)]),)
-    for (part_folder, what, key), (files, part_documents) in zip(_PART_FOLDERS, parts):
+    for (part_folder, what, key), (files, part_documents) in zip(_PART_FOLDERS, parts, strict=True):
         if isinstance(source, dict) and key in source:
             problems.append((layout.source_file, source, key, "in a source folder each %s is its own file: move "
                              "these %ss to %s/<name>.yaml" % (what, what, part_folder)))
         assembled, paths[key] = [], []
-        for (name, path), document in zip(files, part_documents):
+        for (name, path), document in zip(files, part_documents, strict=False):
             if document is None:
                 problems.append((path, None, None, "the %s file is empty" % what))
                 continue
@@ -190,7 +201,7 @@ def assemble(layout, source, documents):
             if "name" in document:
                 problems.append((path, document, "name", "remove `name`: the file name is the %s name (%s)" % (
                     what, name)))
-            # name first, keeping the mapping itself: streamwright-validate maps it back to its YAML node
+            # name first, keeping the mapping itself: `streamwright validate` maps it back to its YAML node
             items = [(item_key, value) for item_key, value in document.items() if item_key != "name"]
             document.clear()
             document["name"] = name
@@ -205,11 +216,19 @@ def assemble(layout, source, documents):
 def load_source(path):
     """Reads the source at `path` (a path, see find_source, or a SourceLayout) as one document."""
     layout = path if isinstance(path, SourceLayout) else find_source(path)
-    source = load_yaml(layout.source_file)
+    def read_yaml(filename):
+        try:
+            return load_yaml(filename)
+        except yaml.YAMLError as exc:
+            mark = getattr(exc, "problem_mark", None) or getattr(exc, "context_mark", None)
+            location = ":%d:%d" % (mark.line + 1, mark.column + 1) if mark is not None else ""
+            raise SourceFilesError("%s%s: invalid YAML" % (filename, location)) from None
+
+    source = read_yaml(layout.source_file)
     if layout.folder is None:
         return source
     problems = list(layout.problems)
-    found, _ = assemble(layout, source, [load_yaml(part_path) for part_path in layout.files[1:]])
+    found, _ = assemble(layout, source, [read_yaml(part_path) for part_path in layout.files[1:]])
     problems += [(problem_path, message) for problem_path, _, _, message in found]
     if not isinstance(source, dict):
         problems.append((layout.source_file, "expected a mapping"))

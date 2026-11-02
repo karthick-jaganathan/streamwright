@@ -1,0 +1,8 @@
+# Local development overlay
+spec:
+  config:
+    min_amount_usd: {default: 100.0}
+
+runtime:
+  threads: 2
+  memory_limit: 512MB

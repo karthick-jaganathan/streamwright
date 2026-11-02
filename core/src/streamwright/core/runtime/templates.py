@@ -19,7 +19,7 @@
 Rendering of {{ references }}, and the text and JSON of values (to_text, to_json).
 
 A value that is exactly one reference keeps its type ("{{ config.ids }}" stays a list); text containing
-references renders to a string. streamwright-validate has already checked scopes, names and filters.
+references renders to a string. `streamwright validate` has already checked scopes, names and filters.
 
 DECIMAL values (decimal.Decimal, from SQL steps) are exact: as text and in JSON they are written in plain notation,
 without an exponent or trailing zeros (decimal_text: 2.60 is 2.6, 100.00 is 100), and a value that is exactly one
@@ -31,13 +31,22 @@ import decimal
 import json
 import re
 import uuid
+from types import MappingProxyType
 
 from streamwright.core.config.inputs import as_date
 from streamwright.core.validation.schema import split_outside_quotes
 
-
-__all__ = ["TemplateError", "render", "evaluate", "to_text", "to_json", "decimal_text", "json_numbers", "get_path",
-           "expressions"]
+__all__ = [
+    "TemplateError",
+    "decimal_text",
+    "evaluate",
+    "expressions",
+    "get_path",
+    "json_numbers",
+    "render",
+    "to_json",
+    "to_text",
+]
 
 _TEMPLATE = re.compile(r"\{\{(.*?)\}\}", re.S)
 _FILTER = re.compile(r"^([A-Za-z_]\w*)\s*(?:\((.*)\))?$", re.S)
@@ -55,15 +64,15 @@ def get_path(data, path):
     """data[path]; when there is no such key, a dotted path is followed through nested mappings (KeyError if not)."""
     try:
         return data[path]
-    except (KeyError, TypeError, IndexError):
+    except (KeyError, TypeError, IndexError) as exc:
         if not (isinstance(path, str) and "." in path):
-            raise KeyError(path)
+            raise KeyError(path) from exc
     value = data
     try:
         for part in path.split("."):
             value = value[part]
-    except (KeyError, TypeError, IndexError):
-        raise KeyError(path)
+    except (KeyError, TypeError, IndexError) as exc:
+        raise KeyError(path) from exc
     return value
 
 
@@ -122,7 +131,7 @@ def json_numbers(value):
         text = decimal_text(value)
         return float(text) if "." in text else int(text)
     if isinstance(value, dict):
-        return dict((key, json_numbers(item)) for key, item in value.items())
+        return {key: json_numbers(item) for key, item in value.items()}
     if isinstance(value, list):
         return [json_numbers(item) for item in value]
     return value
@@ -142,7 +151,7 @@ def _filter_date(value, fmt):
     return None if value is None else as_date(value).strftime(fmt)
 
 
-_FILTERS = {
+_FILTERS = MappingProxyType({
     "default": lambda value, fallback: fallback if value is None or value == "" else value,
     "join": lambda value, sep: sep.join(to_text(v) for v in value) if isinstance(value, (list, tuple))
     else to_text(value),
@@ -150,7 +159,7 @@ _FILTERS = {
     "int": lambda value: None if value is None else int(value),
     "lower": lambda value: None if value is None else to_text(value).lower(),
     "upper": lambda value: None if value is None else to_text(value).upper(),
-}
+})
 
 
 def evaluate(expression, scopes):
@@ -176,7 +185,7 @@ def evaluate(expression, scopes):
         try:
             value = _FILTERS[match.group(1)](value, *arguments)
         except (TypeError, ValueError) as exc:
-            raise TemplateError("filter %r failed in {{ %s }}: %s" % (match.group(1), expression.strip(), exc))
+            raise TemplateError("filter %r failed in {{ %s }}: %s" % (match.group(1), expression.strip(), exc)) from exc
     return value
 
 
@@ -188,7 +197,7 @@ def expressions(text):
 def render(value, scopes):
     """Renders every reference in value (recursively); exactly one reference to a DECIMAL is a JSON number."""
     if isinstance(value, dict):
-        return dict((key, render(item, scopes)) for key, item in value.items())
+        return {key: render(item, scopes) for key, item in value.items()}
     if isinstance(value, list):
         return [render(item, scopes) for item in value]
     if not isinstance(value, str) or "{{" not in value:

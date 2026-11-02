@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streamwright-sqs"
+version = "0.0.2"
+description = "StreamWright - sqs connector (read-only peek at the messages of an Amazon SQS queue; nothing is deleted)"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    {name = "Karthick Jaganathan", email = "kjaganathan.sde@gmail.com"},
+]
+keywords = ["data", "pipeline", "etl", "sqs", "aws", "queue"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "streamwright~=0.1.9",
+    "boto3>=1.34",
+]
+
+[project.optional-dependencies]
+spark = ["streamwright-spark[spark]~=0.1.0"]
+
+[project.urls]
+Homepage = "https://streamwright.web.app"
+Documentation = "https://streamwright.web.app/docs/"
+Repository = "https://github.com/karthick-jaganathan/streamwright"
+"Issue Tracker" = "https://github.com/karthick-jaganathan/streamwright/issues"
+
+[project.entry-points."streamwright.connectors"]
+sqs = "streamwright.connectors.sqs:CONNECTOR"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["streamwright.connectors.sqs", "streamwright.connectors.sqs.engines"]
+
+[tool.setuptools.package-data]
+"streamwright.connectors.sqs" = ["guide.md"]

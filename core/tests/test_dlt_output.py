@@ -3,13 +3,16 @@ import importlib.util
 import json
 import logging
 import os
+import sys
+from types import MappingProxyType
 
+import duckdb
 import pytest
 
 from streamwright.core import cli
-from streamwright.core.outputs import dlt_output
 from streamwright.core.engine import sql
-from streamwright.core.outputs.dlt_output import column_hints
+from streamwright.core.outputs import output
+from streamwright.core.outputs.dlt_columns import column_hints, decimal_types
 from streamwright.core.runtime.testing import page_stream
 
 needs_dlt = pytest.mark.skipif(importlib.util.find_spec("dlt") is None or importlib.util.find_spec("duckdb") is None,
@@ -18,11 +21,11 @@ needs_delta = pytest.mark.skipif(
     importlib.util.find_spec("dlt") is None or importlib.util.find_spec("deltalake") is None,
     reason="needs dlt and deltalake (pip install 'dlt[deltalake]')")
 TODAY = datetime.date.today()
-DAYS = [(TODAY - datetime.timedelta(days=n)).isoformat() for n in (2, 1, 0)]
+DAYS = tuple([(TODAY - datetime.timedelta(days=n)).isoformat() for n in (2, 1, 0)])
 ORDERS = """SELECT (record->>'id')::BIGINT AS id, (record->>'day')::DATE AS day,
                    (record->>'amount')::DOUBLE AS amount, (record->'tags')::VARCHAR[] AS tags
             FROM %s"""
-INCREMENTAL = {"cursor_field": "day", "start": "-2d", "window": "1d", "lookback": "1d"}
+INCREMENTAL = MappingProxyType({"cursor_field": "day", "start": "-2d", "window": "1d", "lookback": "1d"})
 
 
 def test_column_hints_follow_column_types():
@@ -35,18 +38,44 @@ def test_column_hints_follow_column_types():
         schema = sql.table_schema(columns)
     finally:
         sandbox.close()
-    hints = dict((name, {"data_type": kind, "nullable": True}) for name, kind in (
+    hints = {name: {"data_type": kind, "nullable": True} for name, kind in (
         ("s", "text"), ("i", "bigint"), ("n", "double"), ("m", "double"), ("b", "bool"), ("d", "date"),
-        ("t", "timestamp"), ("o", "json"), ("a", "json"), ("total", "double")))  # u, JSON of any kind, gets no hint
+        ("t", "timestamp"), ("o", "json"), ("a", "json"), ("total", "double"))}  # u, JSON of any kind, gets no hint
     assert column_hints(schema) == hints
     assert column_hints({"type": "object"}) == {}
     # with the step's columns (write_columns), DECIMAL(p,s) columns are dlt decimals: exact
-    decimals = dlt_output._decimal_types(columns)
+    decimals = decimal_types(columns)
     assert decimals == {"m": (9, 2), "total": (38, 2)}
     assert column_hints(schema, decimals) == dict(hints, m={"data_type": "decimal", "precision": 9, "scale": 2,
                                                             "nullable": True},
                                                   total={"data_type": "decimal", "precision": 38, "scale": 2,
                                                          "nullable": True})
+
+
+@needs_dlt
+def test_state_is_saved_even_when_every_export_is_kept(tmp_path, monkeypatch, dlt_output):
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    monkeypatch.setenv("DESTINATION__DUCKDB__CREDENTIALS", str(tmp_path / "warehouse.duckdb"))
+    source = {"name": "bookmarked", "streams": []}
+    output = dlt_output.DltOutput("duckdb", "saved", source)
+    output.write_schema("records", {"type": "object", "properties": {"id": {"type": "integer"}}}, [])
+    output.mark_partial("records")
+    state = {"bookmarks": {"records": {"{}": "2026-10-01"}}}
+    output.write_state(state)
+    output.close()
+    reopened = dlt_output.DltOutput("duckdb", "saved", source)
+    try:
+        assert reopened.initial_state() == state
+    finally:
+        reopened.close(failed=True)
+
+
+@needs_dlt
+def test_import_dlt_does_not_change_process_environment(monkeypatch):
+    monkeypatch.delenv("RUNTIME__DLTHUB_TELEMETRY", raising=False)
+    monkeypatch.delitem(sys.modules, output.DLT_OUTPUT_MODULE, raising=False)
+    importlib.import_module(output.DLT_OUTPUT_MODULE)
+    assert "RUNTIME__DLTHUB_TELEMETRY" not in os.environ
 
 
 def shop(api, orders_key=True, transform=False, transform_key=True):
@@ -99,12 +128,11 @@ def streamwright_run(api, tmp_path, monkeypatch):
     def run(output="dlt:duckdb:analytics", *arguments, **options):
         path = tmp_path / "shop.yaml"
         path.write_text(json.dumps(shop(api, **options)))
-        return cli.main(["run", str(path), "--output", output] + list(arguments))
+        return cli.main(["run", str(path), "--output", output, *list(arguments)])
     return run
 
 
 def query(tmp_path, sql, database="warehouse.duckdb"):
-    import duckdb
     connection = duckdb.connect(str(tmp_path / database), read_only=True)
     try:
         return connection.execute(sql).fetchall()
@@ -113,7 +141,7 @@ def query(tmp_path, sql, database="warehouse.duckdb"):
 
 
 def requested_days(api):
-    days = [request["params"]["day"] for request in api.calls("/orders")]
+    days = tuple(request["params"]["day"] for request in api.calls("/orders"))
     api.requests.clear()
     return days
 
@@ -124,7 +152,7 @@ def test_runs_load_into_the_destination_and_resume_from_it(streamwright_run, api
     assert requested_days(api) == DAYS
     rows = query(tmp_path, "select id, day, amount, tags from analytics.orders order by id")
     assert [(row[1].isoformat(), row[2], json.loads(row[3])) for row in rows] == [(d, 10.5, ["new"]) for d in DAYS]
-    types = dict((name, kind) for name, kind, *_ in query(tmp_path, "describe analytics.orders"))
+    types = {name: kind for name, kind, *_ in query(tmp_path, "describe analytics.orders")}
     assert (types["id"], types["day"], types["amount"], types["tags"]) == ("BIGINT", "DATE", "DOUBLE", "JSON")
     assert query(tmp_path, "select id, meta__source from analytics.events") == [(1, "web")]  # JSON: dlt's columns
     assert os.listdir(str(tmp_path / "tmp")) == []  # the run's staged records and dlt folder are gone
@@ -176,19 +204,19 @@ def test_each_destination_keeps_its_own_state(streamwright_run, api, tmp_path, m
 
 @needs_dlt
 def test_failed_runs_and_loads_leave_nothing_behind(streamwright_run, api, tmp_path, monkeypatch):
-    from dlt.pipeline.pipeline import Pipeline
+    pipeline_class = pytest.importorskip("dlt.pipeline.pipeline").Pipeline
     assert streamwright_run("dlt:duckdb:analytics", "--stream", "orders") == 0
     requested_days(api)
     api.routes[("GET", "/orders")] = lambda request: (500, {"error": "down"})
     assert streamwright_run("dlt:duckdb:analytics", "--stream", "orders") == 1  # the source failed
 
-    load, failures = Pipeline.load, [RuntimeError("the destination is unavailable")]
+    load, failures = pipeline_class.load, [RuntimeError("the destination is unavailable")]
 
     def flaky_load(pipeline, *args, **kwargs):
         if failures:
             raise failures.pop(0)
         return load(pipeline, *args, **kwargs)
-    monkeypatch.setattr(Pipeline, "load", flaky_load)
+    monkeypatch.setattr(pipeline_class, "load", flaky_load)
     api.routes[("GET", "/orders")] = orders(500)
     assert streamwright_run("dlt:duckdb:analytics", "--stream", "orders") == 1  # the load failed
     assert os.listdir(str(tmp_path / "tmp")) == []
@@ -255,7 +283,7 @@ def test_the_filesystem_destination_needs_delta_tables_to_merge(streamwright_run
 
 @needs_delta
 def test_the_filesystem_destination_merges_delta_tables(streamwright_run, api, tmp_path):
-    import deltalake
+    deltalake = pytest.importorskip("deltalake")
     assert streamwright_run("dlt:filesystem:lake", "--stream", "orders") == 0
     assert streamwright_run("dlt:filesystem:lake", "--stream", "orders") == 0
     table = deltalake.DeltaTable(str(tmp_path / "lake" / "lake" / "orders")).to_pyarrow_table()
@@ -263,14 +291,14 @@ def test_the_filesystem_destination_merges_delta_tables(streamwright_run, api, t
 
 
 @needs_dlt
-def test_staged_records_are_removed_even_if_closing_fails(tmp_path, monkeypatch):
+def test_staged_records_are_removed_even_if_closing_fails(tmp_path, monkeypatch, dlt_output):
     monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
     monkeypatch.setenv("DESTINATION__DUCKDB__CREDENTIALS", str(tmp_path / "w.duckdb"))
     output = dlt_output.DltOutput("duckdb", None, {"name": "shop", "streams": []})
     output.write_schema("orders", {"type": "object"}, ["id"])
     output.write_record("orders", {"id": 1})
 
-    class Broken(object):
+    class Broken:
         def close(self):
             raise OSError("disk full")
     path, _, schema, keys = output.streams["orders"]
@@ -287,10 +315,9 @@ def test_dlt_and_destination_problems_are_input_errors(api, tmp_path, monkeypatc
     path = tmp_path / "shop.yaml"
     path.write_text(json.dumps(shop(api)))
 
-    def missing():
-        raise ValueError('--output dlt:... needs dlt: pip install "streamwright[dlt]"')
-    with monkeypatch.context() as patched:
-        patched.setattr(dlt_output, "_import_dlt", missing)
+    with monkeypatch.context() as patched:  # dlt is not installed
+        patched.setitem(sys.modules, "dlt", None)
+        patched.delitem(sys.modules, output.DLT_OUTPUT_MODULE, raising=False)
         assert cli.main(["run", str(path), "--output", "dlt:duckdb"]) == 2
     assert 'pip install "streamwright[dlt]"' in caplog.text
     assert cli.main(["run", str(path), "--output", "dlt:"]) == 2

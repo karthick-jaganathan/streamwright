@@ -14,10 +14,16 @@
 # * limitations under the License.
 # **************************************************************************/
 
-import pytest
+import io
+import logging
 
-from streamwright.core.net.encoding import encode_params, flatten_dotted
-from streamwright.core.net.http import HttpError
+import pytest
+import requests
+import responses
+
+from streamwright.core.engine.runner import SourceError, SourceRunner
+from streamwright.core.net.encoding import encode_params
+from streamwright.core.net.http import Authenticator, HttpClient, HttpError, Redactor, RetryPolicy
 from streamwright.core.net.paginators import (
     PagePatch,
     apply_patch,
@@ -26,6 +32,27 @@ from streamwright.core.net.paginators import (
     parse_next_link,
     set_dotted_path,
 )
+from streamwright.core.runtime.components import register, unregister
+from streamwright.core.runtime.testing import MemoryOutput, page_stream
+from streamwright.core.sdk.contract import ConnectorDefinition
+from streamwright.core.sdk.operations import http
+
+
+def test_shared_retry_executor_uses_classification_and_retry_after():
+    policy = RetryPolicy({"max_attempts": 3, "max_delay": "5s"})
+    attempts, waits = [], []
+
+    def attempt(number):
+        attempts.append(number)
+        if number < 3:
+            raise HttpError("temporary", status=429)
+        return {"ok": True}
+
+    result = policy.run(attempt, lambda error: (error.status == 429, 9.0),
+                        lambda error, delay, number: waits.append((number, delay)))
+    assert result == {"ok": True}
+    assert attempts == [1, 2, 3]
+    assert waits == [(1, 5.0), (2, 5.0)]
 
 
 def test_param_encoding_plain():
@@ -201,7 +228,7 @@ def test_paginator_cursor_has_more_true_without_token_raises_error():
         "param": "after",
         "has_more_path": "has_more",
     }
-    with pytest.raises(HttpError, match="says there are more pages but there is nothing at .next_cursor."):
+    with pytest.raises(HttpError, match=r"says there are more pages but there is nothing at .next_cursor."):
         list(paginate(send, lambda r: spec, lambda r: r["records"]))
 
 
@@ -258,10 +285,8 @@ def test_paginator_link_header():
 
 
 def test_runner_merge_headers_and_secrets_redaction(caplog):
-    import logging
-    import responses
-    from streamwright.core.engine.runner import SourceRunner, SourceError
-    from streamwright.core.runtime.testing import MemoryOutput, page_stream
+
+
 
     caplog.set_level(logging.DEBUG, logger="streamwright.network")
 
@@ -304,7 +329,7 @@ def test_runner_merge_headers_and_secrets_redaction(caplog):
         runner = SourceRunner(source, {}, {"my_api_key": "top_secret_xyz_123"}, output=out)
         runner.run()
 
-        req = rsps.calls[0].request
+        req = next(call.request for call in rsps.calls if call.request.url == "https://api.example.com/data")
         assert req.headers["Authorization"] == "Bearer secret_bearer_token"
         assert req.headers["X-Api-Key"] == "top_secret_xyz_123"
         assert "X-Empty" not in req.headers
@@ -319,9 +344,7 @@ def test_runner_merge_headers_and_secrets_redaction(caplog):
 
 
 def test_runner_records_path_missing_raises_error():
-    import responses
-    from streamwright.core.engine.runner import SourceRunner, SourceError
-    from streamwright.core.runtime.testing import MemoryOutput, page_stream
+
 
     source = {
         "name": "test_missing_path",
@@ -353,9 +376,7 @@ def test_runner_records_path_missing_raises_error():
 
 
 def test_runner_empty_records_path_overrides_source_default():
-    import responses
-    from streamwright.core.engine.runner import SourceRunner
-    from streamwright.core.runtime.testing import MemoryOutput, page_stream
+
 
     source = {
         "name": "test_empty_records_override",
@@ -391,21 +412,12 @@ def test_runner_empty_records_path_overrides_source_default():
 
 
 def test_runner_http_transport_provider_auth_and_rejects_sdk():
-    import responses
-    from streamwright.core.engine.runner import SourceRunner, SourceError
-    from streamwright.core.runtime.components import Connector, register, unregister
-    from streamwright.core.runtime.testing import MemoryOutput, page_stream
 
-    class MockHttpConnector(Connector):
-        name = "mock_http_conn"
-        transport = "http"
-        category = "advertising"
-        summary = "Mock HTTP connector"
 
-        def connect(self, auth, context):
-            raise RuntimeError("connect() must NEVER be called for transport == http")
-
-    register(MockHttpConnector())
+    # a declarative HTTP connector: its adapter refuses sessions (core's io.http), the engine runs `http:` requests
+    register(ConnectorDefinition(name="mock_http_conn", title="Mock HTTP", family="advertising",
+                                 connection=http.auth_fields(), operations=(http.REQUEST,),
+                                 adapters={"source": "streamwright.core.io.http:HttpSourceAdapter"}))
     try:
         # Valid source with http requests
         source = {
@@ -497,8 +509,7 @@ def test_paginator_settings_follow_the_latest_response_and_keep_position():
 
 
 def _client(**kwargs):
-    from streamwright.core.net.http import Authenticator, HttpClient, Redactor
-    import requests
+
 
     session = requests.Session()
     redact = Redactor()
@@ -508,7 +519,6 @@ def _client(**kwargs):
 
 
 def test_follow_rejects_next_links_on_another_origin():
-    import responses
 
     client = _client()
     with responses.RequestsMock() as rsps:
@@ -523,7 +533,6 @@ def test_follow_rejects_next_links_on_another_origin():
 
 
 def test_request_follows_same_origin_redirects_with_credentials():
-    import responses
 
     client = _client()
     with responses.RequestsMock() as rsps:
@@ -538,7 +547,6 @@ def test_request_follows_same_origin_redirects_with_credentials():
 
 
 def test_request_refuses_cross_origin_redirects():
-    import responses
 
     client = _client()
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
@@ -550,10 +558,84 @@ def test_request_refuses_cross_origin_redirects():
         assert [call.request.url for call in rsps.calls] == ["https://api.example.com/items"]
 
 
+def test_download_follows_same_origin_redirects_with_credentials():
+
+
+    client = _client()
+    handle = io.BytesIO()
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, "https://api.example.com/file", status=301,
+                 headers={"Location": "/download/file.bin"})
+        rsps.add(responses.GET, "https://api.example.com/download/file.bin", body=b"hello world", status=200)
+        size = client.download("/file", handle)
+        assert size == 11
+        assert handle.getvalue() == b"hello world"
+        followed = rsps.calls[1].request
+        assert followed.url == "https://api.example.com/download/file.bin"
+        assert followed.headers["X-Api-Key"] == "key_123"
+        assert followed.headers["Authorization"].startswith("Bearer ")
+
+
+def test_download_refuses_cross_origin_redirects_with_credentials():
+
+
+    client = _client()
+    handle = io.BytesIO()
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        rsps.add(responses.GET, "https://api.example.com/file", status=302,
+                 headers={"Location": "https://evil.example/steal.bin"})
+        rsps.add(responses.GET, "https://evil.example/steal.bin", body=b"stolen", status=200)
+        with pytest.raises(HttpError, match="not sending the source's credentials to another origin"):
+            client.download("/file", handle)
+        assert [call.request.url for call in rsps.calls] == ["https://api.example.com/file"]
+
+
+def test_download_refuses_https_downgrade():
+
+
+
+    client = HttpClient(base_url="https://api.example.com")  # no credentials: only the downgrade rule applies
+    handle = io.BytesIO()
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        rsps.add(responses.GET, "https://api.example.com/file", status=302,
+                 headers={"Location": "http://api.example.com/file.bin"})
+        rsps.add(responses.GET, "http://api.example.com/file.bin", body=b"downgrade", status=200)
+        with pytest.raises(HttpError, match="refusing downgrade from https to http"):
+            client.download("/file", handle)
+        assert [call.request.url for call in rsps.calls] == ["https://api.example.com/file"]
+
+
+def test_download_enforces_redirect_limit():
+
+
+
+    client = HttpClient(base_url="https://api.example.com")
+    handle = io.BytesIO()
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        for i in range(12):
+            rsps.add(responses.GET, "https://api.example.com/r%d" % i, status=302,
+                     headers={"Location": "/r%d" % (i + 1)})
+        with pytest.raises(HttpError, match="more than 10 redirects"):
+            client.download("/r0", handle)
+
+
+def test_download_allows_cross_origin_redirect_without_credentials():
+
+
+
+    client = HttpClient(base_url="https://api.example.com")
+    handle = io.BytesIO()
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, "https://api.example.com/report", status=302,
+                 headers={"Location": "https://s3.amazonaws.com/bucket/report.csv"})
+        rsps.add(responses.GET, "https://s3.amazonaws.com/bucket/report.csv", body=b"a,b,c\n1,2,3\n", status=200)
+        size = client.download("/report", handle)
+        assert size == 12
+        assert handle.getvalue() == b"a,b,c\n1,2,3\n"
+
+
 def test_runner_does_not_send_credentials_to_a_next_url_on_another_origin():
-    import responses
-    from streamwright.core.engine.runner import SourceRunner, SourceError
-    from streamwright.core.runtime.testing import MemoryOutput, page_stream
+
 
     source = {
         "name": "next_url_origin",

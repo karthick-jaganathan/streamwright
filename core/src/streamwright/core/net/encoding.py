@@ -17,12 +17,12 @@
 
 """Query parameter encodings: plain (default) and dotted (Rest.li / nested dictionary syntax)."""
 
-from typing import Any, Dict
+from typing import Any
 
-__all__ = ["flatten_dotted", "encode_params"]
+__all__ = ["encode_params", "flatten_dotted"]
 
 
-def flatten_dotted(params: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
+def flatten_dotted(params: dict[str, Any], prefix: str = "") -> dict[str, Any]:
     """
     Flattens nested dictionaries and lists into dotted/bracket query parameter syntax.
     e.g. {"dateRange": {"start": {"year": 2026}}} -> {"dateRange.start.year": 2026}
@@ -41,7 +41,7 @@ def flatten_dotted(params: Dict[str, Any], prefix: str = "") -> Dict[str, Any]:
     return items
 
 
-def encode_params(params: Dict[str, Any], encoding: str = "plain") -> Dict[str, Any]:
+def encode_params(params: dict[str, Any], encoding: str = "plain") -> dict[str, Any]:
     """Encodes query parameters according to the chosen encoding strategy."""
     if not params:
         return {}

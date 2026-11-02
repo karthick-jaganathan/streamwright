@@ -5,46 +5,120 @@ import os
 import re
 from textwrap import dedent
 
+import jsonschema
 import pytest
 import yaml
 
-from streamwright.core.validation import schema
-from streamwright.core.validation.engine import ERROR, WARNING, main, validate_file, validate_paths, validate_source, \
-    validate_text
 from streamwright.core.config.loader import SourceFilesError, find_source, load_source
+from streamwright.core.runtime.components import register, unregister
+from streamwright.core.sdk.contract import ConnectorDefinition, Operation
+from streamwright.core.sdk.operations import http
+from streamwright.core.validation import Issue, schema
+from streamwright.core.validation.engine import (
+    ERROR,
+    NON_STRICT_CODES,
+    WARNING,
+    check_components,
+    is_valid,
+    main,
+    validate_file,
+    validate_paths,
+    validate_source,
+    validate_text,
+)
+
+
+def test_load_source_yaml_errors_do_not_quote_source_text(tmp_path):
+    source = tmp_path / "source.yaml"
+    source.write_text("kind: source\nname: [SECRET-TOKEN\n")
+    with pytest.raises(SourceFilesError, match=r"source.yaml:3:\d+: invalid YAML") as raised:
+        load_source(str(source))
+    assert "SECRET-TOKEN" not in str(raised.value)
+
+
+def test_connector_metadata_is_injected_without_loading_connector():
+    source = {"kind": "source", "name": "sample", "auth": {"provider": "unavailable", "token": "x"},
+              "streams": []}
+    lookups = []
+
+    def describe(name):
+        lookups.append(name)
+        return {"transport": "http"}
+
+    issues = validate_text(yaml.safe_dump(source), connector_metadata=describe)
+    assert lookups == ["unavailable"]
+    assert any(issue.code == "missing-key" and "http connector" in issue.message for issue in issues)
+
+    def broken(name):
+        raise RuntimeError("connector metadata is broken")
+
+    with pytest.raises(RuntimeError, match="connector metadata is broken"):
+        validate_text(yaml.safe_dump(source), connector_metadata=broken)
+
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SOURCES = os.path.join(REPO_ROOT, "examples", "sources")
 
-BASE = {
-    "kind": "source",
-    "name": "demo",
-    "spec": {
-        "config": {"account_ids": {"type": "list", "items": "string"}},
-        "secrets": {"token": {"type": "string"}},
-    },
-    "auth": {"type": "bearer", "token": "{{ secrets.token }}"},
-    "http": {"base_url": "https://api.example.com"},
-    "streams": [{
-        "name": "campaigns",
-        "partitions": [{"name": "account_id", "values": "{{ config.account_ids }}"}],
-        "requests": [{
-            "name": "raw_campaigns",
-            "http": {"path": "/accounts/{{ partition.account_id }}/campaigns"},
-            "paginator": {"type": "offset", "offset_param": "start", "limit_param": "count", "page_size": 100},
-            "records": {"path": "elements"},
+
+def base_source():
+    """A valid source document, made anew for each check."""
+    return {
+        "kind": "source",
+        "name": "demo",
+        "spec": {
+            "config": {"account_ids": {"type": "list", "items": "string"}},
+            "secrets": {"token": {"type": "string"}},
+        },
+        "auth": {"type": "bearer", "token": "{{ secrets.token }}"},
+        "http": {"base_url": "https://api.example.com"},
+        "streams": [{
+            "name": "campaigns",
+            "partitions": [{"name": "account_id", "values": "{{ config.account_ids }}"}],
+            "requests": [{
+                "name": "raw_campaigns",
+                "http": {"path": "/accounts/{{ partition.account_id }}/campaigns"},
+                "paginator": {"type": "offset", "offset_param": "start", "limit_param": "count", "page_size": 100},
+                "records": {"path": "elements"},
+            }],
+            "transform": {"mode": "page", "steps": [
+                {"name": "campaigns",
+                 "select": "SELECT record->>'id' AS id, partition->>'account_id' AS account_id FROM raw_campaigns"},
+            ]},
+            "export": {"campaigns": {"step": "campaigns", "primary_key": ["id"]}},
         }],
-        "transform": {"mode": "page", "steps": [
-            {"name": "campaigns",
-             "select": "SELECT record->>'id' AS id, partition->>'account_id' AS account_id FROM raw_campaigns"},
-        ]},
-        "export": {"campaigns": {"step": "campaigns", "primary_key": ["id"]}},
-    }],
-}
+    }
+
+
+@pytest.mark.parametrize("case", [
+    "api_key_location", "oauth_scopes", "empty_partitions", "list_without_items",
+    "wrong_default_type", "numeric_incremental_start", "nested_plain_params",
+])
+def test_schema_and_checker_reject_the_same_source_errors(case):
+    document = base_source()
+    stream = document["streams"][0]
+    if case == "api_key_location":
+        document["auth"] = {"type": "api_key", "name": "X-Api-Key", "value": "{{ secrets.token }}", "in": "cookie"}
+    elif case == "oauth_scopes":
+        document["auth"] = {"type": "oauth2_refresh_token", "token_url": "https://x", "client_id": "id",
+                            "client_secret": "{{ secrets.token }}", "refresh_token": "{{ secrets.token }}",
+                            "scopes": "read"}
+    elif case == "empty_partitions":
+        stream["partitions"] = []
+    elif case == "list_without_items":
+        document["spec"]["config"]["account_ids"].pop("items")
+    elif case == "wrong_default_type":
+        document["spec"]["config"]["account_ids"]["default"] = "not a list"
+    elif case == "numeric_incremental_start":
+        stream["incremental"] = {"cursor_field": "day", "start": 5}
+    elif case == "nested_plain_params":
+        stream["requests"][0]["http"]["params"] = {"filter": {"status": "active"}}
+        stream["requests"][0]["http"]["params_encoding"] = "plain"
+    assert any(issue.severity == ERROR for issue in validate_text(yaml.safe_dump(document)))
+    assert not jsonschema.Draft7Validator(schema.json_schema()).is_valid(document)
 
 
 def check(mutate=None, **options):
-    doc = copy.deepcopy(BASE)
+    doc = base_source()
     if mutate:
         mutate(doc)
     return validate_text(yaml.safe_dump(doc, sort_keys=False), "source.yaml", **options)
@@ -157,18 +231,18 @@ def test_examples_match_the_design_doc():
     with open(os.path.join(REPO_ROOT, "docs", "design", "source-format.md")) as stream_:
         text = stream_.read()
     blocks = re.findall(r"```yaml\n# ([\w/]+\.yaml)\n(.*?)```", text, re.S)
-    documented = dict((path, yaml.safe_load(body)) for path, body in blocks)
+    documented = {path: yaml.safe_load(body) for path, body in blocks}
     files = example_files()
     assert len(documented) == len(blocks)
-    assert dict((path, files.get(path)) for path in documented) == documented
-    documented_sources = set(path.split("/")[0] for path in documented)
+    assert {path: files.get(path) for path in documented} == documented
+    documented_sources = {path.split("/")[0] for path in documented}
     core_files = {p: v for p, v in files.items() if p.split("/")[0] in documented_sources}
     assert sorted(path for path in documented if path.endswith("/source.yaml")) == sorted(
         path for path in core_files if path.endswith("/source.yaml"))
     section = text[text.index("### Metadata streams"):]
     section = section[:section.index("\n## ")]
-    table = dict((source, set(re.findall(r"`(\w+)`", streams)))
-                 for source, streams in re.findall(r"^\| `(\w+)` \| (.*) \|$", section, re.M))
+    table = {source: set(re.findall(r"`(\w+)`", streams))
+                 for source, streams in re.findall(r"^\| `(\w+)` \| (.*) \|$", section, re.M)}
     streams = {}
     for path in core_files:
         source, _, name = path.partition("/streams/")
@@ -181,7 +255,7 @@ def test_examples_match_the_design_doc():
                                          ("stream", schema.stream_json_schema)])
 def test_published_schemas_are_up_to_date(name, schema):
     with open(os.path.join(REPO_ROOT, "docs", "schemas", "%s.schema.json" % name)) as stream_:
-        assert json.load(stream_) == schema(), "regenerate with: streamwright-validate --export-schema docs/schemas"
+        assert json.load(stream_) == schema(), "regenerate with: streamwright validate --export-schema docs/schemas"
 
 
 @pytest.mark.parametrize("path", example_sources(), ids=os.path.basename)
@@ -214,10 +288,10 @@ def test_schemas_accept_the_one_stream_form():
         steps(d).append({"name": "ads", "select": "SELECT record->>'id' AS ad_id FROM raw_ads"})
         stream(d)["export"].update(ads={"step": "ads", "primary_key": ["ad_id"], "description": "The ads."})
     assert check(mutate) == []
-    doc = copy.deepcopy(BASE)
+    doc = base_source()
     mutate(doc)
     validate(doc, schema.json_schema())
-    stream_file = dict((key, value) for key, value in stream(doc).items() if key != "name")
+    stream_file = {key: value for key, value in stream(doc).items() if key != "name"}
     validate(stream_file, schema.stream_json_schema())
 
 
@@ -256,7 +330,7 @@ def test_schemas_accept_the_one_stream_form():
 ])
 def test_schema_rejects_invalid_documents(mutate):
     jsonschema = pytest.importorskip("jsonschema")
-    doc = copy.deepcopy(BASE)
+    doc = base_source()
     mutate(doc)
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(doc, schema.json_schema(), cls=jsonschema.Draft7Validator)
@@ -269,10 +343,10 @@ def test_schema_rejects_invalid_documents(mutate):
 def test_routing_and_version():
     # `kind: source` selects these checks; `version` is optional and, when given, must be 1
     for version in (1, "1", "1.0"):
-        assert check(lambda d: d.update(version=version)) == []
+        assert check(lambda d, version=version: d.update(version=version)) == []
     issues = check(lambda d: d.update(version=2))
     assert codes(issues) == [(ERROR, "unsupported-version")] and "omit `version`" in issues[0].message
-    doc = copy.deepcopy(BASE)
+    doc = base_source()
     del doc["kind"]
     text = yaml.safe_dump(doc, sort_keys=False)
     assert validate_text(text, "s.yaml", kind="source") == []
@@ -285,7 +359,8 @@ def test_top_level_keys():
     assert "did you mean 'streams'" in messages(issues)
     assert codes(check(lambda d: d.pop("name"))) == [(ERROR, "missing-key")]
     for streams in (5, []):
-        issues = [issue for issue in check(lambda d: d.update(streams=streams)) if issue.severity == ERROR]
+        issues = [issue for issue in check(lambda d,
+                                           streams=streams: d.update(streams=streams)) if issue.severity == ERROR]
         assert found(issues) == [("bad-value", "streams", "expected a non-empty list of streams, got %s" % (
             "a number" if streams == 5 else "a list"))]
 
@@ -375,12 +450,13 @@ def test_templates_are_not_allowed_in_names_and_records():
 # * auth
 # * ----
 
+def _definition(name, *operations):
+    return ConnectorDefinition(name=name, title=name, family="test", connection=(), operations=operations,
+                               adapters={"source": "streamwright.core.io.http:HttpSourceAdapter"})
+
+
 def test_auth_checks():
-    from streamwright.core.runtime.components import Connector, register, unregister
-    class MockSdkValConnector(Connector):
-        name = "mock_sdk_val"
-        transport = "sdk"
-    register(MockSdkValConnector())
+    register(_definition("mock_sdk_val", Operation(service="s", method="m")))
     try:
         assert codes(check(lambda d: d["auth"].update(provider="mock_sdk_val"))) == [(ERROR, "bad-value")]
     finally:
@@ -396,11 +472,7 @@ def test_auth_checks():
 
 
 def test_http_transport_provider_validation():
-    from streamwright.core.runtime.components import Connector, register
-    class MockHttpValConnector(Connector):
-        name = "mock_http_val"
-        transport = "http"
-    register(MockHttpValConnector())
+    register(_definition("mock_http_val", http.REQUEST))
 
     def valid_http_auth(d):
         d["auth"] = {"provider": "mock_http_val", "type": "bearer", "token": "{{ secrets.token }}"}
@@ -415,6 +487,7 @@ def test_http_transport_provider_validation():
         del d["http"]
         d["streams"][0]["requests"] = [{"name": "raw_campaigns", "sdk": "mock_http_val", "service": "s", "method": "m"}]
     assert (ERROR, "bad-value") in codes(check(sdk_req))
+    unregister("mock_http_val")
 
 
 def test_params_encoding_validation():
@@ -505,7 +578,7 @@ def test_http_checks():
 
 
 def test_retry_on_key_is_caught():
-    text = yaml.safe_dump(BASE, sort_keys=False).replace("base_url:", "retry: {on: [429]}\n  base_url:")
+    text = yaml.safe_dump(base_source(), sort_keys=False).replace("base_url:", "retry: {on: [429]}\n  base_url:")
     assert codes(validate_text(text, "s.yaml")) == [(ERROR, "unknown-key"), (WARNING, "yaml-boolean")]
 
 
@@ -565,7 +638,7 @@ def test_paginator_checks():
 
 
 def test_query_builder_calls_are_data_with_checked_references():
-    """Query builders are components (checked by `streamwright validate`); streamwright-validate checks their references."""
+    """Query builders are components; `streamwright validate` checks their references."""
     def mutate(d):
         sdk_source(d)
         request(d)["arguments"]["query"]["gaql"].update(where=[
@@ -577,18 +650,14 @@ def test_query_builder_calls_are_data_with_checked_references():
     assert "did you mean 'account_ids'" in messages(issues)
 
 
-def test_sdk_request_headers():
-    def headers(value):
-        def mutate(d):
-            sdk_source(d)
-            request(d)["headers"] = value
-        return mutate
-    assert check(headers({"CustomerAccountId": "{{ partition.account_id }}", "CustomerId": 555})) == []
-    assert codes(check(headers("x"))) == [(ERROR, "bad-value")]
-    issues = check(headers({"CustomerAccountId": {"id": 1}, "CustomerId": True}))
-    assert codes(issues) == [(ERROR, "bad-value")] * 2 and "expected text or a number" in messages(issues)
-    issues = check(headers({"CustomerAccountId": "{{ secrets.token }}"}))
-    assert codes(issues) == [(ERROR, "secret-outside-auth")]
+def test_sdk_requests_take_no_headers():
+    """Per-request values are an operation's arguments: `headers` is not a key of sdk requests."""
+    def mutate(d):
+        sdk_source(d)
+        request(d)["headers"] = {"CustomerId": 555}
+    issues = check(mutate)
+    assert set(codes(issues)) == {(ERROR, "unknown-key")} and "unknown key 'headers'" in messages(issues)
+    assert "headers" not in schema.json_schema()["definitions"]["sdk_request"]["properties"]
 
 
 # * -------------------------------------
@@ -771,12 +840,13 @@ def test_export_checks():
          "export name 'CAMPAIGNS' is used twice (names ignore case)"),
     ]
     for mutate, code, path, message in cases:
-        assert found(check(lambda d: mutate(stream(d)["export"]))) == [(code, path, message)]
+        assert found(check(lambda d, mutate=mutate: mutate(stream(d)["export"]))) == [(code, path, message)]
     assert check(lambda d: stream(d)["export"]["campaigns"].update(step="Campaigns")) == []  # names ignore case
 
 
 def test_keys_are_column_names():
-    # which columns a step has is known when DuckDB compiles it (streamwright validate, streamwright run): see test_source_sql
+    # which columns a step has is known when DuckDB compiles it (streamwright validate, streamwright run): see
+    # test_source_sql
     def mutate(d):
         stream(d)["export"]["campaigns"]["primary_key"] = ["idd"]
         stream(d)["incremental"] = {"cursor_field": "date", "start": "-30d"}
@@ -860,7 +930,7 @@ def test_incremental_durations_are_whole_days(window, lookback, problem):
     issues = check(mutate)
     assert messages(issues) == ("" if problem is None else "incremental " + problem)
     jsonschema = pytest.importorskip("jsonschema")
-    doc = copy.deepcopy(BASE)
+    doc = base_source()
     mutate(doc)
     valid = jsonschema.Draft7Validator(schema.json_schema()).is_valid(doc)
     assert valid == (problem is None)
@@ -1041,7 +1111,7 @@ def test_batch_size_on_request_partitions():
                  {"from": "CAMPAIGNS", "fields": ["campaign_id", "account_id"], "batch_size": 1},
                  {"from": "raw_campaigns", "fields": ["account_id", "campaign_id"], "batch_size": 10},
                  {"from": "raw_campaigns", "fields": ["campaign_id"], "batch_size": 10}):
-        assert check(lambda d: requests_stream(d, [item])) == [], item
+        assert check(lambda d, item=item: requests_stream(d, [item])) == [], item
 
 
 def test_batch_size_from_a_step_in_a_stream_without_partitions():
@@ -1151,7 +1221,7 @@ def test_schemas_take_batch_size_on_request_partitions_only():
     jsonschema = pytest.importorskip("jsonschema")
 
     def valid(mutate):
-        doc = copy.deepcopy(BASE)
+        doc = base_source()
         mutate(doc)
         try:
             jsonschema.validate(doc, schema.json_schema(), cls=jsonschema.Draft7Validator)
@@ -1167,7 +1237,7 @@ def test_schemas_take_batch_size_on_request_partitions_only():
                  {"from": "campaigns", "fields": ["campaign_id"], "batch_size": "2"},
                  {"name": "campaign_id", "values": ["c1"], "batch_size": 0},
                  {"name": "campaign_id", "from": "campaigns", "field": "id", "batch_size": "2"}):
-        assert not valid(lambda d: requests_stream(d, [item])), item
+        assert not valid(lambda d, item=item: requests_stream(d, [item])), item
     assert not valid(lambda d: stream(d)["partitions"][0].update(batch_size=2))
     assert not valid(lambda d: d["streams"].append(new_stream("ads", partitions=[
         {"name": "campaign_id", "from_stream": "campaigns", "field": "id", "batch_size": 2}])))
@@ -1185,7 +1255,8 @@ def test_request_partition_items():
         ([], "bad-value", "expected a non-empty list of request partitions, got a list"),
     ]
     for partitions, code, message in cases:
-        issues = [i for i in check(lambda d: requests_stream(d, partitions)) if i.code != "unknown-reference"]
+        issues = [i for i in check(lambda d, partitions=partitions: requests_stream(d, partitions))
+                  if i.code != "unknown-reference"]
         assert [(i.code, i.message) for i in issues] == [(code, message)], partitions
 
 
@@ -1306,7 +1377,7 @@ def test_cli_allow_connector(capsys):
     assert "connector 'google_ads' is not in the allowed list" in capsys.readouterr().out
 
 
-SOURCE_TEXT = yaml.safe_dump(BASE, sort_keys=False)
+SOURCE_TEXT = yaml.safe_dump(base_source(), sort_keys=False)
 
 
 def test_yaml_syntax_error_reports_line():
@@ -1421,7 +1492,7 @@ def test_cli_github_annotations(tmp_path, capsys):
     assert main(["--format", "github", str(bad)]) == 1
     annotation = capsys.readouterr().out.splitlines()[0]
     assert annotation.startswith("::error file=%s,line=3,col=" % str(bad).replace(":", "%3A").replace(",", "%2C"))
-    assert ",title=streamwright-validate unknown-key::stream: unknown top-level key 'stream'" in annotation
+    assert ",title=streamwright validate unknown-key::stream: unknown top-level key 'stream'" in annotation
 
 
 def test_export_schemas_writes_source_and_stream_only(tmp_path, capsys):
@@ -1459,7 +1530,7 @@ def test_every_schema_reference_resolves(name, schema):
 
 def test_schema_accepts_editor_views():
     jsonschema = pytest.importorskip("jsonschema")
-    doc = copy.deepcopy(BASE)
+    doc = base_source()
     stream(doc)["<<"] = {"on_partition_error": "skip"}  # what an editor in YAML 1.2 mode sees for `<<: *defaults`
     request(doc)["<<"] = {"records": {"path": "data"}}
     stream(doc)["transform"]["<<"] = {"mode": "page"}
@@ -1497,7 +1568,7 @@ def test_filter_arguments_must_be_literals_and_keys_cannot_reference():
 
 
 def test_unquoted_dates_and_non_date_starts():
-    text = yaml.safe_dump(BASE, sort_keys=False).replace(
+    text = yaml.safe_dump(base_source(), sort_keys=False).replace(
         "  secrets:", "    start_date: {type: date, default: 2025-01-01}\n  secrets:", 1)
     issues = validate_text(text, "s.yaml")
     assert codes(issues) == [(WARNING, "unused-input")]  # the date is accepted; only "never used" remains
@@ -1510,6 +1581,27 @@ def test_unquoted_dates_and_non_date_starts():
     for value in (-30, {"days": 30}):
         assert found(check(start(value)))[0][:2] == ("bad-value", "streams[0].incremental.start")
         assert codes(check(start(value))) == [(ERROR, "bad-value")]
+
+
+def test_incremental_start_referencing_an_optional_config_without_default_is_an_error():
+    def mutate(definition, start_value="{{ config.start_date }}"):
+        def apply(d):
+            d["spec"]["config"]["start_date"] = definition
+            stream(d)["incremental"] = {"cursor_field": "id", "start": start_value, "window": "1d"}
+            request(d)["http"]["params"] = {"since": "{{ window.start }}"}
+        return apply
+
+    def start_error(issues):
+        return [(i.code, i.path) for i in issues if i.path == "streams[0].incremental.start"]
+
+    # optional with no default resolves to None at run time ("invalid date None"): an error
+    assert start_error(check(mutate({"type": "date", "required": False}))) == [
+        ("bad-value", "streams[0].incremental.start")]
+    # a default, a required flag, or a `| default(...)` filter each guarantee a value: no error
+    assert start_error(check(mutate({"type": "date", "default": "-30d"}))) == []
+    assert start_error(check(mutate({"type": "date", "required": True}))) == []
+    assert start_error(check(mutate({"type": "date", "required": False},
+                                    "{{ config.start_date | default('-30d') }}"))) == []
 
 
 @pytest.mark.parametrize("mutate", [
@@ -1553,7 +1645,7 @@ def test_async_jobs_and_http_requests_need_the_right_auth():
 
 
 def test_bare_equals_operator_loads():
-    text = yaml.safe_dump(BASE, sort_keys=False)
+    text = yaml.safe_dump(base_source(), sort_keys=False)
     assert "\n  transform:\n" in text
     issues = validate_text(text.replace("\n  transform:\n", "\n  x: {op: =}\n  transform:\n", 1), "s.yaml")
     assert [i.code for i in issues] == ["unknown-key"]  # loads fine; `x` itself is just not a stream key
@@ -1730,7 +1822,7 @@ def test_folder_layout_problems(tmp_path):
                     "'bad-name' is not a valid stream name", "the stream file is empty",
                     "a stream file holds one stream (a mapping), got a list"):
         assert message in text
-    with pytest.raises(SourceFilesError, match="already has the file accounts.yaml"):
+    with pytest.raises(SourceFilesError, match=r"already has the file accounts\.yaml"):
         load_source(str(folder))
 
 
@@ -1765,17 +1857,17 @@ def test_yaml_problems_in_stream_files(tmp_path):
 def test_find_source(tmp_path):
     with pytest.raises(SourceFilesError, match="no such file or folder"):
         find_source(str(tmp_path / "missing"))
-    with pytest.raises(SourceFilesError, match="is a folder without a source.yaml"):
+    with pytest.raises(SourceFilesError, match=r"is a folder without a source\.yaml"):
         find_source(str(tmp_path))
     # a source.yaml without a streams/ folder is a single-file source
-    (tmp_path / "source.yaml").write_text(yaml.safe_dump(BASE))
+    (tmp_path / "source.yaml").write_text(yaml.safe_dump(base_source()))
     layout = find_source(str(tmp_path))
     assert layout.folder is None and layout.source_file == str(tmp_path / "source.yaml")
     assert validate_source(str(tmp_path)) == [] and validate_file(str(tmp_path / "source.yaml")) == []
 
     folder = write_folder(tmp_path)
     (folder / "source.yml").write_text(FOLDER_SOURCE)
-    with pytest.raises(SourceFilesError, match="has both source.yaml and source.yml"):
+    with pytest.raises(SourceFilesError, match=r"has both source\.yaml and source\.yml"):
         find_source(str(folder))
     assert codes(validate_source(str(folder))) == [(ERROR, "source-folder")]
 
@@ -1793,7 +1885,7 @@ def test_old_single_file_paths_name_the_source_folder(tmp_path, capsys):
 
 def test_directories_check_each_source_folder_once(tmp_path, capsys):
     folder = write_folder(tmp_path)
-    (tmp_path / "other.yaml").write_text(yaml.safe_dump(BASE))
+    (tmp_path / "other.yaml").write_text(yaml.safe_dump(base_source()))
     files, issues = validate_paths([str(tmp_path), str(folder / "streams" / "campaigns.yaml")])
     assert issues == []
     assert [os.path.relpath(f, str(tmp_path)) for f in files] == [
@@ -1804,13 +1896,139 @@ def test_directories_check_each_source_folder_once(tmp_path, capsys):
     assert "4 file(s) checked: 0 error(s), 0 warning(s)" in capsys.readouterr().out
 
 
+def _duckdb_job(job_name):
+    return {"kind": "DuckDBJob", "name": job_name,
+            "steps": [{"name": "numbers", "sql": "SELECT 1 AS n"}],
+            "outputs": [{"name": "numbers_out", "connection": "lake", "table": "numbers", "mode": "overwrite",
+                         "sql": "SELECT * FROM numbers"}],
+            "connections": {"lake": {"provider": "duckdb", "path": "lake.duckdb"}}}
+
+
+def test_directories_check_each_job_manifest_with_its_own_overlays(tmp_path):
+    folder = tmp_path / "jobs" / "google_ads"
+    folder.mkdir(parents=True)
+    (folder / "campaigns.yaml").write_text(yaml.safe_dump(_duckdb_job("google_ads_campaigns")))
+    (folder / "ad_groups.yaml").write_text(yaml.safe_dump(_duckdb_job("google_ads_ad_groups")))
+    # a partial overlay is not a document of its own: it is checked merged onto campaigns.yaml
+    (folder / "campaigns.local.yaml").write_text(yaml.safe_dump({"connections": {"lake": {"path": "local.duckdb"}}}))
+    files, issues = validate_paths([str(tmp_path)])
+    assert issues == []
+    assert sorted(os.path.relpath(f, str(folder)) for f in files) == [
+        "ad_groups.yaml", "campaigns.local.yaml", "campaigns.yaml"]
+
+    (folder / "campaigns.broken.yaml").write_text(yaml.safe_dump({"outputs": [{"name": "Not A Name"}]}))
+    _, issues = validate_paths([str(tmp_path)])
+    assert issues and {os.path.basename(i.file) for i in issues} == {"campaigns.broken.yaml"}
+    assert not any(i.code == "unknown-kind" for i in issues)
+
+
+def test_a_folder_job_yaml_takes_job_environment_overlays(tmp_path):
+    (tmp_path / "job.yaml").write_text(yaml.safe_dump(_duckdb_job("numbers")))
+    (tmp_path / "job.local.yaml").write_text(yaml.safe_dump({"outputs": [{"name": "Not A Name"}]}))
+    files, issues = validate_paths([str(tmp_path)])
+    assert sorted(os.path.basename(f) for f in files) == ["job.local.yaml", "job.yaml"]
+    assert issues and {os.path.basename(i.file) for i in issues} == {"job.local.yaml"}
+
+
 def test_stream_schema_is_for_stream_files():
     jsonschema = pytest.importorskip("jsonschema")
     validate = functools.partial(jsonschema.validate, cls=jsonschema.Draft7Validator)
     for text in (ACCOUNTS, CAMPAIGNS):
         validate(yaml.safe_load(text), schema.stream_json_schema())
+        # Canonical kind: stream is accepted
+        validate(dict(yaml.safe_load(text), kind="stream"), schema.stream_json_schema())
+    with pytest.raises(jsonschema.ValidationError):
+        validate(dict(yaml.safe_load(CAMPAIGNS), kind="unknown_kind"), schema.stream_json_schema())
     with pytest.raises(jsonschema.ValidationError):
         validate(dict(yaml.safe_load(CAMPAIGNS), name="campaigns"), schema.stream_json_schema())
     with pytest.raises(jsonschema.ValidationError):  # the previous form
         validate(dict(yaml.safe_load(CAMPAIGNS), transform_mode="page"), schema.stream_json_schema())
     validate(yaml.safe_load(FOLDER_SOURCE), schema.json_schema())  # source.yaml of a folder: no streams
+
+
+def test_stream_file_kind_attribute(tmp_path):
+    folder = tmp_path / "src"
+    folder.mkdir()
+    (folder / "source.yaml").write_text(FOLDER_SOURCE, encoding="utf-8")
+    streams = folder / "streams"
+    streams.mkdir()
+    (streams / "accounts.yaml").write_text("kind: stream\n" + ACCOUNTS, encoding="utf-8")
+
+    issues = validate_source(str(folder))
+    assert not issues
+
+    (streams / "accounts.yaml").write_text("kind: not_a_stream\n" + ACCOUNTS, encoding="utf-8")
+    bad_issues = validate_source(str(folder))
+    assert any("a stream has `kind: stream`, got 'not_a_stream'" in str(i.message) for i in bad_issues)
+
+
+def test_non_mapping_paginator_and_fuzz_mapping_keys():
+    def request_paginator_str(d):
+        request(d)["paginator"] = "cursor"
+    issues = check(request_paginator_str)
+    assert any(i.code in ("bad-type", "bad-value") for i in issues)
+
+    def http_paginator_str(d):
+        d["http"] = {"base_url": "https://api.example.com", "paginator": "cursor"}
+    issues = check(http_paginator_str)
+    assert any(i.code in ("bad-type", "bad-value") for i in issues)
+
+    scalars = ["scalar_string", 123, True, 4.5]
+    for scalar in scalars:
+        for key in ("paginator", "records", "http"):
+            def mutate_req(d, k=key, val=scalar):
+                request(d)[k] = val
+            issues = check(mutate_req)
+            assert isinstance(issues, list)
+            assert all(hasattr(i, "code") for i in issues)
+            assert any(i.severity == ERROR for i in issues)
+
+        for key in ("headers", "params", "rate_limit", "paginator"):
+            def mutate_http(d, k=key, val=scalar):
+                request(d)["http"][k] = val
+            issues = check(mutate_http)
+            assert isinstance(issues, list)
+            assert all(hasattr(i, "code") for i in issues)
+            assert any(i.severity == ERROR for i in issues)
+
+
+def test_check_components_reports_sql_errors_plain_validation_misses(tmp_path):
+
+    bad_sql_source = dict(base_source())
+    bad_sql_source["streams"] = [dict(bad_sql_source["streams"][0])]
+    bad_sql_source["streams"][0]["transform"] = {
+        "mode": "page",
+        "steps": [{"name": "campaigns", "select": "SELECT nonexistent_column FROM raw_campaigns"}],
+    }
+    src_file = tmp_path / "bad_sql.yaml"
+    src_file.write_text(yaml.safe_dump(bad_sql_source))
+
+    plain_issues = validate_source(str(src_file))
+    assert not any(i.code == "sql-check" for i in plain_issues)
+    assert plain_issues == []
+
+    issues = validate_source(str(src_file), source_check=check_components)
+    assert any(i.code == "sql-check" and i.severity == ERROR for i in issues)
+
+    assert "connector-not-installed" in NON_STRICT_CODES
+
+
+def test_is_valid_fails_on_errors_and_strict_warnings_outside_the_non_strict_codes():
+
+    missing = Issue(WARNING, "connector-not-installed", "m")
+    style = Issue(WARNING, "unused-config", "u")
+    assert is_valid([missing, style]) and is_valid([missing], strict=True)
+    assert not is_valid([style], strict=True) and not is_valid([Issue(ERROR, "bad", "b")])
+
+
+def test_file_names_in_the_yaml_are_checked_like_the_run_option():
+    def name_files(doc):
+        doc["export"] = {"file_name": "{{ source }}/{{ export }}_{{ today }}.csv"}
+        export = next(iter(stream(doc)["export"].values()))
+        export["file_name"] = "{{ config.account_ids }}/{{ secrets.token }}.csv"
+    found = check(name_files)
+    assert ("error", "bad-reference") in codes(found)
+    assert "{{ secrets.token }}: a file name can use {{ export }}" in messages(found)
+    assert "account_ids" not in messages(found)  # a declared config input; using it there counts as a use
+    found = check(lambda doc: doc.update(export={"file_names": "x.csv"}))
+    assert ("error", "unknown-key") in codes(found)

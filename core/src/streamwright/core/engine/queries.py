@@ -19,9 +19,9 @@
 """
 Query builder calls in requests (docs/design/source-format.md).
 
-Query builders are components (streamwright.core.runtime.components.QueryBuilder), registered by connector packages in the
-`streamwright.query_builders` entry-point group: `gaql`, for example, comes with streamwright-google-ads. In a request, a mapping
-with a single key that is an installed builder's name is a call of that builder:
+Query builders are components (streamwright.core.runtime.components.QueryBuilder), registered by connector packages in
+the `streamwright.query_builders` entry-point group: `gaql`, for example, comes with streamwright-google-ads. In a
+request, a mapping with a single key that is an installed builder's name is a call of that builder:
 
     arguments:
       query:
@@ -33,14 +33,14 @@ queries. This module finds and replaces calls; the query languages live in the b
 """
 
 
-__all__ = ["QueryError", "BuiltQuery", "find_calls", "replace_calls", "build_queries"]
+__all__ = ["BuiltQuery", "QueryError", "build_queries", "find_calls", "replace_calls"]
 
 
 class QueryError(Exception):
     """A query builder cannot write a query from the values it was given."""
 
 
-class BuiltQuery(object):
+class BuiltQuery:
     """
     In requests checked before a run (Connector.check_request), stands for the text a query builder will write at run
     time, so a connector can accept it where it expects query text.
@@ -72,14 +72,14 @@ def find_calls(value, names, path=()):
     """(path, name, spec) of each call of the builders `names` in value (mappings and lists, recursively)."""
     found = _call(value, names)
     if found is not None:
-        return [(path,) + found]
+        return [(path, *found)]
     calls = []
     if isinstance(value, dict):
         for key, item in value.items():
-            calls += find_calls(item, names, path + (key,))
+            calls += find_calls(item, names, (*path, key))
     elif isinstance(value, list):
         for index, item in enumerate(value):
-            calls += find_calls(item, names, path + (index,))
+            calls += find_calls(item, names, (*path, index))
     return calls
 
 
@@ -89,7 +89,7 @@ def replace_calls(value, names, replace):
     if found is not None:
         return replace(*found)
     if isinstance(value, dict):
-        return dict((key, replace_calls(item, names, replace)) for key, item in value.items())
+        return {key: replace_calls(item, names, replace) for key, item in value.items()}
     if isinstance(value, list):
         return [replace_calls(item, names, replace) for item in value]
     return value
@@ -101,7 +101,7 @@ def _build(builder, name, spec):
     except QueryError:
         raise
     except Exception as exc:  # a builder that fails on unexpected input fails the query, with its name
-        raise QueryError("%s: %s: %s" % (name, type(exc).__name__, exc))
+        raise QueryError("%s: %s: %s" % (name, type(exc).__name__, exc)) from exc
     if not isinstance(text, str):
         raise QueryError("%s: the query builder returned %s, not text" % (name, type(text).__name__))
     return text
@@ -118,8 +118,8 @@ def build_queries(value, builders, calls):
             for part in path:
                 node = node[part]
             spec = node[name]
-        except (KeyError, IndexError, TypeError):
-            raise QueryError("%s: the call at %s did not render to a mapping" % (name, list(path)))
+        except (KeyError, IndexError, TypeError) as exc:
+            raise QueryError("%s: the call at %s did not render to a mapping" % (name, list(path))) from exc
         text = _build(builders[name], name, spec)
         if not path:
             return text

@@ -11,16 +11,17 @@ import importlib.util
 import json
 import os
 from decimal import Decimal
+from types import MappingProxyType
 
+import duckdb
 import pytest
 
 from streamwright.core import cli
-from streamwright.core.outputs import dlt_output
-from streamwright.core.outputs.output import open_output
 from streamwright.core.engine.runner import SourceRunner
+from streamwright.core.outputs.ducklake import load_ducklake
+from streamwright.core.outputs.output import open_output
 from streamwright.core.runtime.templates import decimal_text, render, to_json, to_text
 from streamwright.core.runtime.testing import MemoryOutput, page_stream
-
 
 needs_dlt = pytest.mark.skipif(importlib.util.find_spec("dlt") is None,
                                reason="needs dlt (pip install 'streamwright[dlt]' 'dlt[duckdb]')")
@@ -47,13 +48,11 @@ def test_a_decimal_is_written_exactly_in_plain_notation(value, text):
     assert json.loads(text, parse_float=Decimal) == Decimal(value)
 
 
-PLAIN = {"z": "text", "a": [1, 2.5, None, True, {"k": "v"}], "u": "\u00e9\n\"", "i": 10 ** 30, "f": 2.6, "e": 1e-07}
-
-
 def test_to_json_writes_values_without_decimals_as_json_dumps_does():
-    assert to_json(PLAIN) == json.dumps(PLAIN)
-    assert to_json(PLAIN, sort_keys=True) == json.dumps(PLAIN, sort_keys=True)
-    dated = dict(PLAIN, day=datetime.date(2026, 10, 1))
+    plain = {"z": "text", "a": [1, 2.5, None, True, {"k": "v"}], "u": "\u00e9\n\"", "i": 10 ** 30, "f": 2.6, "e": 1e-07}
+    assert to_json(plain) == json.dumps(plain)
+    assert to_json(plain, sort_keys=True) == json.dumps(plain, sort_keys=True)
+    dated = dict(plain, day=datetime.date(2026, 10, 1))
     assert to_json(dated, sort_keys=True, default=to_text) == json.dumps(dated, sort_keys=True, default=to_text)
     with pytest.raises(TypeError, match="Object of type date is not JSON serializable"):
         to_json(dated)
@@ -90,11 +89,11 @@ def test_templates_write_decimals_as_their_text_and_single_references_as_numbers
 # * values that a double would round, in every output
 # * -------------------------------------------------------
 
-API_ROWS = [  # text, so that the API's JSON keeps every digit
+API_ROWS = (  # text, so that the API's JSON keeps every digit
     {"id": 1, "money": "2.60", "precise": "12345678901234567890.123456", "big": str(2 ** 53 + 1),
      "huge": "123456789012345678901234567890", "whole": "100.00", "zero": "0.00", "ratio": 2.6},
     {"id": 2, "money": "99999999999999999999999.99", "precise": "-0.000001", "big": str(2 ** 62),
-     "huge": "876543210987654321098765432110", "whole": "-1.50", "zero": None, "ratio": None}]
+     "huge": "876543210987654321098765432110", "whole": "-1.50", "zero": None, "ratio": None})
 ITEMS = """SELECT (record->>'id')::BIGINT AS id, (record->>'money')::DECIMAL(26, 2) AS money,
                   (record->>'precise')::DECIMAL(38, 6) AS precise, (record->>'big')::BIGINT AS big,
                   (record->>'huge')::HUGEINT AS huge, (record->>'whole')::DECIMAL(9, 2) AS whole,
@@ -102,23 +101,23 @@ ITEMS = """SELECT (record->>'id')::BIGINT AS id, (record->>'money')::DECIMAL(26,
            FROM records"""
 TOTALS = "SELECT count(*) AS n, sum(money) AS money, sum(precise) AS precise, sum(big) AS big, sum(huge) AS huge " \
          "FROM items"
-RECORDS = {
+RECORDS = MappingProxyType({
     "items": [
         {"id": 1, "money": Decimal("2.60"), "precise": Decimal("12345678901234567890.123456"), "big": 2 ** 53 + 1,
          "huge": 123456789012345678901234567890, "whole": Decimal("100.00"), "zero": Decimal("0.00"), "ratio": 2.6},
         {"id": 2, "money": Decimal("99999999999999999999999.99"), "precise": Decimal("-0.000001"), "big": 2 ** 62,
          "huge": 876543210987654321098765432110, "whole": Decimal("-1.50"), "zero": None, "ratio": None}],
     "totals": [{"n": 2, "money": Decimal("100000000000000000000002.59"),
-                "precise": Decimal("12345678901234567890.123455"), "big": 2 ** 53 + 1 + 2 ** 62, "huge": 10 ** 30}]}
-JSON_TEXT = {  # (keys sorted)
+                "precise": Decimal("12345678901234567890.123455"), "big": 2 ** 53 + 1 + 2 ** 62, "huge": 10 ** 30}]})
+JSON_TEXT = MappingProxyType({  # (keys sorted)
     "items": [
         '{"big": 9007199254740993, "huge": 123456789012345678901234567890, "id": 1, "money": 2.6, '
         '"precise": 12345678901234567890.123456, "ratio": 2.6, "whole": 100, "zero": 0}',
         '{"big": 4611686018427387904, "huge": 876543210987654321098765432110, "id": 2, '
         '"money": 99999999999999999999999.99, "precise": -0.000001, "ratio": null, "whole": -1.5, "zero": null}'],
     "totals": ['{"big": 4620693217682128897, "huge": 1000000000000000000000000000000, '
-               '"money": 100000000000000000000002.59, "n": 2, "precise": 12345678901234567890.123455}']}
-CSV_ROWS = {
+               '"money": 100000000000000000000002.59, "n": 2, "precise": 12345678901234567890.123455}']})
+CSV_ROWS = MappingProxyType({
     "items": [["id", "money", "precise", "big", "huge", "whole", "zero", "ratio"],
               ["1", "2.6", "12345678901234567890.123456", "9007199254740993", "123456789012345678901234567890", "100",
                "0", "2.6"],
@@ -126,12 +125,12 @@ CSV_ROWS = {
                "876543210987654321098765432110", "-1.5", "", ""]],
     "totals": [["n", "money", "precise", "big", "huge"],
                ["2", "100000000000000000000002.59", "12345678901234567890.123455", "4620693217682128897",
-                "1000000000000000000000000000000"]]}
-COLUMNS = {
+                "1000000000000000000000000000000"]]})
+COLUMNS = MappingProxyType({
     "items": [("id", "BIGINT"), ("money", "DECIMAL(26,2)"), ("precise", "DECIMAL(38,6)"), ("big", "BIGINT"),
               ("huge", "HUGEINT"), ("whole", "DECIMAL(9,2)"), ("zero", "DECIMAL(9,2)"), ("ratio", "DOUBLE")],
     "totals": [("n", "BIGINT"), ("money", "DECIMAL(38,2)"), ("precise", "DECIMAL(38,6)"), ("big", "HUGEINT"),
-               ("huge", "HUGEINT")]}
+               ("huge", "HUGEINT")]})
 
 
 def exact_source(api, huge=True):
@@ -172,7 +171,6 @@ def read_table(connection, name):
 
 
 def duckdb_table(database, name):
-    import duckdb
     connection = duckdb.connect(str(database), read_only=True)
     try:
         return read_table(connection, name)
@@ -209,8 +207,8 @@ def test_json_outputs_write_exact_numbers(api, tmp_path, capsys, kind):
             texts[name.split(".")[0]] = (out / name).read_text().splitlines()
     assert texts == JSON_TEXT
     for name, lines in texts.items():  # (floats: their shortest text)
-        assert [json.loads(line, parse_float=Decimal) for line in lines] == [dict(
-            (key, Decimal(repr(value)) if isinstance(value, float) else value) for key, value in record.items())
+        assert [json.loads(line, parse_float=Decimal) for line in lines] == [{
+            key: Decimal(repr(value)) if isinstance(value, float) else value for key, value in record.items()}
             for record in RECORDS[name]]
 
 
@@ -226,7 +224,6 @@ def test_csv_and_tsv_files_write_the_exact_text(api, tmp_path, kind):
 
 
 def test_parquet_files_hold_exact_decimals(api, tmp_path):
-    import duckdb
     out = tmp_path / "out"
     assert cli.main(["run", write_source(tmp_path, exact_source(api)), "--output", "parquet:%s" % out]) == 0
     connection = duckdb.connect(":memory:")
@@ -243,11 +240,10 @@ def test_parquet_files_hold_exact_decimals(api, tmp_path):
 
 
 def _ducklake_available():
-    import duckdb
-    from streamwright.core.outputs.warehouse import _load_ducklake
+
     connection = duckdb.connect(":memory:")
     try:
-        _load_ducklake(connection)
+        load_ducklake(connection)
         return True
     except Exception:
         return False
@@ -268,7 +264,6 @@ def test_duckdb_and_ducklake_tables_hold_exact_decimals(api, tmp_path, monkeypat
         if kind == "duckdb":
             columns, rows = duckdb_table(database, "shop.%s" % name)
         else:
-            import duckdb
             connection = duckdb.connect(":memory:")
             try:
                 connection.execute("LOAD ducklake")
@@ -298,7 +293,7 @@ def test_dlt_loads_exact_decimals(api, tmp_path, monkeypatch):
 
 
 @needs_dlt
-def test_dlt_tables_keep_the_type_of_a_column_they_have(tmp_path, monkeypatch):
+def test_dlt_tables_keep_the_type_of_a_column_they_have(tmp_path, monkeypatch, dlt_output):
     """A DECIMAL column that an earlier load made a double (as loads did before decimals were exact) stays one."""
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("DLT_DATA_DIR", str(tmp_path / "dlt"))
@@ -425,7 +420,7 @@ def test_bookmarks_saved_with_decimal_partitions_as_doubles_still_resume(api):
     source = {"kind": "source", "name": "shop", "http": {"base_url": api.url}, "streams": [tiers, prices]}
     yesterday = (TODAY - datetime.timedelta(days=1)).isoformat()
     # the keys the commit before exact decimals saved: json.dumps of the partition, its decimals as doubles
-    legacy = dict((json.dumps({"amount": float(Decimal(value))}, sort_keys=True), yesterday) for value in amounts)
+    legacy = {json.dumps({"amount": float(Decimal(value))}, sort_keys=True): yesterday for value in amounts}
     assert '{"amount": 1.2345678901234567e+19}' in legacy and '{"amount": 100.0}' in legacy
     state = {"bookmarks": {"prices": dict(legacy, **{'{"amount": 7.5}': "2026-01-01"})}}
     output = MemoryOutput()

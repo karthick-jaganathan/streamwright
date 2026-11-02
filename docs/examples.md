@@ -122,7 +122,7 @@ export.
 requests:
   - name: raw_orders
     sdk: files
-    service: file
+    service: object
     method: read
     arguments:
       path: "orders/*.csv"
@@ -144,6 +144,7 @@ export:
   orders:
     step: orders
     primary_key: [order_id]
+    file_name: "{{ source }}/orders/{{ today }}.{{ format }}"  # with a file output, e.g. out/files_demo/orders/2026-10-04.csv
 ```
 
 The [source format design](https://github.com/karthick-jaganathan/streamwright/blob/master/docs/design/source-format.md)

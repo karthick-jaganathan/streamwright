@@ -7,8 +7,9 @@ requests:
     service: CampaignManagementService
     method: GetCampaignsByAccountId
     arguments:
-      AccountId: "{{ partition.account_id }}"
-      CampaignType: [Search, Shopping, DynamicSearchAds, Audience, PerformanceMax]
+      request:
+        AccountId: "{{ partition.account_id }}"
+        CampaignType: [Search, Shopping, DynamicSearchAds, Audience, PerformanceMax]
     records: {path: Campaign}
   - name: raw_ad_groups
     partitions:
@@ -16,8 +17,9 @@ requests:
     sdk: microsoft_ads
     service: CampaignManagementService
     method: GetAdGroupsByCampaignId
-    headers: {CustomerAccountId: "{{ partition.account_id }}"}
-    arguments: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
+    arguments:
+      account_id: "{{ partition.account_id }}"
+      request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
     records: {path: AdGroup}
 transform:
   mode: run                        # two requests, the second partitioned by a step: in dependency order

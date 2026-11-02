@@ -29,6 +29,6 @@ _ConfigLoader.add_constructor("tag:yaml.org,2002:value", yaml.SafeLoader.constru
 
 def load_yaml(path):
     """Loads a YAML file; a bare `=` is read as text. Raises yaml.YAMLError."""
-    with open(path, "r", encoding="utf-8") as stream:
+    with open(path, encoding="utf-8") as stream:
         return yaml.load(stream, Loader=_ConfigLoader)
 

@@ -40,8 +40,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qsl, urlparse
 
-
-__all__ = ["FakeApi", "MemoryOutput", "FakeClock", "page_stream"]
+__all__ = ["FakeApi", "FakeClock", "MemoryOutput", "page_stream"]
 
 
 def page_stream(name, request, select, records=None, primary_key=None, **extra):
@@ -64,7 +63,7 @@ def page_stream(name, request, select, records=None, primary_key=None, **extra):
     return stream
 
 
-class FakeApi(object):
+class FakeApi:
     """
     A local HTTP server at `url`. routes[(method, path)] = handler(request) -> (status, payload[, headers]), where
     request has method, path, params, headers and body; bytes payloads are sent as files, anything else as JSON.
@@ -98,7 +97,7 @@ class FakeApi(object):
                    "headers": dict(handler.headers), "body": body}
         self.requests.append(request)
         route = self.routes.get((method, parsed.path))
-        status, payload, headers = (route(request) + ({},))[:3] if route else (404, {"error": "not found"}, {})
+        status, payload, headers = ((*route(request), {}))[:3] if route else (404, {"error": "not found"}, {})
         if isinstance(payload, bytes):
             data, content_type = payload, "application/octet-stream"
         else:
@@ -127,7 +126,7 @@ class FakeApi(object):
         return False
 
 
-class MemoryOutput(object):
+class MemoryOutput:
     """
     schemas[export] = (schema, key properties); columns[export] = its (name, DuckDB type) columns; records =
     [(export, record)]; states = [state, ...]; partial = the exports marked partial. summary() is what every output
@@ -158,13 +157,13 @@ class MemoryOutput(object):
         self.closed = "failed" if failed else "ok"
 
     def summary(self):
-        counts = dict((name, 0) for name in self.schemas)
+        counts = dict.fromkeys(self.schemas, 0)
         for name, _ in self.records:
             counts[name] = counts.get(name, 0) + 1
         return [{"export": name, "records": count} for name, count in counts.items()]
 
 
-class FakeClock(object):
+class FakeClock:
     """Time that only moves when sleep() is called: SourceRunner(clock=clock, sleep=clock.sleep)."""
 
     def __init__(self, now=0.0):

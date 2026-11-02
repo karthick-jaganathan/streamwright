@@ -15,6 +15,7 @@ requests:
     arguments:
       id: "act_{{ partition.account_id }}"
       fields: [account_id, campaign_id, campaign_name, date_start, impressions, clicks, spend]
+      action_report_time: conversion   # an undeclared (vendor) Graph API argument, forwarded verbatim (contract §6a)
       params:
         level: campaign
         time_increment: 1

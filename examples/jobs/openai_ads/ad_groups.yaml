@@ -1,0 +1,73 @@
+kind: DuckDBJob
+version: 1
+name: openai_ads_ad_groups
+description: Directly invokes OpenAI Ads API connector without requiring an external stream manifest, shapes in DuckDB, and merges into warehouse.
+
+spec:
+  config:
+    account_id: {type: string}
+  secrets:
+    openai_ads_key: {type: string}
+
+connections:
+  openai_api:
+    provider: openai_ads
+    type: bearer
+    token: "{{ secrets.openai_ads_key }}"
+    base_url: https://api.ads.openai.com
+  target_dw:
+    provider: duckdb
+    path: /tmp/openai_direct_dw.duckdb
+
+steps:
+  # STEP 1: Direct connector invocation (Option B)
+  - name: raw_ad_groups
+    description: Direct API call to /v1/ad_groups via the openai_ads connector
+    connection: openai_api
+    request:
+      path: /v1/ad_groups
+      params:
+        ad_account_id: "{{ config.account_id }}"
+        limit: 500
+      records:
+        path: data
+    paginator:
+      type: cursor
+      token_path: last_id
+      param: after
+      has_more_path: has_more
+
+  # STEP 2: Intermediate SQL parsing & shaping
+  - name: parsed_ad_groups
+    description: Parse nested JSON fields and timestamps with DuckDB SQL
+    materialize: table
+    sql: |
+      SELECT
+        id AS ad_group_id,
+        name AS ad_group_name,
+        status,
+        bidding_config->>'strategy' AS bid_strategy,
+        to_timestamp(created_at::BIGINT) AS created_at
+      FROM raw_ad_groups
+
+  # STEP 3: Aggregate summary
+  - name: ad_group_summary
+    description: Compute summary by status
+    materialize: table
+    sql: |
+      SELECT
+        status,
+        COUNT(*) AS total_count
+      FROM parsed_ad_groups
+      GROUP BY status
+
+outputs:
+  - name: save_summary
+    connection: target_dw
+    step: ad_group_summary
+    table: direct_ad_group_summary
+    mode: overwrite
+
+runtime:
+  threads: 4
+  memory_limit: 1GB

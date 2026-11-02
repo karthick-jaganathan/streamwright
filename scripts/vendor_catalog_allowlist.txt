@@ -1,0 +1,41 @@
+# Module-level string containers in connector packages that check_connectors.py would flag as a vendor catalog
+# (contract v1.3 §6b) but are an *allowed* constant: the connector's own vocabulary, its query-builder grammar, the
+# keys it consumes itself, or transport mechanics - NOT an enumeration of the vendor's remote service/method surface.
+# Format: <connector>/<module path>:<NAME>   # justification
+# The reviewer must confirm each entry is policy/vocabulary/transport, never a list of vendor services or methods.
+
+# google_ads: the GAQL query builder's grammar - operators, clause keywords and escape map. §6b explicitly allows a
+# query-builder grammar as the connector's own vocabulary (the builder writes values safely).
+google_ads/gaql.py:KEYS            # GAQL builder clause keywords (its own grammar)
+google_ads/gaql.py:WHERE_KEYS      # GAQL builder WHERE keywords (its own grammar)
+google_ads/gaql.py:OPERATORS       # GAQL builder comparison operators (its own grammar)
+google_ads/gaql.py:LIST_OPERATORS  # GAQL builder list operators (its own grammar)
+google_ads/gaql.py:_ESCAPES        # GAQL string-literal escape map (its own grammar)
+
+# deltalake: the translation of the object-store connection's credentials into delta-rs / Hadoop storage options, and
+# the delta-rs options the connector itself sets - transport mechanics it owns, not a vendor API surface.
+deltalake/client.py:S3_PARAMETERS     # credential -> delta-rs S3 storage option (own translation)
+deltalake/client.py:AZURE_PARAMETERS  # credential -> delta-rs Azure storage option (own translation)
+deltalake/client.py:DELTA_RS_OPTIONS  # the delta-rs storage options the connector itself sets (transport)
+
+# object-store Spark adapters: the Maven coordinates of the Hadoop/cloud jars the adapter ships - transport mechanics.
+gcs/engines/spark.py:_JARS   # Hadoop GCS connector jar coordinates (transport)
+s3/engines/spark.py:_JARS    # Hadoop AWS connector jar coordinates (transport)
+
+# google_sheets: the connector's own credential field names (the keys it treats as secrets) - declared vocabulary.
+google_sheets/client.py:CREDENTIAL_KEYS   # the connector's own credential field names (vocabulary)
+
+# kafka: the call keys the connector consumes itself (destination, group_id, ...), separated from vendor conf - the
+# keys it owns, which §6b allows.
+kafka/client.py:_CALL_KEYS   # the request keys the connector consumes itself (vocabulary)
+
+# mysql: connection key -> DuckDB mysql secret parameter. Bounded by DuckDB's own secret surface (the engine rejects
+# unknown parameters), so it is this connector's translation to the engine, not the remote MySQL API surface.
+mysql/client.py:SECRET_PARAMETERS   # connection key -> DuckDB mysql secret parameter (engine translation)
+
+# postgres: the sslmode values of the declared `sslmode` field - the connector's common, validated vocabulary (§6a
+# layer 1), the choices a user picks from.
+postgres/client.py:SSLMODES   # the declared `sslmode` field's choices (vocabulary)
+
+# sqs: the boto3 client errors the connector handles (its own error policy), not an API surface catalog.
+sqs/client.py:_HANDLED   # the boto3 errors the connector handles (own error policy)

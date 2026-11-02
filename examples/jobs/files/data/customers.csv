@@ -1,0 +1,5 @@
+customer_id,customer_name,tier,country
+1,Acme Corp,enterprise,US
+2,Globex Inc,standard,CA
+3,Soylent Corp,premium,GB
+4,Initech,standard,US

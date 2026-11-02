@@ -15,12 +15,11 @@
 # **************************************************************************/
 
 import json
+
 import pytest
 import responses
 
-from streamwright.core.engine.runner import SourceRunner, SourceError
-from streamwright.core.config.loader import load_source
-from streamwright.core.runtime.testing import MemoryOutput
+from streamwright.core.sdk.testing import MemoryOutput, SourceError, SourceRunner, load_source
 
 
 def _load_apple_source(stream_name=None):

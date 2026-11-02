@@ -16,12 +16,11 @@
 
 import datetime
 from urllib.parse import parse_qs, urlparse
+
 import pytest
 import responses
 
-from streamwright.core.engine.runner import SourceRunner
-from streamwright.core.config.loader import load_source
-from streamwright.core.runtime.testing import MemoryOutput
+from streamwright.core.sdk.testing import MemoryOutput, SourceError, SourceRunner, load_source
 
 
 def _load_openai_source(stream_name=None):
@@ -141,7 +140,8 @@ def test_campaign_insights():
             "data": [{"date": "2026-01-01", "impressions": 100, "clicks": 10, "spend": 5.5}],
             "has_more": False,
         },
-        match=[responses.matchers.query_param_matcher({"start_date": "2026-01-01", "end_date": "2026-01-01", "limit": "500"})],
+        match=[responses.matchers.query_param_matcher(
+            {"start_date": "2026-01-01", "end_date": "2026-01-01", "limit": "500"})],
         status=200,
     )
 
@@ -153,7 +153,8 @@ def test_campaign_insights():
     SourceRunner(source, config, secrets, output=output, today=datetime.date(2026, 1, 1)).run()
 
     assert len(responses.calls) == 2
-    assert responses.calls[1].request.path_url == "/v1/campaigns/cmp_1/insights?start_date=2026-01-01&end_date=2026-01-01&limit=500"
+    assert responses.calls[1].request.path_url == (
+        "/v1/campaigns/cmp_1/insights?start_date=2026-01-01&end_date=2026-01-01&limit=500")
 
     table = _records(output, "campaign_performance")
     assert len(table) == 1
@@ -253,7 +254,6 @@ def test_rate_limit_retry():
 
 
 def test_missing_auth():
-    from streamwright.core.engine.runner import SourceError
     source = _load_openai_source("ad_accounts")
     with pytest.raises(SourceError, match="token"):
         SourceRunner(source, {"account_ids": ["act_1"]}, {}, output=MemoryOutput()).run()

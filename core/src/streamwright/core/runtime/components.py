@@ -17,348 +17,223 @@
 
 
 """
-Components (docs/design/source-format.md) - connectors and query builders - registered by connector packages under
-their names in entry-point groups; in a connector's pyproject.toml:
+Connectors (docs/design/connector-contract.md) as the source engine and the validators reach them: the connector
+definitions registered by connector packages in the `streamwright.connectors` entry-point group, and the query
+builders those definitions list. In a connector's pyproject.toml:
 
-    [project.entry-points."streamwright.connectors"]           # Connector: an auth provider and its `sdk` requests
-    google_ads = "streamwright.connectors.google_ads.connector:GoogleAdsConnector"
+    [project.entry-points."streamwright.connectors"]
+    google_ads = "streamwright.connectors.google_ads:CONNECTOR"
 
-    [project.entry-points."streamwright.query_builders"]       # QueryBuilder: query text from a typed mapping
-    gaql = "streamwright.connectors.google_ads.gaql:GaqlBuilder"
+and in its spec (`{gaql: {...}}` in a request calls that query builder):
 
-Source files can only use installed (and allowed) components. Each connector decides which services and methods a
-source may call (read-only ones), and each query builder writes values safely into its query language.
+    ConnectorDefinition(..., query_builders={"gaql": "streamwright.connectors.google_ads.gaql:GaqlBuilder"})
+
+Source files can only use installed (and allowed) connectors; a source can call the query builders of the connectors
+it may use. Nothing is imported before the allow-list admits it.
 """
 
-import logging
-import time
-
-from streamwright.core.runtime import logs
 from streamwright.core.engine import queries
-from streamwright.core.net.http import RetryPolicy
+from streamwright.core.runtime import plugins, source_connectors
+from streamwright.core.runtime.connector_types import ComponentLoadError, ConnectorContext, ConnectorError, QueryBuilder
+from streamwright.core.runtime.contract import AdapterLoadError, ConnectorDefinition
+from streamwright.core.runtime.definitions import load_definition
 
+__all__ = [
+    "ENTRY_POINT_GROUP",
+    "ComponentLoadError",
+    "ComponentRegistry",
+    "ConnectorContext",
+    "ConnectorError",
+    "QueryBuilder",
+    "available",
+    "check_call",
+    "check_queries",
+    "check_source",
+    "component_problems",
+    "declared_auth",
+    "describe",
+    "load",
+    "load_query_builder",
+    "path_text",
+    "poll_call",
+    "query_builders",
+    "register",
+    "request_body",
+    "sdk_call",
+    "sdk_calls",
+    "unregister",
+]
 
-__all__ = ["ENTRY_POINT_GROUP", "QUERY_BUILDER_GROUP", "Connector", "ConnectorSpec", "QueryBuilder",
-           "ConnectorError", "ComponentLoadError", "ConnectorContext", "register", "unregister", "available",
-           "load", "component_problems", "check_source", "check_queries", "check_call", "sdk_call", "poll_call",
-           "sdk_calls", "request_body", "path_text"]
-
-LOG = logging.getLogger("streamwright.source")
-ENTRY_POINT_GROUP = "streamwright.connectors"
-QUERY_BUILDER_GROUP = "streamwright.query_builders"
-
-
-class ConnectorSpec(object):
-    """Declarative specification for a connector."""
-
-    def __init__(self, name=None, title="", category="other", transport="sdk", package=None, extension=None, loggers=()):
-        self.name = name
-        self.title = title
-        self.category = category
-        self.transport = transport
-        self.package = package or ("requests" if transport == "http" else "duckdb" if transport == "duckdb" else None)
-        self.extension = extension
-        if isinstance(loggers, str):
-            self.loggers = (loggers,)
-        else:
-            self.loggers = tuple(loggers) if loggers else ()
-
-    def badge(self, version_resolver):
-        """Formats the badge tag: [SDK][google-ads v33.0.0], [DuckDB postgres v1.5.6], [HTTP][requests v2.34.2]."""
-        v = version_resolver(self.package) if self.package else None
-        ver_str = " v%s" % v if v else ""
-        if self.transport == "http":
-            return "[HTTP][requests%s]" % ver_str
-        if self.transport == "sdk":
-            return "[SDK][%s%s]" % (self.package, ver_str) if self.package else "[SDK]"
-        if self.transport == "duckdb":
-            ext_str = " %s" % self.extension if self.extension else ""
-            return "[DuckDB%s%s]" % (ext_str, ver_str)
-        return "[%s]" % self.transport
-
-    def effective_loggers(self):
-        """Declarative HTTP connectors automatically include streamwright.network."""
-        if self.transport == "http":
-            return ("streamwright.network",) + tuple(l for l in self.loggers if l != "streamwright.network")
-        return self.loggers
-
-
-class ConnectorError(Exception):
-    """
-    A failed connector call. `code` is the provider's error code, matched against `retry.codes`; `retryable` marks
-    errors that are worth retrying anyway (quota, temporarily unavailable); `retry_after` is in seconds.
-    """
-
-    def __init__(self, message, code=None, retryable=False, retry_after=None):
-        super(ConnectorError, self).__init__(message)
-        self.code = code
-        self.retryable = retryable
-        self.retry_after = retry_after
-
-
-class ComponentLoadError(Exception):
-    pass
-
-
-class Connector(object):
-    """
-    Base class for connectors. Subclasses configure their declarative specification via `spec = ConnectorSpec(...)`
-    and implement connect() and request().
-    """
-
-    spec = None           # a ConnectorSpec instance defining name, title, category, transport, package, extension, loggers
-    query_builders = ()
-    auth_required = ()
-    auth_optional = ()
-    request_headers = ()  # names a request's `headers` may use, e.g. a per-request account
-
-    @property
-    def name(self):
-        return self.spec.name if self.spec else None
-
-    @property
-    def transport(self):
-        return self.spec.transport if self.spec else "sdk"
-
-
-    def check_auth(self, auth):
-        """Problems with the keys of the `auth` block (without `provider`)."""
-        if self.transport == "http":
-            return []
-        known = tuple(self.auth_required) + tuple(self.auth_optional)
-        problems = ["auth: provider %r needs %r" % (self.name, key) for key in self.auth_required if key not in auth]
-        problems += ["auth: provider %r does not support %r (supported: %s)" % (self.name, key, ", ".join(known))
-                     for key in auth if key not in known]
-        return problems
-
-    def check_request(self, request):
-        """Problems with an unrendered {service, method, arguments, headers} request (headers are checked by
-        check_call against request_headers)."""
-        return []
-
-    def connect(self, auth, context):
-        """Builds the SDK client from the rendered `auth` block (without `provider`)."""
-        raise NotImplementedError
-
-    def request(self, client, request, context):
-        """
-        Yields the responses of a rendered {service, method, arguments, headers} request (`headers` only when the
-        source sets them) as plain data (dicts, lists, text, numbers). Calls that reach the API go through
-        context.call() for rate limits and retries.
-        """
-        raise NotImplementedError
-
-    def error(self, exc):
-        """Maps an SDK exception to a ConnectorError, or returns None for exceptions that are not API errors."""
-        return None
-
-
-class QueryBuilder(object):
-    """
-    Base class for query builders. In a request, `{<name>: spec}` (a mapping with that single key) is replaced by
-    build(spec), the query text. The spec's references are rendered first, with their types (dates, numbers, lists),
-    so build() must write every value safely: checked, quoted and escaped for its query language.
-    """
-
-    name = None
-    connector = None
-
-    def check(self, spec):
-        """Problems with an unrendered spec (values may still be references) as (path inside the spec, message)."""
-        return []
-
-    def build(self, spec):
-        """The query text for a rendered spec; raises streamwright.core.engine.queries.QueryError for values it cannot write."""
-        raise NotImplementedError
-
-
-class ConnectorContext(object):
-    """
-    What a stream gives its connector: redaction - secret() masks what the connector obtains while the run goes (access
-    tokens, refreshed tokens, signatures) in every log line and error - and calls with the stream's rate limit and
-    retry policy, counted in the run's metrics (`metrics`, logs.RunMetrics) for the stream and request in `where`,
-    which the runner sets. `attempt` is the attempts the last call took.
-    """
-
-    def __init__(self, connector, redact, retry=None, rate_limiter=None, sleep=time.sleep, metrics=None,
-                 clock=time.monotonic):
-        self.connector = connector
-        self.redact = redact
-        self.retry = RetryPolicy(retry)
-        # provider codes come only from the source: the default codes are HTTP statuses
-        self.codes = set((retry or {}).get("codes") or ())
-        self.rate_limiter = rate_limiter
-        self.sleep = sleep
-        self.metrics = metrics
-        self.clock = clock
-        self.where = None  # the stream, request, partition and window of the calls being made
-        self.attempt = 0
-        self.log = LOG
-
-    def secret(self, value):
-        """Masks `value` (e.g. an access token the connector obtained) as *** in every log line and error from now
-        on."""
-        self.redact.add(value)
-
-    def retryable(self, error):
-        return error.retryable or (error.code is not None and error.code in self.codes)
-
-    def call(self, function, *args, **kwargs):
-        """Calls function(*args, **kwargs) after the rate limit; retries errors per the retry policy."""
-        attempt = 0
-        while True:
-            attempt += 1
-            if self.rate_limiter is not None:
-                self.rate_limiter.wait()
-            if self.metrics is not None:
-                self.metrics.request(self.where, retry=attempt > 1)
-            self.attempt = attempt
-            try:
-                return function(*args, **kwargs)
-            except Exception as exc:
-                error = exc if isinstance(exc, ConnectorError) else self.connector.error(exc)
-                if error is None:
-                    raise
-                if not self.retryable(error) or attempt >= self.retry.max_attempts:
-                    if error is exc:
-                        raise
-                    raise error from exc
-            delay = self.retry.delay(attempt, error.retry_after)
-            logs.NETWORK.warning("%s; retrying in %.1fs (attempt %d of %d)", self.redact(error), delay, attempt + 1,
-                                 self.retry.max_attempts,
-                                 extra=logs.fields(event="retry", code=None if error.code is None else str(error.code),
-                                                   attempt=attempt + 1, duration_ms=int(round(delay * 1000)),
-                                                   **(self.where or {})))
-            self.sleep(delay)
+ENTRY_POINT_GROUP = plugins.CONNECTORS
 
 
 # * --------
 # * registry
 # * --------
-_KINDS = {"connector": (ENTRY_POINT_GROUP, Connector), "query builder": (QUERY_BUILDER_GROUP, QueryBuilder)}
-_REGISTERED = dict((kind, {}) for kind in _KINDS)
-_LOADED = dict((kind, {}) for kind in _KINDS)
+class ComponentRegistry:
+    """Isolated connector registration and load caches for embedding and tests."""
+
+    def __init__(self):
+        self.registered = {}  # name -> ConnectorDefinition registered in this process
+        self.loaded = {}      # name -> ConnectorDefinition loaded from its entry point
+        self.builders = {}    # (connector, query builder) -> QueryBuilder
+
+    def register(self, definition):
+        register(definition, registry=self)
+
+    def unregister(self, name):
+        unregister(name, registry=self)
+
+    def available(self):
+        return available(registry=self)
+
+    def load(self, name, allowed=None):
+        return load(name, allowed=allowed, registry=self)
 
 
-def _kind(component):
-    for kind, (_, base) in _KINDS.items():
-        if isinstance(component, base):
-            return kind
-    raise TypeError("%r is neither a Connector nor a QueryBuilder" % (component,))
+_DEFAULT_REGISTRY = ComponentRegistry()
 
 
-def _component_name(component):
-    spec = getattr(component, "spec", None)
-    if isinstance(spec, ConnectorSpec) and spec.name:
-        return spec.name
-    name = getattr(component, "name", None)
-    return name if isinstance(name, str) else (spec.name if spec else None)
+def register(definition, registry=None):
+    """Registers a connector definition in this process (for tests and embedding; installs use entry points)."""
+    if not isinstance(definition, ConnectorDefinition):
+        raise TypeError("%r is not a ConnectorDefinition" % (definition,))
+    (registry or _DEFAULT_REGISTRY).registered[definition.name] = definition
 
 
-def register(component):
-    """Registers a connector or query builder object in this process (for tests and embedding; installs use entry
-    points)."""
-    name = _component_name(component)
-    _REGISTERED[_kind(component)][name] = component
+def unregister(name, registry=None):
+    registry = registry or _DEFAULT_REGISTRY
+    registry.registered.pop(name, None)
+    registry.loaded.pop(name, None)
+    for key in [key for key in registry.builders if key[0] == name]:
+        registry.builders.pop(key)
 
 
-def unregister(name):
-    for kind in _KINDS:
-        _REGISTERED[kind].pop(name, None)
-        _LOADED[kind].pop(name, None)
+def _entry_points():
+    return plugins.entries(ENTRY_POINT_GROUP)
 
 
-def _entry_points(group=ENTRY_POINT_GROUP):
-    from importlib import metadata
-    found = metadata.entry_points()
-    if hasattr(found, "select"):
-        return list(found.select(group=group))
-    return list(found.get(group, []))  # Python 3.9
-
-
-def available(kind="connector"):
-    """Names of the components of a kind ("connector" or "query builder") that can be loaded; nothing is imported."""
-    return sorted(set(_REGISTERED[kind]) | set(entry.name for entry in _entry_points(_KINDS[kind][0])))
+def available(registry=None):
+    """Names of the connectors that can be loaded (registered or installed); nothing is imported."""
+    return sorted(set((registry or _DEFAULT_REGISTRY).registered) | {entry.name for entry in _entry_points()})
 
 
 def package_name(name):
     return "streamwright-" + name.replace("_", "-")
 
 
-def load(name, allowed=None, kind="connector"):
-    """The component registered as `name`; raises ComponentLoadError if it is not allowed or not installed."""
-    group, base = _KINDS[kind]
-    if kind == "connector" and allowed is not None and name not in allowed:
-        raise ComponentLoadError("%s %r is not in the allowed list (%s)" % (kind, name, ", ".join(allowed) or "empty"))
-    if name in _REGISTERED[kind]:
-        component = _REGISTERED[kind][name]
-    elif name in _LOADED[kind]:
-        component = _LOADED[kind][name]
-    else:
-        entries = [entry for entry in _entry_points(group) if entry.name == name]
-        if not entries:
-            if allowed is not None and name not in allowed:
-                raise ComponentLoadError("%s %r is not in the allowed list (%s)" % (
-                    kind, name, ", ".join(allowed) or "empty"))
-            raise ComponentLoadError("%s %r is not installed; install it with: pip install %s" % (
-                kind, name, package_name(name)))
-        try:
-            loaded = entries[0].load()
-        except Exception as exc:  # a broken install or a missing SDK
-            raise ComponentLoadError("%s %r could not be loaded: %s: %s" % (kind, name, type(exc).__name__, exc))
-        component = loaded() if isinstance(loaded, type) else loaded
-        if not isinstance(component, base) or _component_name(component) != name:
-            raise ComponentLoadError("entry point %r in group %s is not a %r %s" % (name, group, name, kind))
-        _LOADED[kind][name] = component
+def _not_allowed(name, allowed):
+    return ComponentLoadError("connector %r is not in the allowed list (%s)" % (name, ", ".join(allowed) or "empty"))
 
+
+def _not_installed(name):
+    return ComponentLoadError("connector %r is not installed; install it with: pip install %s" % (
+        name, package_name(name)))
+
+
+def _cached(name, cached):
+    """A loaded definition whose distribution is still installed and compatible."""
+    current = next((entry for entry in _entry_points() if entry.name == name), None)
+    if current is None:
+        cached.pop(name, None)
+        raise _not_installed(name)
+    try:
+        plugins.check_compatibility(current)
+    except plugins.PluginError as exc:
+        cached.pop(name, None)
+        raise ComponentLoadError(str(exc)) from exc
+    return cached[name]
+
+
+def load(name, allowed=None, registry=None):
+    """The ConnectorDefinition of `name`; ComponentLoadError if it is not allowed, not installed or not a definition."""
+    registry = registry or _DEFAULT_REGISTRY
     if allowed is not None and name not in allowed:
-        if kind == "query builder":
-            if getattr(component, "connector", None) in allowed:
-                return component
-            for conn_name in allowed:
-                conn = _REGISTERED["connector"].get(conn_name) or _LOADED["connector"].get(conn_name)
-                if conn and name in getattr(conn, "query_builders", ()):
-                    return component
-        raise ComponentLoadError("%s %r is not in the allowed list (%s)" % (kind, name, ", ".join(allowed) or "empty"))
-    return component
+        raise _not_allowed(name, allowed)
+    if name in registry.registered:
+        return registry.registered[name]
+    if name in registry.loaded:
+        return _cached(name, registry.loaded)
+    if not any(entry.name == name for entry in _entry_points()):
+        raise _not_installed(name)
+    try:
+        definition = load_definition(name, entry_points=lambda: {ENTRY_POINT_GROUP: _entry_points()})
+    except plugins.PluginError as exc:
+        raise ComponentLoadError(str(exc)) from exc
+    registry.loaded[name] = definition
+    return definition
+
+
+def query_builders(allowed=None, registry=None):
+    """
+    {query builder name: the ConnectorDefinition that lists it} of the connectors a source may use (the allowed ones;
+    every installed one without an allow-list). Connectors that cannot be loaded offer none.
+    """
+    names = available(registry) if allowed is None else [name for name in available(registry) if name in allowed]
+    found = {}
+    for name in names:
+        try:
+            definition = load(name, allowed, registry=registry)
+        except ComponentLoadError:
+            continue
+        for builder in definition.query_builders:
+            found.setdefault(builder, definition)
+    return found
+
+
+def load_query_builder(name, builders, registry=None):
+    """The QueryBuilder `name` of the connector that lists it in `builders` (query_builders()); ComponentLoadError."""
+    registry = registry or _DEFAULT_REGISTRY
+    definition = builders.get(name)
+    if definition is None:
+        raise ComponentLoadError("query builder %r is not offered by an installed, allowed connector" % name)
+    key = (definition.name, name)
+    if key not in registry.builders:
+        try:
+            builder = definition.load_query_builder(name)
+        except AdapterLoadError as exc:
+            raise ComponentLoadError(str(exc)) from exc
+        if not isinstance(builder, QueryBuilder):
+            raise ComponentLoadError("connector %s: query builder %r is not a QueryBuilder" % (definition.name, name))
+        registry.builders[key] = builder
+    return registry.builders[key]
+
+
+def describe(name, allowed=None, registry=None):
+    """The connector's declared contract for the source engine, without connecting; None when it cannot be loaded."""
+    try:
+        definition = load(name, allowed=allowed, registry=registry)
+    except ComponentLoadError:
+        return None
+    return source_connectors.describe_connector(definition)
 
 
 # * ------
 # * checks
 # * ------
 
+def declared_auth(source):
+    """The source's auth block as written (secret references, not values), without `provider`."""
+    return {key: value for key, value in (source.get("auth") or {}).items() if key != "provider"}
+
+
 def sdk_call(request):
-    """The {service, method, arguments[, headers, path, url]} call of an sdk request."""
-    call = dict((key, request.get(key)) for key in ("service", "method", "arguments"))
-    for extra in ("path", "url"):
-        if request.get(extra) is not None:
-            call[extra] = request[extra]
-    if not call.get("service") and call.get("path"):
-        call["service"] = call["path"]
+    """The {service, method, arguments[, headers]} call of an sdk request (`headers` only to refuse them)."""
+    call = {key: request.get(key) for key in ("service", "method", "arguments")}
     if request.get("headers") is not None:
         call["headers"] = request["headers"]
     return call
 
 
 def poll_call(submit, poll):
-    """An async job's poll call: the submit's service and headers, the poll's method and arguments."""
-    call = {"service": submit.get("service"), "method": poll.get("method"), "arguments": poll.get("arguments")}
-    for extra in ("path", "url"):
-        if poll.get(extra) is not None:
-            call[extra] = poll[extra]
-        elif submit.get(extra) is not None:
-            call[extra] = submit[extra]
-    if not call.get("service") and call.get("path"):
-        call["service"] = call["path"]
-    if submit.get("headers") is not None:
-        call["headers"] = submit["headers"]
-    return call
+    """An async job's poll call: the submit's service, the poll's method and arguments."""
+    return {"service": submit.get("service"), "method": poll.get("method"), "arguments": poll.get("arguments")}
 
 
 def request_body(item):
     """What a stream's `requests` item sends: the item without its name, records, paginator and partitions."""
-    return dict((key, value) for key, value in item.items() if key not in ("name", "records", "paginator",
-                                                                           "partitions"))
+    return {key: value for key, value in item.items() if key not in ("name", "records", "paginator",
+                                                                           "partitions")}
 
 
 def sdk_calls(request):
@@ -375,70 +250,62 @@ def sdk_calls(request):
     return calls + sdk_calls(job.get("results") or {})
 
 
-def check_call(connector, call, builders=None):
+def check_call(definition, call, builders=None, registry=None):
     """
-    Problems with an unrendered call: headers the connector does not take, then the connector's own checks, which see
-    the calls of query builders (`builders`: names; default: the installed ones) as BuiltQuery values.
+    Problems with an unrendered call of connector `definition`: the source engine's checks of its operation and
+    arguments, which see the calls of query builders (`builders`: names; default: those of the usable connectors) as
+    BuiltQuery values. Per-request values are arguments: sdk requests take no `headers`.
     """
     problems = []
-    headers = call.get("headers")
-    if headers is not None:
-        unknown = sorted(str(name) for name in (headers if isinstance(headers, dict) else {})
-                         if name not in connector.request_headers)
-        target = call.get("service") or call.get("path")
-        where = "%s: %s.%s" % (connector.name, target, call.get("method"))
-        if not isinstance(headers, dict):
-            problems.append("%s: `headers` must be a mapping" % where)
-        elif unknown:
-            problems.append("%s does not take the header(s) %s (%s)" % (where, ", ".join(unknown), (
-                "headers: %s" % ", ".join(connector.request_headers)) if connector.request_headers else
-                "%s requests take no headers" % connector.name))
-    names = set(available("query builder")) if builders is None else builders
-    call = queries.replace_calls(call, names, lambda name, spec: queries.BuiltQuery(name))
-    return problems + list(connector.check_request(call))
+    if call.get("headers") is not None:
+        problems.append("%s: %s.%s: sdk requests take no `headers`; per-request values are the operation's "
+                        "`arguments`" % (definition.name, call.get("service"), call.get("method")))
+    names = set(query_builders(registry=registry) if builders is None else builders)
+    call = queries.replace_calls({key: value for key, value in call.items() if key != "headers"}, names,
+                                 lambda name, spec: queries.BuiltQuery(name))
+    return problems + source_connectors.check_call(definition, call)
 
 
-def check_queries(request, allowed=None, builders=None):
+def check_queries(request, allowed=None, builders=None, registry=None):
     """
     Problems with the query builder calls in an unrendered request, as (path inside the request, message, missing):
-    a builder that is not allowed or cannot be loaded, and the builder's own checks.
+    a builder that cannot be loaded, and the builder's own checks. `builders`: query_builders(allowed) by default.
     """
-    names = set(available("query builder")) if builders is None else builders
+    builders = query_builders(allowed, registry=registry) if builders is None else builders
     problems = []
-    for path, name, spec in queries.find_calls(request, names):
+    for path, name, spec in queries.find_calls(request, set(builders)):
         try:
-            builder = load(name, allowed, kind="query builder")
+            builder = load_query_builder(name, builders, registry=registry)
         except ComponentLoadError as exc:
-            problems.append((path + (name,), str(exc), False))
+            problems.append(((*path, name), str(exc), False))
             continue
-        problems += [(path + (name,) + tuple(inner), "%s: %s" % (name, message), False)
+        problems += [((*path, name, *tuple(inner)), "%s: %s" % (name, message), False)
                      for inner, message in builder.check(spec)]
     return problems
 
 
-def component_problems(source, allowed=None):
-    """
-    What stops a source from running here, before it starts, as (path in the source, message, missing): a connector or
-    query builder that is not installed (`missing`), not allowed or broken, auth keys or calls its connector does not
-    support, and query builder checks, for every `requests` item of every stream (as streamwright run checks them).
-    """
-    problems, builders = [], set(available("query builder"))
+def _auth_problems(source, allowed, registry):
+    """(connector definition or None, problems) of the source's `auth.provider` and its declared auth block."""
     provider = (source.get("auth") or {}).get("provider")
-    connector = None
-    if provider:
-        try:
-            connector = load(provider, allowed)
-        except ComponentLoadError as exc:
-            missing = provider not in available() and (allowed is None or provider in allowed)
-            problems.append((("auth", "provider"), str(exc), missing))
-        else:
-            auth = dict((key, value) for key, value in source["auth"].items() if key != "provider")
-            problems += [(("auth",), problem, False) for problem in connector.check_auth(auth)]
-    effective_allowed = allowed
-    if allowed is not None and connector is not None:
-        extra = getattr(connector, "query_builders", ())
-        if extra:
-            effective_allowed = list(allowed) + [b for b in extra if b not in allowed]
+    if not provider:
+        return None, []
+    try:
+        definition = load(provider, allowed, registry=registry)
+    except ComponentLoadError as exc:
+        missing = provider not in available(registry=registry) and (allowed is None or provider in allowed)
+        return None, [(("auth", "provider"), str(exc), missing)]
+    return definition, [(("auth",), problem, False)
+                        for problem in source_connectors.check_declared_auth(definition, declared_auth(source))]
+
+
+def component_problems(source, allowed=None, registry=None):
+    """
+    What stops a source from running here, before it starts, as (path in the source, message, missing): a connector
+    that is not installed (`missing`), not allowed or broken, auth keys or calls its connector does not support, and
+    query builder checks, for every `requests` item of every stream (as streamwright run checks them).
+    """
+    definition, problems = _auth_problems(source, allowed, registry)
+    builders = query_builders(allowed, registry=registry)
     for index, stream in enumerate(source.get("streams") or []):
         items = stream.get("requests") if isinstance(stream, dict) else None
         for position, item in enumerate(items if isinstance(items, list) else []):
@@ -446,10 +313,10 @@ def component_problems(source, allowed=None):
                 continue
             request, path = request_body(item), ("streams", index, "requests", position)
             problems += [(path + inner, message, missing) for inner, message, missing in
-                         check_queries(request, effective_allowed, builders)]
-            if connector is not None:
-                for call in sdk_calls(request):
-                    problems += [(path, problem, False) for problem in check_call(connector, call, builders)]
+                         check_queries(request, allowed, builders, registry=registry)]
+            if definition is not None:
+                problems += [(path, problem, False) for call in sdk_calls(request)
+                             for problem in check_call(definition, call, builders, registry=registry)]
     return problems
 
 
@@ -461,11 +328,11 @@ def path_text(path):
     return text
 
 
-def check_source(source, allowed=None):
+def check_source(source, allowed=None, registry=None):
     """component_problems() as messages, e.g. "stream 'campaigns': requests[0].arguments.query.gaql.limit: ..."."""
     streams = source.get("streams") or []
     messages = []
-    for path, message, _ in component_problems(source, allowed):
+    for path, message, _ in component_problems(source, allowed, registry=registry):
         if path[:1] == ("streams",):
             inner = path[2:]
             where = " %s:" % path_text(inner) if len(inner) > 1 else ""
@@ -473,4 +340,3 @@ def check_source(source, allowed=None):
         else:
             messages.append(message)
     return messages
-

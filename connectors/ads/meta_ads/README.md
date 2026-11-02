@@ -27,7 +27,7 @@ requests:
   - name: raw_campaign_insights
     sdk: meta_ads
     service: AdAccount            # AdAccount, Campaign, AdSet, Ad, AdCreative, Business, User, CustomAudience, AdsPixel
-    method: get_insights          # api_get (the object itself) or a get_* edge
+    method: get_insights          # api_get (the object itself) or a declared get_<edge> (see the guide)
     arguments:
       id: "act_{{ partition.account_id }}"
       fields: [campaign_id, date_start, spend]

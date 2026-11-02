@@ -1,18 +1,23 @@
+import importlib
 import os
-import sys
 
 import pytest
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from streamwright.core.runtime.testing import FakeApi
 
-# The repo's streamwright/ folder has no __init__.py, so with the repo root on sys.path
-# (e.g. `python -m pytest`) it shadows the installed streamwright.* packages.
-sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.curdir) != REPO_ROOT]
+# No dlt telemetry from tests: its request would reach the `responses` mocks of the HTTP tests.
+os.environ["RUNTIME__DLTHUB_TELEMETRY"] = "false"
 
 
 @pytest.fixture
 def api():
     """A local fake HTTP API (streamwright.core.runtime.testing.FakeApi)."""
-    from streamwright.core.runtime.testing import FakeApi
     with FakeApi() as server:
         yield server
+
+
+@pytest.fixture
+def dlt_output():
+    """streamwright.core.outputs.dlt_output, which imports the optional dlt library (the test skips without it)."""
+    pytest.importorskip("dlt")
+    return importlib.import_module("streamwright.core.outputs.dlt_output")

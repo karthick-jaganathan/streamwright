@@ -1,0 +1,21 @@
+# path:token entries for documented engine/dialect terminology that is not connector dispatch.
+core/src/streamwright/core/sql/conditions.py:mysql
+core/src/streamwright/core/sql/conditions.py:postgres
+core/src/streamwright/core/sql/conditions.py:duckdb
+# Generic file-output wording and supported storage/catalog URL syntax in CLI help.
+core/src/streamwright/core/cli/parser.py:postgres
+core/src/streamwright/core/cli/parser.py:s3
+# State-store SQL dialect names (the store targets these databases; not connector dispatch).
+core/src/streamwright/core/jobs/state/dialects.py:postgres
+# Built-in outputs: DuckLake catalog on Postgres (`ducklake:postgres:DSN`) with data files on S3; dlt's own
+# `dlt[deltalake]` extra and module for filesystem merges. Output features, not connector dispatch.
+core/src/streamwright/core/outputs/output.py:postgres
+core/src/streamwright/core/outputs/warehouse.py:postgres
+core/src/streamwright/core/outputs/warehouse.py:s3
+core/src/streamwright/core/outputs/ducklake.py:postgres
+core/src/streamwright/core/outputs/ducklake.py:s3
+core/src/streamwright/core/outputs/dlt_output.py:deltalake
+# Built-in Spark launchers: EMR stages artifacts and reads the remote manifest on S3 (platform, not connector).
+src/streamwright/spark/launchers/common.py:s3
+src/streamwright/spark/launchers/emr_ec2.py:s3
+src/streamwright/spark/launchers/s3_jobs.py:s3

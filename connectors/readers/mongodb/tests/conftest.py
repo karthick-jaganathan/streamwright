@@ -1,23 +1,30 @@
-# /*************************************************************************
-# * Copyright 2026 Karthick Jaganathan
-# *
-# * Licensed under the Apache License, Version 2.0 (the "License");
-# * you may not use this file except in compliance with the License.
-# * You may obtain a copy of the License at
-# *
-# * https://www.apache.org/licenses/LICENSE-2.0
-# *
-# * Unless required by applicable law or agreed to in writing, software
-# * distributed under the License is distributed on an "AS IS" BASIS,
-# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# * See the License for the specific language governing permissions and
-# * limitations under the License.
-# **************************************************************************/
+import datetime
+import os
+import sys
+import uuid
 
 import pytest
-from streamwright.core.runtime.testing import FakeApi
+
+# inside the StreamWright repository: its streamwright/ folder would shadow the installed streamwright packages
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.curdir) != REPO_ROOT]
+
+URI = os.environ.get("STREAMWRIGHT_TEST_MONGODB_URI")
 
 
 @pytest.fixture
-def api():
-    return FakeApi()
+def mongo():
+    """(database, uri) of a throwaway database on STREAMWRIGHT_TEST_MONGODB_URI with a `users` collection."""
+    if not URI:
+        pytest.skip("set STREAMWRIGHT_TEST_MONGODB_URI to a throwaway MongoDB")
+    pymongo = pytest.importorskip("pymongo")
+    bson = pytest.importorskip("bson")
+    database = "mg_db_%s" % uuid.uuid4().hex[:10]
+    with pymongo.MongoClient(URI) as server:
+        server[database].users.insert_many([
+            {"_id": bson.ObjectId("65f000000000000000000001"), "name": "Ada", "status": "active",
+             "since": datetime.datetime(2026, 10, 5, 8, 0), "spend": bson.Decimal128("12.50")},
+            {"_id": bson.ObjectId("65f000000000000000000002"), "name": "Bob", "status": "inactive", "spend": None},
+            {"_id": bson.ObjectId("65f000000000000000000003"), "name": "Cy", "status": "active"}])
+        yield database, URI.rstrip("/") + "/" + database
+        server.drop_database(database)

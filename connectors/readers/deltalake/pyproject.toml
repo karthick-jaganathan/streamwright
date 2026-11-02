@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-deltalake"
-version = "0.0.1"
-description = "StreamWright - Delta Lake connector (read-only queries and scans on Delta tables through DuckDB's delta extension)"
+version = "0.0.2"
+description = "StreamWright - Delta Lake connector (Delta table reads and queries; DuckDBJob and SparkJob appends, overwrites and merges)"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [
@@ -16,16 +16,20 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 # DuckDB is provided by streamwright (duckdb>=1.5.2)
 dependencies = [
-    "streamwright~=0.1.0",
+    "streamwright~=0.1.9",
 ]
+
+[project.optional-dependencies]
+spark = ["streamwright-spark[spark,delta]~=0.1.0"]
+# DuckDBJob writes (delta-rs commits); reads need only DuckDB's delta extension
+duckdb = ["deltalake>=1.0"]
 
 [project.urls]
 Homepage = "https://streamwright.web.app"
@@ -33,9 +37,15 @@ Documentation = "https://streamwright.web.app/docs/"
 Repository = "https://github.com/karthick-jaganathan/streamwright"
 "Issue Tracker" = "https://github.com/karthick-jaganathan/streamwright/issues"
 
+# Connector contract v1 (docs/design/connector-contract.md): one entry point, the CONNECTOR definition; engines load
+# its adapters (engines/source.py, engines/duckdb.py, engines/spark.py) when a job uses them.
 [project.entry-points."streamwright.connectors"]
-deltalake = "streamwright.connectors.deltalake.connector:DeltaLakeConnector"
+deltalake = "streamwright.connectors.deltalake:CONNECTOR"
 
 [tool.setuptools]
+# src layout: streamwright and streamwright.connectors are namespace packages shared with the other StreamWright distributions
 package-dir = {"" = "src"}
-packages = ["streamwright.connectors.deltalake"]
+packages = ["streamwright.connectors.deltalake", "streamwright.connectors.deltalake.engines"]
+
+[tool.setuptools.package-data]
+"streamwright.connectors.deltalake" = ["guide.md"]

@@ -1,33 +1,115 @@
 import contextlib
+import contextvars
 import datetime
+import importlib
 import io
 import json
 import logging
+import logging.handlers
 import os
 import re
 import subprocess
 import sys
+import threading
 import time
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 
 from streamwright.core import cli
-from streamwright.core.runtime import components, logs
+from streamwright.core.engine.responses import summarize as job_summary
+from streamwright.core.engine.runner import SourceError, SourceRunner
 from streamwright.core.net.http import Redactor, error_excerpt
-from streamwright.core.runtime.logs import LogSetup, RunMetrics
-from streamwright.core.runtime.components import Connector, ConnectorContext, ConnectorSpec
-from streamwright.core.engine.runner import SourceError, SourceRunner, _summary as job_summary
+from streamwright.core.runtime import components, logs, plugins
+from streamwright.core.runtime.components import ConnectorContext
+from streamwright.core.runtime.logs import LogSetup, RunMetrics, redaction
+from streamwright.core.runtime.logs.handlers import ScrubFilter
 from streamwright.core.runtime.testing import FakeClock, MemoryOutput, page_stream
+from streamwright.core.sdk.contract import ConnectorDefinition, Field, Operation
+
+
+def test_nested_setups_close_out_of_order_without_restoring_active_factory():
+    original = logging.getLogRecordFactory()
+    outer = LogSetup(stream=io.StringIO())
+    inner = LogSetup(stream=io.StringIO())
+    try:
+        outer.close()
+        assert logging.getLogRecordFactory() is not original
+        assert logging.getLogger("streamwright.source").isEnabledFor(logging.INFO)
+    finally:
+        inner.close()
+    assert logging.getLogRecordFactory() is original
+
+
+def test_logging_setup_uses_current_context_redactor():
+
+    setup = LogSetup(stream=io.StringIO())
+    try:
+        setup.redact = Redactor(["secret-outer"])
+        other = contextvars.Context()
+
+        def capture():
+            nested = LogSetup(stream=io.StringIO())
+            try:
+                nested.redact = Redactor(["secret-inner"])
+                return logging.getLogger("streamwright.source").makeRecord(
+                    "streamwright.source", logging.INFO, __file__, 1, "secret-inner secret-outer", (), None
+                ).getMessage()
+            finally:
+                nested.close()
+
+        assert other.run(capture) == "*** ***"
+        record = logging.getLogger("streamwright.source").makeRecord(
+            "streamwright.source", logging.INFO, __file__, 1, "secret-outer", (), None
+        )
+        assert record.getMessage() == "***"
+    finally:
+        setup.close()
+
+
+def test_log_records_from_unbound_threads_still_mask_active_secrets():
+
+    setup = LogSetup(stream=io.StringIO())
+    setup.redact = Redactor(["secret-thread"])
+    messages = []
+    try:
+        worker = threading.Thread(target=lambda: messages.append(
+            logging.getLogger("streamwright.source").makeRecord(
+                "streamwright.source", logging.INFO, __file__, 1, "secret-thread", (), None
+            ).getMessage()))
+        worker.start()
+        worker.join(timeout=3)
+        assert messages == ["***"]
+    finally:
+        setup.close()
+
+
+def test_concurrent_redactors_mask_before_shorter_setup_truncates():
+    short = LogSetup(stream=io.StringIO(), max_chars=8)
+    other = LogSetup(stream=io.StringIO())
+    try:
+        short.redact = Redactor(["short-secret"])
+        other.redact = Redactor(["other-secret"])
+        record = logging.getLogger("streamwright.source").makeRecord(
+            "streamwright.source", logging.INFO, __file__, 1,
+            "other-secret short-secret", (), None,
+        )
+        assert "other" not in record.getMessage() and "short" not in record.getMessage()
+    finally:
+        other.close()
+        short.close()
+
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TODAY = datetime.date(2026, 10, 3)
 ID = "SELECT (record->>'id')::BIGINT AS id FROM raw_items"
-SECRETS = {"client_secret": "client-secret-xyz", "refresh_token": "refresh-token-abc"}
+SECRETS = MappingProxyType({"client_secret": "client-secret-xyz", "refresh_token": "refresh-token-abc"})
 # what the fake OAuth server hands out while a run goes: none of it may ever be logged
 TOKENS = ("tok-live-1", "tok-live-2", "rotated-refresh-77", "id-token-55")
+SECRET_VALUES = (*SECRETS.values(), *TOKENS)
 TEXT_LINE = re.compile(r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3}\] (DEBUG|INFO|WARNING|ERROR) [\w.]+: ")
-NETWORK_INFO = ["--log", "streamwright.network=INFO"]
-NETWORK_DEBUG = ["--log", "streamwright.network=DEBUG"]
+NETWORK_INFO = ("--log", "streamwright.network=INFO")
+NETWORK_DEBUG = ("--log", "streamwright.network=DEBUG")
 
 
 # * -------
@@ -42,7 +124,9 @@ def items_stream(name="items", paginator=None, params=None, **stream):
     return page_stream(name, request, ID, records={"path": "data"}, primary_key=["id"], **stream)
 
 
-OFFSETS = {"type": "offset", "offset_param": "o", "limit_param": "l", "page_size": 2}
+def offset_paginator():
+    """An offset paginator of pages of 2."""
+    return {"type": "offset", "offset_param": "o", "limit_param": "l", "page_size": 2}
 
 
 def http_source(api, *streams, **http):
@@ -89,7 +173,7 @@ def write_source(tmp_path, monkeypatch, source, secrets=None):
     """A CLI-runnable copy of `source`, its secrets (default: SECRETS) in the environment."""
     secrets = SECRETS if secrets is None else secrets
     path = tmp_path / "source.yaml"
-    path.write_text(json.dumps(dict(source, spec={"secrets": dict((name, {"type": "string"}) for name in secrets)})))
+    path.write_text(json.dumps(dict(source, spec={"secrets": {name: {"type": "string"} for name in secrets}})))
     for name, value in secrets.items():
         monkeypatch.setenv("STREAMWRIGHT_SECRET_" + name.upper(), value)
     return path
@@ -111,14 +195,15 @@ def events(text, event):
 
 
 def network_lines(text):
-    return [line.split("streamwright.network: ", 1)[1] for line in text.splitlines() if " streamwright.network: " in line]
+    return [line.split("streamwright.network: ",
+                       1)[1] for line in text.splitlines() if " streamwright.network: " in line]
 
 
 @contextlib.contextmanager
 def logging_to(level=None, log_format="text", loggers=(), max_chars=logs.DEFAULT_MAX_CHARS):
     """streamwright's logging into a StringIO, redacting with the Redactor it yields with it (for SourceRunner)."""
     stream = io.StringIO()
-    setup = LogSetup(level, log_format, list(loggers), None, max_chars, stream=stream)
+    setup = LogSetup(level, log_format, list(loggers), None, max_chars=max_chars, stream=stream)
     setup.redact = Redactor()
     try:
         yield stream, setup.redact
@@ -126,7 +211,7 @@ def logging_to(level=None, log_format="text", loggers=(), max_chars=logs.DEFAULT
         setup.close()
 
 
-def assert_no_secrets(text, values=tuple(SECRETS.values()) + TOKENS):
+def assert_no_secrets(text, values=SECRET_VALUES):
     leaked = [value for value in values if value in text]
     assert not leaked, "leaked %s in:\n%s" % (leaked, text)
 
@@ -183,7 +268,8 @@ def test_the_levels_of_the_streamwright_loggers():
         logs.level_number("LOUD")
 
 
-@pytest.mark.parametrize("value", ["streamwright.network", "streamwright.network=LOUD", "=INFO", "streamwright.network="])
+@pytest.mark.parametrize("value", ["streamwright.network", "streamwright.network=LOUD", "=INFO",
+                                   "streamwright.network="])
 def test_log_takes_name_equals_level(capsys, value):
     with pytest.raises(SystemExit) as error:
         cli.main(["run", "source.yaml", "--log", value])
@@ -207,8 +293,8 @@ def test_json_lines_parse_and_carry_fields(api, tmp_path, monkeypatch, capsys):
     assert start["stream"] == "items" and start["logger"] == "streamwright.source" and start["level"] == "INFO"
     (request,) = events(err, "http_request")
     assert request["logger"] == "streamwright.network"
-    assert dict((key, request[key]) for key in ("stream", "request", "partition", "window", "method", "status",
-                                                "attempt", "bytes")) == {
+    assert {key: request[key] for key in ("stream", "request", "partition", "window", "method", "status",
+                                                "attempt", "bytes")} == {
         "stream": "items", "request": "raw_items", "partition": {"account": "a1"},
         "window": {"start": today, "end": today}, "method": "GET", "status": 200, "attempt": 1,
         "bytes": len(json.dumps({"data": [{"id": 1}]}))}
@@ -226,13 +312,13 @@ def test_long_messages_are_cut_with_a_marker(api, tmp_path, monkeypatch, capsys)
     long_name = "x" * 3000
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1, "name": long_name}]})
     path = write_source(tmp_path, monkeypatch, http_source(api), secrets={})
-    code, _, err = run_cli(capsys, path, *NETWORK_DEBUG + ["--log-max-chars", "300"])
+    code, _, err = run_cli(capsys, path, *[*NETWORK_DEBUG, "--log-max-chars", "300"])
     assert code == 0
     body = next(line for line in err.split("\n[") if "response body: " in line)
     assert re.search(r"\.\.\. \[truncated \d+ chars\]$", body) and long_name not in err
     message = body.split("streamwright.network: ", 1)[1]
     assert len(message) == 300 + len("... [truncated %s chars]" % message.rsplit(" ", 2)[-2])
-    code, _, err = run_cli(capsys, path, *NETWORK_DEBUG + ["--log-max-chars", "0"])  # never cut
+    code, _, err = run_cli(capsys, path, *[*NETWORK_DEBUG, "--log-max-chars", "0"])  # never cut
     assert code == 0 and long_name in err and "truncated" not in err
 
 
@@ -313,12 +399,12 @@ def test_network_lines_for_http_with_retries_and_waits(api, caplog):
     replies = [(500, {}), (200, {"data": [{"id": 1}, {"id": 2}]}), (200, {"data": [{"id": 3}]})]
     sizes = [len(json.dumps(reply[1])) for reply in replies]
     api.routes[("GET", "/items")] = lambda request: replies.pop(0)
-    source = http_source(api, items_stream(paginator=OFFSETS), rate_limit={"requests": 2, "per": "10s"})
+    source = http_source(api, items_stream(paginator=offset_paginator()), rate_limit={"requests": 2, "per": "10s"})
     clock = FakeClock()
-    with logging_to(loggers=[("streamwright.network", logging.INFO)]) as (stream, redact):
-        with caplog.at_level(logging.INFO):
-            SourceRunner(source, {}, {}, output=MemoryOutput(), today=TODAY, clock=clock, sleep=clock.sleep,
-                         redact=redact).run()
+    with logging_to(loggers=[("streamwright.network", logging.INFO)]) as (stream, redact), \
+            caplog.at_level(logging.INFO):
+        SourceRunner(source, {}, {}, output=MemoryOutput(), today=TODAY, clock=clock, sleep=clock.sleep,
+                     redact=redact).run()
     url = api.url + "/items?o=%d&l=2"
     assert [line for line in network_lines(stream.getvalue()) if " GET " in line] == [
         "stream 'items', request 'raw_items': GET %s: 500, %d bytes, 0.00 s, attempt 1" % (url % 0, sizes[0]),
@@ -338,14 +424,14 @@ def test_retries_show_by_default_and_waits_with_network_info(api, tmp_path, monk
     api.routes[("GET", "/items")] = lambda request: replies.pop(0)
     path = write_source(tmp_path, monkeypatch, http_source(api), secrets={})
     code, _, err = run_cli(capsys, path)
-    assert code == 0 and "WARNING streamwright.network: GET %s/items failed: HTTP 500: {}; retrying in 0.0s (attempt 2 of " \
-                         "3)" % api.url in err
+    assert code == 0 and "WARNING streamwright.network: GET %s/items failed: HTTP 500: {}; retrying in 0.0s " \
+                         "(attempt 2 of 3)" % api.url in err
     assert "INFO streamwright.network" not in err
 
 
 def test_network_debug_masks_headers_and_shows_bodies(api, tmp_path, monkeypatch, capsys):
     oauth_routes(api)
-    source = oauth_source(api, items_stream(paginator=OFFSETS, params={"api_key": "public-key-9"}))
+    source = oauth_source(api, items_stream(paginator=offset_paginator(), params={"api_key": "public-key-9"}))
     source["http"]["headers"] = {"X-Api-Key": "header-key-8", "Accept": "application/json"}
     code, _, err = run_cli(capsys, write_source(tmp_path, monkeypatch, source), *NETWORK_DEBUG)
     assert code == 0
@@ -360,12 +446,12 @@ def test_network_debug_masks_headers_and_shows_bodies(api, tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("logging_options", [
-    [], NETWORK_INFO, NETWORK_DEBUG + ["--log-level", "DEBUG"], NETWORK_DEBUG + ["--log", "root=DEBUG"]])
+    [], NETWORK_INFO, [*NETWORK_DEBUG, "--log-level", "DEBUG"], [*NETWORK_DEBUG, "--log", "root=DEBUG"]])
 @pytest.mark.parametrize("log_format", ["text", "json"])
-def test_no_secret_or_token_is_ever_logged(api, tmp_path, monkeypatch, capsys, logging_options, log_format):
+def test_no_secret_or_token_is_ever_logged(api, tmp_path, monkeypatch, capsys, *, logging_options, log_format):
     seen = oauth_routes(api)
-    path = write_source(tmp_path, monkeypatch, oauth_source(api, items_stream(paginator=OFFSETS)))
-    arguments = logging_options + ["--log-format", log_format, "--summary", tmp_path / "run.json"]
+    path = write_source(tmp_path, monkeypatch, oauth_source(api, items_stream(paginator=offset_paginator())))
+    arguments = [*logging_options, "--log-format", log_format, "--summary", tmp_path / "run.json"]
     code, out, err = run_cli(capsys, path, *arguments)
     assert code == 0 and out.count('"type": "RECORD"') == 3 and len(seen) == 4
     assert seen[1].endswith(TOKENS[0]) and seen[2].endswith(TOKENS[1])  # the token was refreshed after the 401
@@ -386,11 +472,11 @@ def test_no_secret_or_token_is_ever_logged(api, tmp_path, monkeypatch, capsys, l
 
 def test_a_real_process_logs_json_lines_without_secrets(api, tmp_path, monkeypatch):
     oauth_routes(api)
-    path = write_source(tmp_path, monkeypatch, oauth_source(api, items_stream(paginator=OFFSETS)))
+    path = write_source(tmp_path, monkeypatch, oauth_source(api, items_stream(paginator=offset_paginator())))
     # a separate process: the command sets up logging itself, with no other handler (as it does for users)
     result = subprocess.run([sys.executable, "-m", "streamwright.core.cli", "run", str(path), "--log-format", "json",
-                             "--log-level", "DEBUG"] + NETWORK_DEBUG, cwd=str(tmp_path), stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, universal_newlines=True, timeout=120)
+                             "--log-level", "DEBUG", *NETWORK_DEBUG], cwd=str(tmp_path), capture_output=True,
+                            text=True, timeout=120, check=False)
     assert result.returncode == 0, result.stderr
     lines = json_lines(result.stderr)
     assert {"streamwright.source", "streamwright.network"} <= {line["logger"] for line in lines}
@@ -416,16 +502,18 @@ def file_config(path, formatter=None):
 
 def test_a_log_config_file_replaces_the_handler_and_is_redacted_too(api, tmp_path, monkeypatch, capsys):
     oauth_routes(api)
-    path = write_source(tmp_path, monkeypatch, oauth_source(api, items_stream(paginator=OFFSETS)))
+    path = write_source(tmp_path, monkeypatch, oauth_source(api, items_stream(paginator=offset_paginator())))
     log_file = tmp_path / "streamwright.log"
     config = write_config(tmp_path, file_config(log_file))
     root_handlers = list(logging.getLogger().handlers)
     code, out, err = run_cli(capsys, path, "--log-config", config, *NETWORK_DEBUG)
     assert code == 0 and out.count('"type": "RECORD"') == 3
-    assert "streamwright.source" not in err and "streamwright.network" not in err  # the config's handler, not streamwright's
+    # the config's handler, not streamwright's
+    assert "streamwright.source" not in err and "streamwright.network" not in err
     text = log_file.read_text()
     assert all(TEXT_LINE.match(line) for line in text.splitlines() if line.startswith("[")), text
-    assert "INFO streamwright.source: stream 'items': starting" in text  # streamwright's levels apply on top of the config
+    # streamwright's levels apply on top of the config
+    assert "INFO streamwright.source: stream 'items': starting" in text
     assert "DEBUG streamwright.network: POST %s/token: request headers" % api.url in text
     assert 'response body: {"data": [{"id": 1}, {"id": 2}]}' in text
     assert_no_secrets(text)
@@ -438,7 +526,8 @@ def test_a_log_config_file_replaces_the_handler_and_is_redacted_too(api, tmp_pat
     oauth_routes(api)
     code, _, _ = run_cli(capsys, path, "--log-config", write_config(tmp_path, config, "logging.json"))
     lines = json_lines(json_file.read_text())
-    assert code == 0 and not [line for line in lines if line["logger"] == "streamwright.source" and line["level"] == "INFO"]
+    assert code == 0
+    assert not [line for line in lines if line["logger"] == "streamwright.source" and line["level"] == "INFO"]
     assert [line["event"] for line in lines if line["level"] == "INFO"].count("http_request") == 6
     assert_no_secrets(json_file.read_text())
     oauth_routes(api)
@@ -482,28 +571,41 @@ PRIVATE = logging.getLogger("token_sdk.private")  # a logger with a handler of i
 SDK_TOKEN = "sdk-token-42"
 
 
-class TokenConnector(Connector):
-    """Gets an access token when it connects (and logs it, as SDKs do); its SDK logs its requests on WIRE."""
+class TokenSession:
+    """Its SDK logs its requests on WIRE, with the access token it got when it connected."""
 
-    spec = ConnectorSpec(name="token_sdk", loggers=("token_sdk.wire",))
-    auth_required = ("api_secret",)
+    def __init__(self, token):
+        self.token = token
 
-    def connect(self, auth, context):
+    def read(self, operation, arguments, context):
+        def send():
+            WIRE.debug("POST /v1/%s Authorization: %s body=%s", operation.method, self.token,
+                       json.dumps(dict(arguments), default=str))
+            WIRE.info("200 OK for access_token=%s", self.token)
+            PRIVATE.debug("private %s", self.token)
+            return [{"rows": [{"id": 1}, {"id": 2}]}, {"rows": [{"id": 3}]}]
+        yield from context.call(send)
+
+    def close(self):
+        self.token = None
+
+
+class TokenSourceAdapter:
+    """Gets an access token when it connects (and logs it, as SDKs do)."""
+
+    def open(self, connection, context):
         # as google-api-core does to the `google` logger when a client is made: its lines reach no handler
         logging.getLogger("token_sdk").propagate = False
         context.secret(SDK_TOKEN)
-        WIRE.warning("connected with token %s (secret %s)", SDK_TOKEN, auth["api_secret"])
-        return {"token": SDK_TOKEN}
+        WIRE.warning("connected with token %s (secret %s)", SDK_TOKEN, connection["api_secret"])
+        return TokenSession(SDK_TOKEN)
 
-    def request(self, client, request, context):
-        def send():
-            WIRE.debug("POST /v1/%s Authorization: %s body=%s", request["method"], client["token"],
-                       json.dumps(request["arguments"], default=str))
-            WIRE.info("200 OK for access_token=%s", client["token"])
-            PRIVATE.debug("private %s", client["token"])
-            return [{"rows": [{"id": 1}, {"id": 2}]}, {"rows": [{"id": 3}]}]
-        for response in context.call(send):
-            yield response
+
+TOKEN_SDK = ConnectorDefinition(
+    name="token_sdk", title="Token SDK", family="test",
+    connection=(Field("api_secret", "string", required=True, secret=True),),
+    operations=(Operation(service="Reports", method="list", arguments=(Field("day", "string"),)),),
+    adapters={"source": __name__ + ":TokenSourceAdapter"})
 
 
 @pytest.fixture
@@ -512,14 +614,13 @@ def token_sdk(tmp_path, monkeypatch):
     The connector, registered, and a CLI-runnable source that reads its Reports.list in two pages. Its SDK's top logger
     stops propagating when it connects; PRIVATE writes to a handler of its own.
     """
-    connector = TokenConnector()
-    components.register(connector)
+    components.register(TOKEN_SDK)
     private = io.StringIO()
     handler = logging.StreamHandler(private)
     PRIVATE.addHandler(handler)
     PRIVATE.setLevel(logging.DEBUG)
     stream = page_stream("rows", {"name": "raw_rows", "sdk": "token_sdk", "service": "Reports", "method": "list",
-                                  "arguments": {"day": "{{ today }}"}},
+                                  "arguments": {"day": "day {{ today }}"}},
                          "SELECT (record->>'id')::BIGINT AS id FROM raw_rows", records={"path": "rows"})
     source = {"kind": "source", "name": "sdk_demo", "auth": {"provider": "token_sdk",
                                                              "api_secret": "{{ secrets.api_secret }}"},
@@ -532,7 +633,7 @@ def token_sdk(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("logging_options", [[], NETWORK_INFO, NETWORK_DEBUG,
-                                             NETWORK_DEBUG + ["--log", "token_sdk.wire=DEBUG"]])
+                                             [*NETWORK_DEBUG, "--log", "token_sdk.wire=DEBUG"]])
 def test_sdk_calls_are_logged_and_sdk_tokens_redacted(token_sdk, capsys, logging_options):
     path, private = token_sdk
     code, out, err = run_cli(capsys, path, *logging_options)
@@ -580,25 +681,26 @@ def test_a_log_config_file_gets_sdk_lines_redacted(token_sdk, tmp_path, capsys):
     assert_no_secrets(text, (SDK_TOKEN, "api-secret-31"))
 
 
-def test_connectors_lists_the_sdk_loggers(token_sdk, capsys, monkeypatch):
-    available, load = components.available, components.load
+def test_connectors_lists_the_connectors_by_family(token_sdk, capsys, monkeypatch):
 
-    def load_or_fail(name, allowed=None, kind="connector"):
-        if name == "broken":
-            raise components.ComponentLoadError("connector 'broken' could not be loaded: ImportError: no SDK")
-        return load(name, allowed, kind)
-    monkeypatch.setattr(components, "available",
-                        lambda kind="connector": available(kind) + ["broken"] * (kind == "connector"))
-    monkeypatch.setattr(components, "load", load_or_fail)
+    calls = []
+    dist = SimpleNamespace(name="demo-package", version="1.0", metadata={"StreamWright-SDK-Version": "1.0"})
+    entry = SimpleNamespace(name="metadata_only", dist=dist, value="demo:Connector",
+                            load=lambda: calls.append("loaded"))
+    monkeypatch.setattr(plugins, "entry_point_source", lambda: {plugins.CONNECTORS: [entry]})
     assert cli.main(["connectors"]) == 0
-    lines = capsys.readouterr().out.splitlines()
-    stripped = [line.strip() for line in lines]
-    assert any("token_sdk" in line and "[logger: token_sdk.wire]" in line for line in stripped)
-    assert "broken — connector 'broken' could not be loaded: ImportError: no SDK" in stripped
+    lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
+    row = lines[lines.index("test:") + 1]
+    # contract v1.2 §6a: a source-only connector is reachable by the job engines through call steps
+    assert row.startswith("token_sdk") and "Token SDK" in row and "registered in-process" in row
+    assert row.endswith("[source, duckdb (call), spark (call)]")
+    assert any(line.startswith("metadata_only") and "targets the pre-contract connector API" in line
+               for line in lines[lines.index("unavailable:"):])
+    assert calls == ["loaded"]  # a connector's spec is imported to list it (nothing else is)
 
 
 def test_connector_tokens_are_masked_through_the_context():
-    context = ConnectorContext(TokenConnector(), Redactor())
+    context = ConnectorContext("token_sdk", Redactor())
     context.secret("tok-from-sdk")
     context.secret(None)
     assert context.redact("Authorization: tok-from-sdk") == "Authorization: ***"
@@ -627,7 +729,8 @@ def test_progress_lines_while_a_request_keeps_paging(api, caplog, seconds, pages
     paged_items(api, clock, seconds)
     metrics = RunMetrics(clock=clock, progress_seconds=logs.PROGRESS_SECONDS, progress_pages=pages)
     with caplog.at_level(logging.INFO, logger="streamwright.source"):
-        SourceRunner(http_source(api, items_stream(paginator=OFFSETS)), {}, {}, output=MemoryOutput(), today=TODAY,
+        SourceRunner(http_source(api, items_stream(paginator=offset_paginator())), {}, {}, output=MemoryOutput(),
+                     today=TODAY,
                      clock=clock, sleep=clock.sleep, metrics=metrics).run()
     progress = [record for record in caplog.records if getattr(record, "event", None) == "progress"]
     assert [record.getMessage() for record in progress] == [
@@ -649,7 +752,7 @@ def test_metrics_count_requests_retries_pages_records_and_partitions(api, caplog
         return 200, {"data": [{"id": int(offset) + 1}, {"id": int(offset) + 2}][:2 if offset == "0" else 1]}
     api.routes[("GET", "/items")] = items
     api.routes[("GET", "/daily")] = lambda request: (200, {"data": [{"day": request["params"]["day"]}]})
-    items = items_stream(paginator=OFFSETS, params={"account": "{{ partition.account }}"},
+    items = items_stream(paginator=offset_paginator(), params={"account": "{{ partition.account }}"},
                          partitions=[{"name": "account", "values": ["a1", "a2"]}], on_partition_error="skip")
     daily = {"name": "daily", "partitions": [{"name": "account", "values": ["a1"]}],
              "incremental": {"cursor_field": "day", "start": "2026-10-01", "window": "1d"},
@@ -767,12 +870,12 @@ def test_an_error_body_is_redacted_before_it_is_cut(api, tmp_path, monkeypatch, 
 def test_the_summary_of_an_interrupted_run(api, tmp_path, monkeypatch, capsys, interruption):
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}]})
     path = write_source(tmp_path, monkeypatch, http_source(api), secrets={})
-    original = SourceRunner.run_stream
+    original = SourceRunner._run_stream
 
     def run_stream(self, stream):
         original(self, stream)
         raise interruption()
-    monkeypatch.setattr(SourceRunner, "run_stream", run_stream)
+    monkeypatch.setattr(SourceRunner, "_run_stream", run_stream)
     arguments = ["run", str(path), "--summary", str(tmp_path / "run.json")]
     if interruption is KeyboardInterrupt:
         assert cli.main(arguments) == 130
@@ -824,7 +927,7 @@ def test_the_command_restores_logging(token_sdk, capsys):
     assert logging.getLogRecordFactory() is factory and logging.lastResort is last_resort
     assert logging.getLogger().handlers == handlers
     assert [logging.getLogger(name if name != "root" else None).level for name in names] == levels
-    assert all(getattr(handler, "filters", []) == [] or all(not isinstance(f, logs._Scrub) for f in handler.filters)
+    assert all(getattr(handler, "filters", []) == [] or all(not isinstance(f, ScrubFilter) for f in handler.filters)
                for handler in handlers)
 
 
@@ -844,7 +947,6 @@ def test_validate_help_lists_the_log_options(capsys):
 
 def test_a_log_config_leaves_the_handlers_that_exist_working(api, tmp_path, monkeypatch, capsys):
     """dictConfig closes every handler; the ones that were there before the command must still work after it."""
-    import logging.handlers
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}]})
     path = write_source(tmp_path, monkeypatch, http_source(api), secrets={})
     root, app = logging.getLogger(), logging.getLogger("an_app")
@@ -855,7 +957,8 @@ def test_a_log_config_leaves_the_handlers_that_exist_working(api, tmp_path, monk
     app.addHandler(memory)
     try:
         app.warning("before")
-        code, _, _ = run_cli(capsys, path, "--log-config", write_config(tmp_path, file_config(tmp_path / "streamwright.log")))
+        code, _, _ = run_cli(capsys, path, "--log-config", write_config(tmp_path,
+                                                                        file_config(tmp_path / "streamwright.log")))
         assert code == 0 and "stream 'items': starting" in (tmp_path / "streamwright.log").read_text()
         assert root.handlers.count(file_handler) == 1 and app.handlers == [memory]
         app.warning("after")
@@ -866,13 +969,14 @@ def test_a_log_config_leaves_the_handlers_that_exist_working(api, tmp_path, monk
         # the handlers the config made are closed, also one that no logger used
         made = [ref() for ref in logging._handlerList if ref() is not None and
                 getattr(ref(), "baseFilename", "").startswith(str(tmp_path)) and ref() is not file_handler]
-        assert [(os.path.basename(handler.baseFilename), handler.stream) for handler in made] == [("streamwright.log", None)]
+        assert [(os.path.basename(handler.baseFilename), handler.stream) for handler in made] == [("streamwright.log",
+                                                                                                   None)]
         closed = []
 
         class Unused(logging.Handler):
             def close(self):
                 closed.append(self)
-                super(Unused, self).close()
+                super().close()
         LogSetup(config={"version": 1, "handlers": {"unused": {"()": Unused}}}).close()
         assert len(closed) == 1 and file_handler.stream is not None
     finally:
@@ -891,19 +995,20 @@ def test_a_log_config_that_disables_existing_loggers_keeps_streamwrights(api, tm
     library = logging.getLogger("a_library.wire")  # made before the config, named by --log
     log_file = tmp_path / "streamwright.log"
     config = dict(file_config(log_file), disable_existing_loggers=True)
-    original = cli._run
+    run_module = importlib.import_module("streamwright.core.cli.commands.source")
+    original = run_module._run
 
     def run(*arguments):
         library.info("a library line")
         return original(*arguments)
-    monkeypatch.setattr(cli, "_run", run)
+    monkeypatch.setattr(run_module, "_run", run)
     code, _, _ = run_cli(capsys, path, "--log-config", write_config(tmp_path, config), "--log-level", "DEBUG",
                          "--log", "a_library.wire=INFO", "--summary", tmp_path / "run.json")
     assert code == 1
     text = log_file.read_text()
     assert "INFO a_library.wire: a library line" in text
-    assert "ERROR streamwright.source: stream 'items', partition {}: request 'raw_items': GET %s/items failed: HTTP 400: " \
-        '{"error": "key *** is not allowed"}' % api.url in text
+    assert "ERROR streamwright.source: stream 'items', partition {}: request 'raw_items': GET %s/items failed: " \
+        'HTTP 400: {"error": "key *** is not allowed"}' % api.url in text
     assert "DEBUG streamwright.source: details" in text
     summary = json.loads((tmp_path / "run.json").read_text())
     assert summary["error"] == "stream 'items', partition {}: request 'raw_items': GET %s/items failed: HTTP 400: " \
@@ -954,7 +1059,7 @@ def test_masking_a_long_dotted_line_is_linear():
     for text in ("https://user:pw@host/x", "see postgres://u:p@db:5432/x.", "a.b-c+d://u:p@h", "(https://u:p@h)",
                  "x https://h/p?q=1", '"ftp://a:b@c"', "-http://u:p@h", "é http://u:p@h", "http://u@h", "mailto:x@y",
                  "http://u:p@h,https://v:q@i", "a://b:c://d:e@f", "s3://k:s@b/p?x=1&y=2", "://u:p@h"):
-        assert logs._USERINFO.sub(r"\1***@", text) == WORD_USERINFO.sub(r"\1***@", text), text
+        assert redaction._USERINFO.sub(r"\1***@", text) == WORD_USERINFO.sub(r"\1***@", text), text
     # (and where a scheme follows a word character, which the word boundary missed)
     assert logs.mask_text("1http://u:p@h _http://u:p@h") == "1http://u:***@h _http://u:***@h"
 

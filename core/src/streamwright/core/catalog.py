@@ -12,11 +12,14 @@ what users type.
 Security: non-"official" connectors run third-party code, so `install` asks for
 confirmation (or `--yes`) and refuses non-interactive installs without it.
 """
+import datetime
 import json
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+import requests
 
 from streamwright.core.runtime import components
 
@@ -26,13 +29,17 @@ CACHE = Path(os.path.expanduser("~/.streamwright/connectors.json"))
 TIMEOUT_S = 5
 
 
+class _Catalog(dict):
+    def __init__(self, data, trusted_origin=False):
+        super().__init__(data)
+        self.trusted_origin = trusted_origin
+
+
 def _valid(data):
     return isinstance(data, dict) and isinstance(data.get("connectors"), dict)
 
 
 def _remote(url):
-    import requests
-
     response = requests.get(url, timeout=TIMEOUT_S)
     response.raise_for_status()
     data = response.json()
@@ -53,7 +60,8 @@ def load(hub_url=None):
     """
     url = hub_url or os.environ.get(HUB_ENV) or DEFAULT_HUB
     try:
-        return _remote(url)
+        data = _remote(url)
+        return _Catalog(data, trusted_origin=(url == DEFAULT_HUB and url.startswith("https://")))
     except Exception as exc:  # offline, hub down or a bad publish: fall back, visibly
         reason = type(exc).__name__  # network errors: the type is enough; an HTTP status or a bad index says why
         status = getattr(getattr(exc, "response", None), "status_code", None)
@@ -65,8 +73,8 @@ def load(hub_url=None):
         try:
             data = json.loads(CACHE.read_text())
             if _valid(data):
-                sys.stderr.write("streamwright: the connector hub %s is unreachable (%s); using the copy fetched on %s\n"
-                                 % (url, reason, _mtime(CACHE)))
+                sys.stderr.write("streamwright: the connector hub %s is unreachable (%s); using the copy fetched on "
+                                 "%s\n" % (url, reason, _mtime(CACHE)))
                 return data
         except Exception:
             pass
@@ -74,12 +82,12 @@ def load(hub_url=None):
 
 
 def _mtime(path):
-    import datetime
     return datetime.datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
 
 
 def connectors(hub_url=None):
-    return load(hub_url).get("connectors", {})
+    data = load(hub_url)
+    return _Catalog(data.get("connectors", {}), getattr(data, "trusted_origin", False))
 
 
 def installed():
@@ -116,13 +124,14 @@ def listing(hub_url=None):
     have = installed()
     lines = []
     by_family = {}
-    for key, entry in connectors(hub_url).items():
+    catalog_data = connectors(hub_url)
+    for key, entry in catalog_data.items():
         by_family.setdefault(entry.get("family", "other"), []).append((key, entry))
     for family in sorted(by_family):
         lines.append("%s:" % family)
         for key, entry in sorted(by_family[family]):
             mark = "[installed]" if key in have else "          "
-            trust = entry.get("trust", "community")
+            trust = entry.get("trust", "community") if catalog_data.trusted_origin else "community"
             lines.append("  %s %-16s %-10s %s" % (mark, key, trust, entry.get("summary", "")))
     return lines
 
@@ -144,6 +153,7 @@ def install_many(keys, assume_yes=False, hub_url=None, pip_args=()):
         sys.stderr.write("streamwright: 'connectors install' needs at least one connector KEY\n")
         return 2
     catalog = connectors(hub_url)
+    trusted_origin = getattr(catalog, "trusted_origin", False)
     unknown = [key for key in keys if key not in catalog]
     if unknown:
         sys.stderr.write("streamwright: unknown connector%s %s (try: streamwright connectors list)\n" % (
@@ -163,8 +173,11 @@ def install_many(keys, assume_yes=False, hub_url=None, pip_args=()):
         if not spec:
             sys.stderr.write("streamwright: connector %r has no installable source\n" % key)
             return 2
+        if not isinstance(spec, str) or spec.lstrip().startswith("-"):
+            sys.stderr.write("streamwright: connector %r has an invalid install requirement\n" % key)
+            return 2
         specs.append(spec)
-        trust = entry.get("trust", "community")
+        trust = entry.get("trust", "community") if trusted_origin else "community"
         if trust != "official":
             untrusted.append((key, trust, _source_of(inst)))
     if not specs:
@@ -184,6 +197,6 @@ def install_many(keys, assume_yes=False, hub_url=None, pip_args=()):
             print("aborted")
             return 1
 
-    cmd = [sys.executable, "-m", "pip", "install", *pip_args, *specs]
+    cmd = [sys.executable, "-m", "pip", "install", *pip_args, "--", *specs]
     print("+ " + " ".join(cmd), flush=True)
     return subprocess.call(cmd)

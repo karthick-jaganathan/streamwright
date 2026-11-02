@@ -5,16 +5,15 @@ import pytest
 
 pytest.importorskip("streamwright.connectors.google_ads.gaql")
 
-from streamwright.connectors.google_ads.gaql import GaqlBuilder, OPERATORS, check, gaql  # noqa: E402
-from streamwright.core.runtime import components  # noqa: E402
-from streamwright.core.engine.queries import QueryError  # noqa: E402
-from streamwright.core.runtime.templates import render  # noqa: E402
+from streamwright.connectors.google_ads.gaql import OPERATORS, GaqlBuilder, check, gaql
+from streamwright.core.sdk import QueryError
+from streamwright.core.sdk.testing import components, render
 
 TODAY = datetime.date(2026, 10, 3)
 
 
 def test_gaql_is_an_installed_query_builder():
-    assert isinstance(components.load("gaql", kind="query builder"), GaqlBuilder)
+    assert isinstance(components.load_query_builder("gaql", components.query_builders()), GaqlBuilder)
 
 
 def test_gaql_follows_the_grammar():

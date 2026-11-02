@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streamwright-kafka"
+version = "0.0.2"
+description = "StreamWright - kafka connector (read-only peek at the messages of a Kafka topic; the Spark runner consumes with offsets of its own)"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    {name = "Karthick Jaganathan", email = "kjaganathan.sde@gmail.com"},
+]
+keywords = ["data", "pipeline", "etl", "kafka", "streaming", "msk"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "streamwright~=0.1.9",
+    "confluent-kafka>=2.4",
+]
+
+[project.optional-dependencies]
+spark = ["streamwright-spark[spark]~=0.1.0"]
+msk-iam = ["aws-msk-iam-sasl-signer-python>=1.0"]
+
+[project.urls]
+Homepage = "https://streamwright.web.app"
+Documentation = "https://streamwright.web.app/docs/"
+Repository = "https://github.com/karthick-jaganathan/streamwright"
+"Issue Tracker" = "https://github.com/karthick-jaganathan/streamwright/issues"
+
+[project.entry-points."streamwright.connectors"]
+kafka = "streamwright.connectors.kafka:CONNECTOR"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+packages = ["streamwright.connectors.kafka", "streamwright.connectors.kafka.engines"]
+
+[tool.setuptools.package-data]
+"streamwright.connectors.kafka" = ["guide.md"]

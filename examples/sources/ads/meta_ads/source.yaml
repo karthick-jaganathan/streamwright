@@ -10,14 +10,14 @@ spec:
   config:
     account_ids: {type: list, items: string, description: Ad account IDs without the act_ prefix}
     start_date: {type: date, default: "-30d"}
+    app_id: {type: string, required: false}
   secrets:
     access_token: {type: string}
-    app_id: {type: string, required: false}
     app_secret: {type: string, required: false}
 
 auth:
   provider: meta_ads               # registered by the streamwright-meta-ads connector
   access_token: "{{ secrets.access_token }}"
-  app_id: "{{ secrets.app_id }}"
+  app_id: "{{ config.app_id }}"
   app_secret: "{{ secrets.app_secret }}"
   api_version: v26.0

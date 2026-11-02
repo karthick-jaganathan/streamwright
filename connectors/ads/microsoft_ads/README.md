@@ -19,8 +19,8 @@ streamwright connectors             # lists microsoft_ads (with its SDK loggers)
 | `developer_token`, `client_id`, `refresh_token` | required |
 | `client_secret` | for web apps; without it the desktop and mobile app flow is used |
 | `tenant` | the Microsoft Entra tenant (default `common`) |
-| `customer_id` | the `CustomerId` header, needed by most operations |
-| `account_id` | the default `CustomerAccountId` header |
+| `customer_id` | the default `CustomerId` SOAP header, needed by most operations |
+| `account_id` | the default `CustomerAccountId` SOAP header |
 | `environment` | `production` (default) or `sandbox` |
 
 The SDK refreshes the access token during a run. Refresh tokens it receives are redacted from logs but not saved.
@@ -28,8 +28,10 @@ The SDK refreshes the access token during a run. Refresh tokens it receives are 
 ## Requests
 
 - Services: `CampaignManagementService`, `ReportingService`, `CustomerManagementService`, `AdInsightService`.
-  Methods: read-only operations (`Get*`, `Search*`, `Find*`, `Poll*`) and `SubmitGenerateReport`.
-- `arguments` are the operation's fields, built into SOAP objects from the service's WSDL: nested objects are
+  Methods: the read-only operations the spec declares (`CONNECTOR.operations`; see the guide): campaign management
+  reads, `SubmitGenerateReport` / `PollGenerateReport`, customer and account reads and keyword insights. Another
+  read-only call is one more `Operation` in `spec.py`.
+- `arguments.request` holds the operation's fields, built into SOAP objects from the service's WSDL: nested objects are
   mappings, abstract types name their concrete type with `"@type"` (e.g. `CampaignPerformanceReportRequest`), lists
   fill `ArrayOf*` types (and are joined with spaces for list values such as `CampaignType: [Search, Shopping]`), and
   dates fill `Date` objects. Unknown fields are errors that list the valid ones.
@@ -37,10 +39,10 @@ The SDK refreshes the access token during a run. Refresh tokens it receives are 
   `{"Campaign": [...]}`, so use `records: {path: Campaign}`. One with several parts maps their names to them:
   `GetCampaignCriterionsByIds` gives `{"CampaignCriterions": {"CampaignCriterion": [...]}, "PartialErrors": ...}`
   (`records: {path: CampaignCriterions.CampaignCriterion}`). The operation's page on Microsoft Learn lists the parts.
-- `headers: {CustomerAccountId, CustomerId}` set those SOAP headers for one request. The `CustomerAccountId` header
-  is `headers.CustomerAccountId`, else the request's `AccountId`, else the only account of a report's
+- `arguments.account_id` and `arguments.customer_id` set the `CustomerAccountId` and `CustomerId` SOAP headers of one
+  request. The account is `arguments.account_id`, else the request's `AccountId`, else the only account of a report's
   `Scope.AccountIds`, else `auth.account_id`; operations about a campaign or ad group name only its ID, so set the
-  account in `headers` (below). `headers.CustomerId` replaces `auth.customer_id`.
+  account in `arguments.account_id` (below). `arguments.customer_id` replaces `auth.customer_id`.
 
 ```yaml
 # streams/ad_groups.yaml: the ad groups of each campaign of the campaigns stream
@@ -51,8 +53,9 @@ requests:
     sdk: microsoft_ads
     service: CampaignManagementService
     method: GetAdGroupsByCampaignId
-    headers: {CustomerAccountId: "{{ partition.account_id }}"}
-    arguments: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
+    arguments:
+      account_id: "{{ partition.account_id }}"
+      request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
     records: {path: AdGroup}
 transform:
   mode: page

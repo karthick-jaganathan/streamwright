@@ -17,34 +17,41 @@
 
 """HTTP for sources: built-in auth, retries, rate limits, pagination and secret redaction."""
 
-import base64
-import collections
 import datetime
-import hashlib
-import json
 import logging
-import threading
 import time
-from urllib.parse import quote, quote_plus, urljoin, urlsplit
+from types import MappingProxyType
+from typing import NamedTuple
+from urllib.parse import urljoin, urlsplit
 
 import requests
 
+from streamwright.core.net.auth import Authenticator
+from streamwright.core.net.errors import HttpError, error_excerpt
+from streamwright.core.net.paginators import paginate
+from streamwright.core.net.policies import DEFAULT_RETRY, TIMEOUT_SECONDS, RateLimiter, RetryPolicy, parse_retry_after
 from streamwright.core.runtime import logs
-from streamwright.core.config.inputs import parse_duration
-from streamwright.core.runtime.templates import get_path, to_text
+from streamwright.core.runtime.redact import Redactor
+from streamwright.core.runtime.templates import to_text
 
-
-__all__ = ["HttpError", "Redactor", "Authenticator", "RateLimiter", "RetryPolicy", "HttpClient", "paginate",
-           "DEFAULT_RETRY", "merge_headers"]
+__all__ = [
+    "DEFAULT_RETRY",
+    "Authenticator",
+    "HttpClient",
+    "HttpError",
+    "RateLimiter",
+    "Redactor",
+    "RetryPolicy",
+    "merge_headers",
+    "paginate",
+]
 
 LOG = logging.getLogger("streamwright.source")
-# the characters of a response body an error message shows
-ERROR_BODY_CHARS = 300
 
 # the redirects one request follows (on its own origin only)
 MAX_REDIRECTS = 10
 REDIRECT_CODES = (301, 302, 303, 307, 308)
-_DEFAULT_PORTS = {"http": 80, "https": 443}
+_DEFAULT_PORTS = MappingProxyType({"http": 80, "https": 443})
 
 
 def _origin(url):
@@ -72,8 +79,6 @@ def same_origin(trusted, url):
     return (scheme, port, other_scheme, other_port) == ("http", 80, "https", 443)
 
 
-DEFAULT_RETRY = {"codes": [429, 500, 502, 503, 504], "max_attempts": 3, "backoff": "exponential", "max_delay": "60s"}
-TIMEOUT_SECONDS = 60
 
 
 def merge_headers(source_headers, request_headers):
@@ -98,177 +103,9 @@ def merge_headers(source_headers, request_headers):
     return merged
 
 
-class HttpError(Exception):
-
-    def __init__(self, message, status=None):
-        super(HttpError, self).__init__(message)
-        self.status = status
-
-
-def error_excerpt(text, redact, limit=ERROR_BODY_CHARS):
-    """
-    The start of a response body (or other text) for an error message: redacted (`redact`, then credentials masked
-    by name) before it is cut to `limit` characters, so a secret that crosses the cut is never shown in part.
-    """
-    return logs.mask_text(redact(text))[:limit]
-
-
-class Redactor(object):
-    """Replaces secret values (and tokens obtained at run time) with *** in messages; log lines of any thread."""
-
-    def __init__(self, values=()):
-        self.values = []
-        self._lock = threading.Lock()
-        for value in values:
-            self.add(value)
-
-    def add(self, value):
-        if value is None or isinstance(value, bool):
-            return
-        text = str(value)
-        # also the forms a value takes in URLs, reprs, JSON and logs: URL-encoded, escaped, stripped
-        forms = set(form for form in (text, text.strip(), quote(text, safe=""), quote_plus(text), repr(text)[1:-1],
-                                      json.dumps(text)[1:-1]) if len(form) >= 4)
-        with self._lock:
-            if forms - set(self.values):
-                # a new list: other threads may be redacting with the current one
-                self.values = sorted(set(self.values) | forms, key=lambda form: (-len(form), form))
-
-    def __call__(self, text):
-        text = str(text)
-        for value in self.values:
-            text = text.replace(value, "***")
-        return text
-
-
-class Authenticator(object):
-    """Applies a rendered built-in `auth` block to each request."""
-
-    def __init__(self, auth, session, redact, clock=time.time):
-        self.auth = auth or {}
-        self.kind = self.auth.get("type")
-        self.session = session
-        self.redact = redact
-        self.clock = clock
-        self._token = None
-        self._expires_at = 0.0
-
-    def apply(self, headers, params):
-        auth = self.auth
-        if self.kind == "bearer":
-            token = auth.get("token")
-            if not token:
-                raise HttpError("bearer auth token is empty or missing")
-            headers["Authorization"] = "Bearer %s" % token
-        elif self.kind == "api_key":
-            if auth.get("in", "header") == "query":
-                params[auth["name"]] = auth["value"]
-            else:
-                headers[auth["name"]] = to_text(auth["value"])
-        elif self.kind == "basic":
-            pair = ("%s:%s" % (auth["username"], auth["password"])).encode("utf-8")
-            credential = base64.b64encode(pair).decode("ascii")
-            self.redact.add(credential)
-            headers["Authorization"] = "Basic %s" % credential
-        elif self.kind == "oauth2_refresh_token":
-            headers["Authorization"] = "Bearer %s" % self._access_token()
-
-    def refresh(self):
-        """Drops a cached OAuth token after a 401; returns True if a retry can help."""
-        if self.kind != "oauth2_refresh_token":
-            return False
-        self._token = None
-        return True
-
-    def _access_token(self):
-        if self._token and self.clock() < self._expires_at:
-            return self._token
-        auth = self.auth
-        refresh_token = auth.get("refresh_token")
-        if not refresh_token:
-            raise HttpError("oauth2 refresh_token is empty or missing")
-        data = {"grant_type": "refresh_token", "refresh_token": refresh_token,
-                "client_id": auth["client_id"], "client_secret": auth["client_secret"]}
-        if auth.get("scopes"):
-            data["scope"] = " ".join(auth["scopes"])
-        url = self.redact(logs.mask_url(auth["token_url"]))
-        started = time.monotonic()
-        try:
-            response = self.session.post(auth["token_url"], data=data, timeout=TIMEOUT_SECONDS)
-        except requests.RequestException as exc:
-            logs.http_summary("POST", url, error=exc, seconds=time.monotonic() - started)
-            raise HttpError(self.redact("token request to %s failed: %s" % (auth["token_url"], exc)))
-        payload = response.json() if response.status_code == 200 else None
-        if isinstance(payload, dict):  # the access token, and a new refresh token or ID token, are secrets too
-            for key, value in payload.items():
-                if str(key).lower().endswith("token") and isinstance(value, str):
-                    self.redact.add(value)
-        logs.http_summary("POST", url, response, seconds=time.monotonic() - started)
-        logs.http_details(response, self.redact, body=False)  # a token response is credentials
-        if response.status_code != 200:
-            raise HttpError(self.redact("token request to %s failed: HTTP %d: %s" % (
-                auth["token_url"], response.status_code, error_excerpt(response.text, self.redact))),
-                response.status_code)
-        token = payload.get("access_token")
-        if not token:
-            raise HttpError("token response from %s has no access_token" % auth["token_url"])
-        self.redact.add(token)
-        self._token = token
-        self._expires_at = self.clock() + max(0.0, float(payload.get("expires_in", 3600)) - 60)
-        return token
-
-
-class RateLimiter(object):
-    """Allows `requests` calls per `per` seconds (sliding window)."""
-
-    def __init__(self, requests_per_period, period_seconds, clock=time.monotonic, sleep=time.sleep):
-        self.limit = requests_per_period
-        self.period = period_seconds
-        self.clock = clock
-        self.sleep = sleep
-        self.calls = collections.deque()
-
-    def wait(self):
-        now = self.clock()
-        while self.calls and now - self.calls[0] >= self.period:
-            self.calls.popleft()
-        if len(self.calls) >= self.limit:
-            delay = self.period - (now - self.calls[0])
-            logs.NETWORK.info("rate limit reached; waiting %.1fs", delay,
-                              extra=logs.fields(event="rate_limit", duration_ms=int(round(delay * 1000))))
-            self.sleep(delay)
-            self.calls.popleft()
-        self.calls.append(self.clock())
-
-
-class RetryPolicy(object):
-    """A `retry` block: codes (HTTP statuses or provider error codes), max_attempts, backoff, max_delay."""
-
-    def __init__(self, retry=None):
-        retry = dict(DEFAULT_RETRY, **(retry or {}))
-        self.codes = set(retry["codes"])
-        self.max_attempts = retry["max_attempts"]
-        self.backoff = retry["backoff"]
-        self.max_delay = parse_duration(retry["max_delay"]).total_seconds()
-
-    def delay(self, attempt, retry_after=None):
-        delay = 2 ** (attempt - 1) if self.backoff == "exponential" else 1
-        if retry_after is not None:
-            delay = retry_after
-        return min(delay, self.max_delay)
-
-
-def _retry_after(response):
-    value = response.headers.get("Retry-After") if response is not None else None
-    try:
-        return float(value) if value is not None else None
-    except ValueError:
-        return None
-
-
 def _jsonable(value):
     if isinstance(value, dict):
-        return dict((k, _jsonable(v)) for k, v in value.items())
+        return {k: _jsonable(v) for k, v in value.items()}
     if isinstance(value, list):
         return [_jsonable(v) for v in value]
     if isinstance(value, (datetime.date, datetime.datetime)):
@@ -288,14 +125,26 @@ def _with_params(url, params):
         return url
 
 
-class HttpClient(object):
+class _Sent(NamedTuple):
+    """One request as it was sent, for its log lines."""
+
+    method: str
+    url: str
+    params: dict
+    headers: dict
+    started: float
+    attempt: int
+    fields: dict | None
+
+
+class HttpClient:
     """
-    HTTP requests with auth, rate limits and retries. `metrics` (logs.RunMetrics) counts the requests and retries of
-    the requests that name their stream (`fields`); `streamwright.network` logs each request (INFO) and its details (DEBUG).
+    HTTP requests with auth, rate limits and retries. `metrics` (logs.RunMetrics) counts the requests and retries of the
+    requests that name their stream (`fields`); `streamwright.network` logs each request (INFO) and its details (DEBUG).
     """
 
-    def __init__(self, base_url=None, headers=None, authenticator=None, retry=None, rate_limiter=None,
-                 redact=None, session=None, sleep=time.sleep, metrics=None, clock=time.monotonic):
+    def __init__(self, base_url=None, headers=None, *, authenticator=None, retry=None, rate_limiter=None,
+                 redact=None, session=None, sleep=time.sleep, metrics=None, clock=time.monotonic, timeout=None):
         self.base_url = base_url
         self.headers = dict(headers or {})
         self.session = session or requests.Session()
@@ -306,6 +155,7 @@ class HttpClient(object):
         self.sleep = sleep
         self.metrics = metrics
         self.clock = clock
+        self.timeout = TIMEOUT_SECONDS if timeout is None else timeout
         self.last_url = None
         self.last_headers = None
 
@@ -332,54 +182,72 @@ class HttpClient(object):
         if self.metrics is not None:
             self.metrics.request(fields, retry=attempt > 1)
 
-    def _logged(self, method, url, params, headers, response, error, started, attempt, fields, size=None, body=True):
+    def _logged(self, sent, response=None, error=None, *, size=None, body=True):
         """The `streamwright.network` lines of one request: its summary line (INFO), then its details (DEBUG)."""
         if not logs.NETWORK.isEnabledFor(logging.INFO):
             return
-        shown = self.redact(logs.mask_url(_with_params(url, params)))
-        logs.http_summary(method, shown, response, error, self.clock() - started, attempt, fields, size)
+        shown = self.redact(logs.mask_url(_with_params(sent.url, sent.params)))
+        logs.http_summary(sent.method, shown, response, error, seconds=self.clock() - sent.started,
+                          attempt=sent.attempt, where=sent.fields, size=size)
         if response is not None:
             logs.http_details(response, self.redact, body)
         else:
-            logs.request_details(method, shown, headers, self.redact)
+            logs.request_details(sent.method, shown, sent.headers, self.redact)
 
-    def request(self, method, path, params=None, headers=None, json_body=None, fields=None):
+    def _send(self, method, url, params, headers, json_body, *, attempt, fields):
+        """Sends one request, rate limited and authenticated, and logs it; returns its response."""
+        if self.rate_limiter is not None:
+            self.rate_limiter.wait()
+        request_headers = merge_headers(self.headers, headers)
+        request_params = dict(params or {})
+        self.authenticator.apply(request_headers, request_params)
+        request_headers = {name: to_text(value) for name, value in request_headers.items() if value not in ("", None)}
+        self._sent(fields, attempt)
+        sent = _Sent(method, url, request_params, request_headers, self.clock(), attempt, fields)
+        try:
+            response = self.session.request(method, url, params=request_params or None, headers=request_headers,
+                                            json=_jsonable(json_body) if json_body is not None else None,
+                                            timeout=self.timeout, allow_redirects=False)
+        except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError,
+                requests.exceptions.ContentDecodingError) as exc:
+            self._logged(sent, error=exc)
+            raise HttpError(self.redact("%s %s failed: %s" % (method, url, exc))) from exc
+        except requests.RequestException as exc:
+            self._logged(sent, error=exc)
+            error = HttpError(self.redact("%s %s failed: %s" % (method, url, exc)))
+            error.retryable = False
+            raise error from exc
+        self._logged(sent, response)
+        return response
+
+    def _decoded(self, response, method, url):
+        """A successful response's JSON (None when it has no content)."""
+        self.last_url = response.url
+        if not response.content:
+            return None
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise HttpError("%s %s returned invalid JSON" % (method, self.redact(url)), response.status_code) from exc
+
+    def request(self, method, path, params=None, headers=None, json_body=None, *, fields=None):
         """
         Sends a request with auth, rate limiting and retries; returns the decoded JSON (or None). `fields`: the
         stream, request, partition and window it reads, for log lines and the run's metrics.
         """
         url = self.url(path)
         refreshed = False
-        attempt = 0
         redirects = 0
-        while True:
-            attempt += 1
-            if self.rate_limiter is not None:
-                self.rate_limiter.wait()
-            request_headers = merge_headers(self.headers, headers)
-            request_params = dict(params or {})
-            self.authenticator.apply(request_headers, request_params)
-            request_headers = dict((name, to_text(value)) for name, value in request_headers.items() if value not in ("", None))
-            self._sent(fields, attempt)
-            started = self.clock()
-            response = None
-            try:
-                response = self.session.request(method, url, params=request_params or None, headers=request_headers,
-                                                json=_jsonable(json_body) if json_body is not None else None,
-                                                timeout=TIMEOUT_SECONDS, allow_redirects=False)
-            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError,
-                    requests.exceptions.ContentDecodingError) as exc:
-                self._logged(method, url, request_params, request_headers, None, exc, started, attempt, fields)
-                error, retryable = HttpError(self.redact("%s %s failed: %s" % (method, url, exc))), True
-            except requests.RequestException as exc:
-                self._logged(method, url, request_params, request_headers, None, exc, started, attempt, fields)
-                raise HttpError(self.redact("%s %s failed: %s" % (method, url, exc)))
-            else:
-                self._logged(method, url, request_params, request_headers, response, None, started, attempt, fields)
+        retry_after = None
+
+        def attempt(number):
+            nonlocal method, url, params, json_body, refreshed, redirects, retry_after
+            retry_after = None
+            while True:
+                response = self._send(method, url, params, headers, json_body, attempt=number, fields=fields)
                 status = response.status_code
                 if status == 401 and not refreshed and self.authenticator.refresh():
                     refreshed = True
-                    attempt -= 1
                     continue
                 location = response.headers.get("Location") if status in REDIRECT_CODES else None
                 if location:
@@ -397,31 +265,30 @@ class HttpClient(object):
                     if status == 303 or (status in (301, 302) and method == "POST"):
                         method, json_body = "GET", None
                     url, params = target, None  # the server's Location carries the query
-                    attempt -= 1
                     continue
                 if response is not None:
                     self.last_headers = response.headers
                 if 200 <= status < 300:
-                    self.last_url = response.url
-                    if not response.content:
-                        return None
-                    try:
-                        return response.json()
-                    except ValueError:
-                        raise HttpError("%s %s returned invalid JSON" % (method, self.redact(url)), status)
+                    return self._decoded(response, method, url)
                 error = HttpError(self.redact("%s %s failed: HTTP %d: %s" % (
                     method, url, status, error_excerpt(response.text, self.redact))), status)
-                retryable = status in self.retry.codes
-            self._wait_or_raise(error, retryable, attempt, response, fields)
+                retry_after = parse_retry_after(response)
+                raise error
 
-    def _wait_or_raise(self, error, retryable, attempt, response, fields=None):
-        if not retryable or attempt >= self.retry.max_attempts:
-            raise error
-        delay = self.retry.delay(attempt, _retry_after(response))
-        logs.NETWORK.warning("%s; retrying in %.1fs (attempt %d of %d)", error, delay, attempt + 1,
+        def classify(error):
+            if not isinstance(error, HttpError):
+                return False, None
+            return (getattr(error, "retryable", error.status is None or error.status in self.retry.codes),
+                    retry_after)
+
+        return self.retry.run(attempt, classify, lambda error, delay, number:
+                              self._on_retry(error, delay, number, fields))
+
+    def _on_retry(self, error, delay, number, fields=None):
+        logs.NETWORK.warning("%s; retrying in %.1fs (attempt %d of %d)", error, delay, number + 1,
                              self.retry.max_attempts,
-                             extra=logs.fields(event="retry", status=error.status, attempt=attempt + 1,
-                                               duration_ms=int(round(delay * 1000)), **(fields or {})))
+                             extra=logs.fields(event="retry", status=error.status, attempt=number + 1,
+                                               duration_ms=round(delay * 1000), **(fields or {})))
         self.sleep(delay)
 
     def download(self, url, handle, fields=None):
@@ -430,46 +297,74 @@ class HttpClient(object):
         auth, rate limit and retries; returns the number of bytes. `fields`: as for request().
         """
         url = self.url(url)
-        attempt = 0
-        while True:
-            attempt += 1
-            if self.rate_limiter is not None:
-                self.rate_limiter.wait()
-            headers, params = dict(self.headers), {}
-            self.authenticator.apply(headers, params)
-            headers = dict((name, to_text(value)) for name, value in headers.items())
-            handle.seek(0)
-            handle.truncate()
-            self._sent(fields, attempt)
-            started = self.clock()
-            response = None
-            try:
-                response = self.session.get(url, params=params or None, headers=headers, stream=True,
-                                            timeout=TIMEOUT_SECONDS)
-                with response:
-                    self.last_headers = response.headers
-                    status = response.status_code
-                    if 200 <= status < 300:
-                        size = 0
-                        for chunk in response.iter_content(chunk_size=1 << 20):
-                            handle.write(chunk)
-                            size += len(chunk)
-                        self._logged("GET", url, params, headers, response, None, started, attempt, fields, size,
-                                     body=False)
-                        return size
-                    error = HttpError(self.redact("GET %s failed: HTTP %d: %s" % (
-                        url, status, error_excerpt(response.text, self.redact))), status)
-                    self._logged("GET", url, params, headers, response, None, started, attempt, fields, body=False)
-                    retryable = status in self.retry.codes
-            except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError,
-                    requests.exceptions.ContentDecodingError) as exc:
-                self._logged("GET", url, params, headers, None, exc, started, attempt, fields)
-                error, retryable = HttpError(self.redact("GET %s failed: %s" % (url, exc))), True
-            except requests.RequestException as exc:
-                self._logged("GET", url, params, headers, None, exc, started, attempt, fields)
-                raise HttpError(self.redact("GET %s failed: %s" % (url, exc)))
-            self._wait_or_raise(error, retryable, attempt, response, fields)
+        redirects = 0
+        has_credentials = bool(self.headers) or self.authenticator.kind is not None
+        retry_after = None
 
+        def attempt(number):
+            nonlocal url, redirects, retry_after
+            retry_after = None
+            while True:
+                if self.rate_limiter is not None:
+                    self.rate_limiter.wait()
+                headers, request_params = dict(self.headers), {}
+                self.authenticator.apply(headers, request_params)
+                headers = {name: to_text(value) for name, value in headers.items()}
+                handle.seek(0)
+                handle.truncate()
+                self._sent(fields, number)
+                sent = _Sent("GET", url, request_params, headers, self.clock(), number, fields)
+                try:
+                    response = self.session.get(url, params=request_params or None, headers=headers, stream=True,
+                                                timeout=self.timeout, allow_redirects=False)
+                    with response:
+                        self.last_headers = response.headers
+                        status = response.status_code
+                        location = response.headers.get("Location") if status in REDIRECT_CODES else None
+                        if location:
+                            self._logged(sent, response, body=False)
+                            target = urljoin(url, location)
+                            if has_credentials and not same_origin(url, target):
+                                raise HttpError(self.redact("GET %s redirects to %s; not sending the source's "
+                                                            "credentials to another origin" % (
+                                                                logs.mask_url(url), logs.mask_url(target))), status)
+                            if _origin(url)[0] == "https" and _origin(target)[0] != "https":
+                                raise HttpError(self.redact("GET %s redirects to %s; refusing downgrade from "
+                                                            "https to http" % (
+                                                                logs.mask_url(url), logs.mask_url(target))), status)
+                            redirects += 1
+                            if redirects > MAX_REDIRECTS:
+                                raise HttpError(self.redact("GET %s: more than %d redirects" % (
+                                    logs.mask_url(url), MAX_REDIRECTS)), status)
+                            url = target
+                            continue
+                        if 200 <= status < 300:
+                            size = 0
+                            for chunk in response.iter_content(chunk_size=1 << 20):
+                                handle.write(chunk)
+                                size += len(chunk)
+                            self._logged(sent, response, size=size, body=False)
+                            return size
+                        error = HttpError(self.redact("GET %s failed: HTTP %d: %s" % (
+                            url, status, error_excerpt(response.text, self.redact))), status)
+                        self._logged(sent, response, body=False)
+                        retry_after = parse_retry_after(response)
+                        raise error
+                except (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError,
+                        requests.exceptions.ContentDecodingError) as exc:
+                    self._logged(sent, error=exc)
+                    raise HttpError(self.redact("GET %s failed: %s" % (url, exc))) from exc
+                except requests.RequestException as exc:
+                    self._logged(sent, error=exc)
+                    error = HttpError(self.redact("GET %s failed: %s" % (url, exc)))
+                    error.retryable = False
+                    raise error from exc
 
-# Re-export paginate from net/paginators
-from streamwright.core.net.paginators import paginate
+        def classify(error):
+            if not isinstance(error, HttpError):
+                return False, None
+            return (getattr(error, "retryable", error.status is None or error.status in self.retry.codes),
+                    retry_after)
+
+        return self.retry.run(attempt, classify, lambda error, delay, number:
+                              self._on_retry(error, delay, number, fields))

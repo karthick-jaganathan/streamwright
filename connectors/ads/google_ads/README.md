@@ -37,7 +37,7 @@ streamwright connectors             # lists google_ads with its SDK logger (gaql
 
 ## GAQL queries
 
-The `gaql` query builder (a component of this package, in the `streamwright.query_builders` group) writes Google Ads Query
+The `gaql` query builder (listed in the definition's `query_builders`, usable wherever google_ads is) writes Google Ads Query
 Language text from a mapping, checking, quoting and escaping every value:
 
 ```yaml

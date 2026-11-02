@@ -25,10 +25,9 @@ import json
 import zipfile
 import zlib
 
+__all__ = ["PAGE_SIZE", "DownloadError", "read"]
 
-__all__ = ["DownloadError", "read", "PAGE_SIZE"]
-
-PAGE_SIZE = 1000
+from streamwright.core.runtime.constants import PAGE_SIZE
 
 
 class DownloadError(Exception):
@@ -40,7 +39,7 @@ def _members(handle, compression):
         try:
             archive = zipfile.ZipFile(handle)
         except zipfile.BadZipFile as exc:
-            raise DownloadError("the file is not a zip archive: %s" % exc)
+            raise DownloadError("the file is not a zip archive: %s" % exc) from exc
         names = sorted(name for name in archive.namelist() if not name.endswith("/"))
         if not names:
             raise DownloadError("the zip archive is empty")
@@ -58,7 +57,7 @@ def _rows(text, file_format):
     if file_format == "csv":
         for row in csv.DictReader(text):
             row.pop(None, None)  # values beyond the header row
-            yield dict((key, None if value == "" else value) for key, value in row.items())
+            yield {key: None if value == "" else value for key, value in row.items()}
     else:
         for line in text:
             if line.strip():
@@ -90,4 +89,4 @@ def read(handle, file_format, compression="none", page_size=PAGE_SIZE):
                 text.detach()  # leaves the underlying file open for its owner
     except (ValueError, csv.Error, OSError, EOFError, zlib.error, zipfile.BadZipFile) as exc:
         raise DownloadError("cannot read the downloaded %s file%s: %s" % (
-            file_format, "" if compression in (None, "none") else " (%s)" % compression, exc))
+            file_format, "" if compression in (None, "none") else " (%s)" % compression, exc)) from exc

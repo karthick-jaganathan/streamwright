@@ -9,18 +9,26 @@ import os
 import stat
 from decimal import Decimal
 
+import duckdb
 import pytest
 
 from streamwright.core import cli
-from streamwright.core.outputs.output import ParquetOutput, _size, log_summary, open_output, parquet_type
 from streamwright.core.engine.runner import SourceRunner
+from streamwright.core.outputs.base import readable_size
+from streamwright.core.outputs.ducklake import load_ducklake
+from streamwright.core.outputs.output import ParquetOutput, log_summary, open_output, parquet_type
 from streamwright.core.runtime.testing import page_stream
-
 
 needs_dlt = pytest.mark.skipif(importlib.util.find_spec("dlt") is None,
                                reason="needs dlt (pip install 'streamwright[dlt]' 'dlt[duckdb]')")
 TODAY = datetime.date(2026, 10, 3)
-CURSOR = {"type": "cursor", "token_path": "next", "param": "cursor"}
+
+
+def cursor_paginator():
+    """A cursor paginator: `next` holds the next page's `cursor`."""
+    return {"type": "cursor", "token_path": "next", "param": "cursor"}
+
+
 ID = "SELECT (record->>'id')::BIGINT AS id FROM records"
 
 
@@ -38,7 +46,6 @@ def files_in(folder):
 
 def query(sql, path=None):
     """Rows of a query in a DuckDB of its own (UTC); `path` replaces {path} in it, quoted."""
-    import duckdb
     connection = duckdb.connect(":memory:")
     try:
         connection.execute("SET TimeZone = 'UTC'")
@@ -51,7 +58,6 @@ def query(sql, path=None):
 
 def rows_in(database, table):
     """The number of rows of a table (SCHEMA.TABLE) of a DuckDB file."""
-    import duckdb
     connection = duckdb.connect(str(database), read_only=True)
     try:
         return connection.execute("SELECT count(*) FROM %s" % table).fetchone()[0]
@@ -63,7 +69,8 @@ def two_exports(api, **top):
     """A page-mode stream read in two pages (ids 1, 2 then 3), with two exports: items and doubled."""
     pages = {"": {"data": [{"id": 1}, {"id": 2}], "next": "p2"}, "p2": {"data": [{"id": 3}]}}
     api.routes[("GET", "/items")] = lambda request: (200, pages[request["params"].get("cursor", "")])
-    stream = page_stream("items", {"http": {"path": "/items"}, "paginator": CURSOR}, ID, records={"path": "data"})
+    stream = page_stream("items", {"http": {"path": "/items"}, "paginator": cursor_paginator()}, ID,
+                         records={"path": "data"})
     stream["transform"]["steps"].append({"name": "doubled_rows",
                                          "select": "SELECT id * 2 AS doubled, 'x' || id AS label FROM items"})
     stream["export"]["doubled"] = {"step": "doubled_rows"}
@@ -157,7 +164,7 @@ def test_parquet_files_keep_exact_types(api, tmp_path, stage, caplog):
     rows = query("SELECT * FROM read_parquet({path}) ORDER BY id", path)
     assert rows == [
         (1, Decimal("12.34"), datetime.date(2026, 10, 1),
-         datetime.datetime(2026, 10, 1, 8, 0, tzinfo=datetime.timezone.utc), True, 0.5, "first",
+         datetime.datetime(2026, 10, 1, 8, 0, tzinfo=datetime.UTC), True, 0.5, "first",
          '{"a":[1,null],"b":"text"}', '["x","y"]', '{"channel":"web"}', Decimal(BIG), UID, 90.0,
          datetime.datetime(2026, 10, 1, 10, 0), 7),
         (2, None, None, None, None, None, None, '"plain text"', None, '{"channel":null}', Decimal(-BIG), None, None,
@@ -166,7 +173,7 @@ def test_parquet_files_keep_exact_types(api, tmp_path, stage, caplog):
     assert query("SELECT converted_type, logical_type FROM parquet_schema({path}) WHERE name IN ('details', 'tags')",
                  path) == [("UTF8", None), ("UTF8", None)]
     assert query("SELECT DISTINCT compression FROM parquet_metadata({path})", path) == [("ZSTD",)]
-    assert "wrote %s: 2 records, %s" % (path, _size(os.path.getsize(str(path)))) in caplog.text
+    assert "wrote %s: 2 records, %s" % (path, readable_size(os.path.getsize(str(path)))) in caplog.text
     assert os.listdir(str(stage)) == []
 
 
@@ -254,13 +261,14 @@ def test_parquet_output_from_python_types_columns_from_the_schema(tmp_path, stag
     entries = output.summary()
     typed, raw = entries[0]["path"], entries[1]["path"]
     assert query("SELECT * FROM read_parquet({path})", typed) == [
-        (1, datetime.datetime(2026, 10, 1, 10, 0, tzinfo=datetime.timezone.utc), '["a"]')]
+        (1, datetime.datetime(2026, 10, 1, 10, 0, tzinfo=datetime.UTC), '["a"]')]
     assert query("SELECT * FROM read_parquet({path})", raw) == [('{"a":1,"b":[true,null]}',)]
     state = tmp_path / "out" / "state.json"
     assert json.loads(state.read_text()) == {"bookmarks": {"typed": {"{}": "2026-10-02"}}}
     # DuckDB writes the files: they get the permissions of the output's other files
     assert stat.S_IMODE(os.stat(typed).st_mode) == stat.S_IMODE(os.stat(str(state)).st_mode)
-    # streamwright.output: the files written (INFO), and where the records were staged and how the files were typed (DEBUG)
+    # streamwright.output: the files written (INFO), and where the records were staged and how the files were typed
+    # (DEBUG)
     lines = [(record.name, record.levelname, record.getMessage()) for record in caplog.records]
     (typed_part,) = [name for name in hidden if name.startswith(".typed.")]
     assert ("streamwright.output", "DEBUG", "export 'typed': staging its records in %s" % os.path.join(
@@ -268,8 +276,9 @@ def test_parquet_output_from_python_types_columns_from_the_schema(tmp_path, stag
     assert ("streamwright.output", "DEBUG", "export 'typed': DuckDB writes %s from %s, columns id BIGINT, at TIMESTAMP "
             "WITH TIME ZONE, tags VARCHAR" % (tmp_path / "out" / typed_part, os.path.join(staged, "0.jsonl"))) in lines
     assert ("streamwright.output", "DEBUG", "removing the staged records in %s" % staged) in lines
-    assert ("streamwright.output", "INFO", "wrote %s: 1 record, %s" % (typed, _size(os.path.getsize(typed)))) in lines
-    assert set(name for name, _, _ in lines) == {"streamwright.output"}
+    assert ("streamwright.output", "INFO", "wrote %s: 1 record, %s" % (typed,
+                                                                       readable_size(os.path.getsize(typed)))) in lines
+    assert {name for name, _, _ in lines} == {"streamwright.output"}
 
 
 # * ------------------------------------
@@ -298,8 +307,8 @@ def run(source, output, failed=False):
 
 def closing_lines(caplog):
     """(message, fields) of the lines outputs log when they close (the event "output")."""
-    return [(record.getMessage(), dict((key, getattr(record, key)) for key in (
-        "export", "records", "path", "bytes", "table") if hasattr(record, key)))
+    return [(record.getMessage(), {key: getattr(record, key) for key in (
+        "export", "records", "path", "bytes", "table") if hasattr(record, key)})
         for record in caplog.records if getattr(record, "event", None) == "output"]
 
 
@@ -308,8 +317,8 @@ def test_file_outputs_summarize_their_files(api, tmp_path, stage, caplog, kind):
     source, out = shop(api), tmp_path / "out"
     with caplog.at_level(logging.INFO, logger="streamwright.output"):
         entries = run(source, open_output("%s:%s" % (kind, out), source))
-    paths = dict((entry["export"], entry["path"]) for entry in entries)
-    sizes = dict((name, os.path.getsize(path)) for name, path in paths.items())
+    paths = {entry["export"]: entry["path"] for entry in entries}
+    sizes = {name: os.path.getsize(path) for name, path in paths.items()}
     state = str(out / "state.json")
     assert entries == [
         {"export": "orders", "records": 3, "path": paths["orders"], "bytes": sizes["orders"], "state": state},
@@ -320,9 +329,9 @@ def test_file_outputs_summarize_their_files(api, tmp_path, stage, caplog, kind):
     assert sorted(os.listdir(str(out))) == sorted([os.path.basename(path) for path in paths.values()] + [
         "state.json"])
     assert closing_lines(caplog) == [
-        ("wrote %s: 3 records, %s" % (paths["orders"], _size(sizes["orders"])),
+        ("wrote %s: 3 records, %s" % (paths["orders"], readable_size(sizes["orders"])),
          {"export": "orders", "records": 3, "path": paths["orders"], "bytes": sizes["orders"]}),
-        ("wrote %s: 1 record, %s" % (paths["eventLog"], _size(sizes["eventLog"])),
+        ("wrote %s: 1 record, %s" % (paths["eventLog"], readable_size(sizes["eventLog"])),
          {"export": "eventLog", "records": 1, "path": paths["eventLog"], "bytes": sizes["eventLog"]})]
     assert os.listdir(str(stage)) == []
 
@@ -341,11 +350,10 @@ def test_singer_output_summarizes_its_messages(api, capsys, caplog):
 
 def _ducklake_available():
     """Whether DuckLake can run here: installed now, or installed on first use (as in test_warehouse_output)."""
-    import duckdb
-    from streamwright.core.outputs.warehouse import _load_ducklake
+
     connection = duckdb.connect(":memory:")
     try:
-        _load_ducklake(connection)
+        load_ducklake(connection)
         return True
     except Exception:
         return False
@@ -355,7 +363,7 @@ def _ducklake_available():
 
 @pytest.mark.parametrize("kind", ["duckdb", pytest.param("ducklake", marks=pytest.mark.skipif(
     not _ducklake_available(), reason="the DuckLake extension cannot be installed"))])
-def test_warehouse_outputs_summarize_their_tables(api, tmp_path, stage, monkeypatch, caplog, kind):
+def test_warehouse_outputs_summarize_their_tables(api, tmp_path, stage, monkeypatch, caplog, *, kind):
     source, database = shop(api), tmp_path / ("warehouse." + kind)
     (tmp_path / "data").mkdir()
     monkeypatch.setenv("STREAMWRIGHT_DUCKLAKE_DATA_PATH", str(tmp_path / "data"))
@@ -416,7 +424,7 @@ def test_dlt_output_summarizes_its_tables_as_dlt_names_them(api, tmp_path, stage
 
 
 @pytest.mark.parametrize("spec", ["singer", "jsonl:{tmp}/out", "parquet:{tmp}/out", "duckdb:{tmp}/w.duckdb"])
-def test_failed_runs_summarize_only_what_was_written(api, tmp_path, stage, capsys, caplog, spec):
+def test_failed_runs_summarize_only_what_was_written(api, tmp_path, stage, capsys, caplog, *, spec):
     source = shop(api)
     with caplog.at_level(logging.INFO, logger="streamwright.output"):
         entries = run(source, open_output(spec.format(tmp=tmp_path), source), failed=True)
@@ -451,6 +459,6 @@ def test_log_summary_lines(caplog):
 
 
 def test_sizes_are_written_for_people():
-    assert [_size(count) for count in (0, 1, 1023, 1024, 42189, 1024 ** 2 - 1, 5 * 1024 ** 2, 3 * 1024 ** 3,
+    assert [readable_size(count) for count in (0, 1, 1023, 1024, 42189, 1024 ** 2 - 1, 5 * 1024 ** 2, 3 * 1024 ** 3,
                                        2 * 1024 ** 4)] == [
         "0 bytes", "1 byte", "1,023 bytes", "1.0 KB", "41.2 KB", "1.0 MB", "5.0 MB", "3.0 GB", "2.0 TB"]

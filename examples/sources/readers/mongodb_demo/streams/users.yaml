@@ -2,7 +2,7 @@ description: MongoDB users collection document stream.
 
 requests:
   - name: raw_users
-    service: database
+    service: collection
     method: find
     sdk: mongodb
     arguments:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-google-ads"
-version = "0.0.1"
+version = "0.0.2"
 description = "StreamWright - Google Ads connector (google_ads auth provider, gaql query builder)"
 readme = "README.md"
 license = "Apache-2.0"
@@ -16,14 +16,13 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "streamwright~=0.1.0",
+    "streamwright~=0.1.9",
     "google-ads>=33.0",
 ]
 
@@ -34,12 +33,12 @@ Repository = "https://github.com/karthick-jaganathan/streamwright"
 "Issue Tracker" = "https://github.com/karthick-jaganathan/streamwright/issues"
 
 [project.entry-points."streamwright.connectors"]
-google_ads = "streamwright.connectors.google_ads.connector:GoogleAdsConnector"
-
-[project.entry-points."streamwright.query_builders"]
-gaql = "streamwright.connectors.google_ads.gaql:GaqlBuilder"
+google_ads = "streamwright.connectors.google_ads:CONNECTOR"
 
 [tool.setuptools]
 # src layout: streamwright and streamwright.connectors are namespace packages shared with the other StreamWright distributions
 package-dir = {"" = "src"}
-packages = ["streamwright.connectors.google_ads"]
+packages = ["streamwright.connectors.google_ads", "streamwright.connectors.google_ads.engines"]
+
+[tool.setuptools.package-data]
+"streamwright.connectors.google_ads" = ["guide.md"]

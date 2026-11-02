@@ -3,27 +3,31 @@ import importlib.util
 import json
 import logging
 import os
+from types import MappingProxyType
+from unittest.mock import MagicMock
 
+import duckdb
 import pytest
 
 from streamwright.core import cli
 from streamwright.core.engine import sql
+from streamwright.core.outputs.ducklake import load_ducklake
 from streamwright.core.outputs.output import open_output
+from streamwright.core.outputs.warehouse import DuckDBOutput
 from streamwright.core.runtime.testing import page_stream
 
-
 TODAY = datetime.date.today()
-DAYS = [(TODAY - datetime.timedelta(days=n)).isoformat() for n in (2, 1, 0)]
+DAYS = tuple([(TODAY - datetime.timedelta(days=n)).isoformat() for n in (2, 1, 0)])
 ORDERS = """SELECT (record->>'id')::BIGINT AS id, (record->>'day')::DATE AS day,
                    (record->>'amount')::DECIMAL(9, 2) AS amount,
                    record->'items' AS items, record->'details' AS details,
                    record->>'name' AS name,
                    (record->>'updated_at')::TIMESTAMPTZ AS updated_at%s
             FROM %s"""
-INCREMENTAL = {"cursor_field": "day", "start": "-2d", "window": "1d", "lookback": "1d"}
+INCREMENTAL = MappingProxyType({"cursor_field": "day", "start": "-2d", "window": "1d", "lookback": "1d"})
 
 
-def _source(api, key=True, incremental=True, transform=False, extra=None, raw=False, raw_key=False,
+def _source(api, *, key=True, incremental=True, transform=False, extra=None, raw=False, raw_key=False,
             transform_key=True):
     params = {"day": "{{ window.start }}"} if incremental else {"day": DAYS[0]}
     stream = page_stream("orders", {"http": {"path": "/orders", "params": params}}, ORDERS % (extra or "", "records"),
@@ -66,12 +70,11 @@ def wh_run(api, tmp_path, monkeypatch):
     def run(output, *arguments, **options):
         path = tmp_path / "shop.yaml"
         path.write_text(json.dumps(_source(api, **options)))
-        return cli.main(["run", str(path), "--output", output] + list(arguments))
+        return cli.main(["run", str(path), "--output", output, *list(arguments)])
     return run
 
 
 def _query(path, sql):
-    import duckdb
     connection = duckdb.connect(str(path), read_only=True)
     try:
         connection.execute("SET TimeZone = 'UTC'")
@@ -81,7 +84,7 @@ def _query(path, sql):
 
 
 def _days(api):
-    days = [request["params"]["day"] for request in api.calls("/orders")]
+    days = tuple(request["params"]["day"] for request in api.calls("/orders"))
     api.requests.clear()
     return days
 
@@ -95,7 +98,7 @@ def test_duckdb_loads_typed_columns_raw_records_state_and_resumes(wh_run, api, t
              row[6].isoformat()) for row in rows] == [
                  (day, "12.34", [{"sku": "a"}], {"channel": "web"}, "first", day + "T10:00:00+00:00")
                  for day in DAYS]
-    types = dict((name, kind) for name, kind, *_ in _query(database, "DESCRIBE client_a.orders"))
+    types = {name: kind for name, kind, *_ in _query(database, "DESCRIBE client_a.orders")}
     assert (types["id"], types["day"], types["amount"], types["items"], types["details"], types["updated_at"]) == (
         "BIGINT", "DATE", "DECIMAL(9,2)", "JSON", "JSON", "TIMESTAMP WITH TIME ZONE")
     assert os.listdir(str(tmp_path / "stage")) == []
@@ -141,7 +144,7 @@ def test_schema_evolution_and_type_conflict_roll_back(wh_run, api, tmp_path, cap
     database = tmp_path / "warehouse.duckdb"
     assert wh_run("duckdb:%s" % database) == 0
     assert wh_run("duckdb:%s" % database, extra=", record->>'coupon' AS coupon") == 0
-    assert "coupon" in dict((name, kind) for name, kind, *_ in _query(database, "DESCRIBE shop.orders"))
+    assert "coupon" in {name: kind for name, kind, *_ in _query(database, "DESCRIBE shop.orders")}
     before = _query(database, "SELECT count(*), max(coupon) FROM shop.orders")
     code = wh_run("duckdb:%s" % database, extra=", (record->>'coupon')::BIGINT AS coupon")
     assert code == 1
@@ -258,7 +261,7 @@ def test_duckdb_expands_home_before_reading_state(api, tmp_path, monkeypatch):
     assert cli.main(["run", str(path), "--output", output]) == 0
     assert _days(api) == DAYS
     assert cli.main(["run", str(path), "--output", output]) == 0
-    assert _days(api) == [DAYS[-1]]
+    assert _days(api) == (DAYS[-1],)
     assert _query(home / "w.duckdb", "SELECT count(*), count(distinct id) FROM client_a.orders") == [(2, 2)]
 
 
@@ -289,7 +292,7 @@ def test_uuid_columns_are_stored_as_text(wh_run, tmp_path):
     database = tmp_path / "warehouse.duckdb"
     uuid = "5b8e6c2f-4a2e-4d3a-9b1a-2f0e1c3d4b5a"
     assert wh_run("duckdb:%s" % database, extra=", '%s'::UUID AS u" % uuid) == 0
-    types = dict((name, kind) for name, kind, *_ in _query(database, "DESCRIBE shop.orders"))
+    types = {name: kind for name, kind, *_ in _query(database, "DESCRIBE shop.orders")}
     assert types["u"] == "VARCHAR"
     assert _query(database, "SELECT DISTINCT u FROM shop.orders") == [(uuid,)]
 
@@ -320,11 +323,10 @@ def _ducklake_available():
     """Whether DuckLake can run here: installed now, or installed on first use (CI downloads it)."""
     if importlib.util.find_spec("duckdb") is None:
         return False
-    import duckdb
-    from streamwright.core.outputs.warehouse import _load_ducklake
+
     connection = duckdb.connect(":memory:")
     try:
-        _load_ducklake(connection)
+        load_ducklake(connection)
         return True
     except Exception:
         return False
@@ -345,7 +347,6 @@ def test_ducklake_loads_and_resumes(wh_run, api, tmp_path, monkeypatch):
     _days(api)
     assert wh_run("ducklake:%s:client_a" % catalog) == 0
     assert _days(api) == DAYS[1:]
-    import duckdb
     connection = duckdb.connect(":memory:")
     try:
         connection.execute("LOAD ducklake")
@@ -377,14 +378,23 @@ KEY_ID = "AKIAKEYIDVALUE1"
 SECRET = "s3cr3t-Value/With+Chars"
 TOKEN = "session-token-value-42"
 PASSWORD = "pg-pass-word-99"
-LAKE_ENV = ["STREAMWRIGHT_DUCKLAKE_DATA_PATH", "STREAMWRIGHT_DUCKLAKE_DATA_INLINING_ROW_LIMIT", "STREAMWRIGHT_DUCKLAKE_CATALOG_PASSWORD",
-            "STREAMWRIGHT_DUCKLAKE_CATALOG_SCHEMA", "STREAMWRIGHT_DUCKLAKE_S3_KEY_ID", "STREAMWRIGHT_DUCKLAKE_S3_SECRET",
-            "STREAMWRIGHT_DUCKLAKE_S3_SESSION_TOKEN", "STREAMWRIGHT_DUCKLAKE_S3_REGION", "STREAMWRIGHT_DUCKLAKE_S3_ENDPOINT",
-            "STREAMWRIGHT_DUCKLAKE_S3_URL_STYLE", "STREAMWRIGHT_DUCKLAKE_S3_USE_SSL"]
-LOCALSTACK = {"STREAMWRIGHT_DUCKLAKE_DATA_PATH": "s3://streamwright-warehouse/u1/", "STREAMWRIGHT_DUCKLAKE_S3_ENDPOINT": "localhost:4566",
-              "STREAMWRIGHT_DUCKLAKE_S3_KEY_ID": KEY_ID, "STREAMWRIGHT_DUCKLAKE_S3_SECRET": SECRET,
-              "STREAMWRIGHT_DUCKLAKE_S3_URL_STYLE": "path", "STREAMWRIGHT_DUCKLAKE_S3_USE_SSL": "false"}
-SOURCE = {"name": "shop", "streams": []}
+LAKE_ENV = ("STREAMWRIGHT_DUCKLAKE_DATA_PATH", "STREAMWRIGHT_DUCKLAKE_DATA_INLINING_ROW_LIMIT",
+            "STREAMWRIGHT_DUCKLAKE_CATALOG_PASSWORD",
+            "STREAMWRIGHT_DUCKLAKE_CATALOG_SCHEMA", "STREAMWRIGHT_DUCKLAKE_S3_KEY_ID",
+            "STREAMWRIGHT_DUCKLAKE_S3_SECRET",
+            "STREAMWRIGHT_DUCKLAKE_S3_SESSION_TOKEN", "STREAMWRIGHT_DUCKLAKE_S3_REGION",
+            "STREAMWRIGHT_DUCKLAKE_S3_ENDPOINT",
+            "STREAMWRIGHT_DUCKLAKE_S3_URL_STYLE", "STREAMWRIGHT_DUCKLAKE_S3_USE_SSL")
+LOCALSTACK = MappingProxyType({"STREAMWRIGHT_DUCKLAKE_DATA_PATH": "s3://streamwright-warehouse/u1/",
+                               "STREAMWRIGHT_DUCKLAKE_S3_ENDPOINT": "localhost:4566",
+                               "STREAMWRIGHT_DUCKLAKE_S3_KEY_ID": KEY_ID, "STREAMWRIGHT_DUCKLAKE_S3_SECRET": SECRET,
+                               "STREAMWRIGHT_DUCKLAKE_S3_URL_STYLE": "path",
+                               "STREAMWRIGHT_DUCKLAKE_S3_USE_SSL": "false"})
+
+
+def shop_source():
+    """The source the outputs load (no streams)."""
+    return {"name": "shop", "streams": []}
 
 
 @pytest.fixture
@@ -398,7 +408,7 @@ def lake_env(monkeypatch):
     return setenv
 
 
-class _Recorder(object):
+class _Recorder:
     """A DuckDB connection that records what it is asked (extensions are installed; ATTACH can fail)."""
 
     def __init__(self, fail=None):
@@ -424,7 +434,6 @@ class _Recorder(object):
 
 @pytest.fixture
 def recorder(monkeypatch):
-    import duckdb
     made = []
 
     def connect(*arguments, **options):
@@ -437,7 +446,7 @@ def recorder(monkeypatch):
 
 def test_ducklake_local_catalog_attaches_as_before(lake_env, recorder, tmp_path):
     lake_env({"STREAMWRIGHT_DUCKLAKE_DATA_PATH": str(tmp_path / "data")})
-    output = open_output("ducklake:%s:client_a" % (tmp_path / "c.ducklake"), source=SOURCE)
+    output = open_output("ducklake:%s:client_a" % (tmp_path / "c.ducklake"), source=shop_source())
     output._connect()
     queries = recorder.made[0].queries()
     assert "LOAD ducklake" in queries
@@ -448,8 +457,9 @@ def test_ducklake_local_catalog_attaches_as_before(lake_env, recorder, tmp_path)
 
 
 def test_ducklake_s3_data_path_sets_httpfs_and_a_bound_secret_before_attach(lake_env, recorder, tmp_path, caplog):
-    lake_env(dict(LOCALSTACK, STREAMWRIGHT_DUCKLAKE_S3_REGION="us-east-1", STREAMWRIGHT_DUCKLAKE_S3_SESSION_TOKEN=TOKEN))
-    output = open_output("ducklake:%s" % (tmp_path / "c.ducklake"), source=SOURCE)
+    lake_env(dict(LOCALSTACK, STREAMWRIGHT_DUCKLAKE_S3_REGION="us-east-1",
+                  STREAMWRIGHT_DUCKLAKE_S3_SESSION_TOKEN=TOKEN))
+    output = open_output("ducklake:%s" % (tmp_path / "c.ducklake"), source=shop_source())
     with caplog.at_level(logging.DEBUG, logger="streamwright.output"):
         output._connect()
     calls = recorder.made[0].calls
@@ -459,7 +469,8 @@ def test_ducklake_s3_data_path_sets_httpfs_and_a_bound_secret_before_attach(lake
     secret = next(call for call in calls if call[0].startswith("CREATE"))
     assert secret == ("CREATE OR REPLACE TEMPORARY SECRET streamwright_ducklake_s3 (TYPE s3, KEY_ID ?, SECRET ?, "
                       "SESSION_TOKEN ?, REGION ?, ENDPOINT ?, URL_STYLE ?, USE_SSL ?, SCOPE ?)",
-                      [KEY_ID, SECRET, TOKEN, "us-east-1", "localhost:4566", "path", False, "s3://streamwright-warehouse/"])
+                      [KEY_ID, SECRET, TOKEN, "us-east-1", "localhost:4566", "path", False,
+                       "s3://streamwright-warehouse/"])
     attach = next(query for query in queries if query.startswith("ATTACH"))
     assert attach == ("ATTACH 'ducklake:%s' AS \"streamwright_ducklake\" (DATA_PATH 's3://streamwright-warehouse/u1/', "
                       "DATA_INLINING_ROW_LIMIT 0)" % (tmp_path / "c.ducklake"))
@@ -472,7 +483,7 @@ def test_ducklake_s3_data_path_sets_httpfs_and_a_bound_secret_before_attach(lake
 def test_ducklake_s3_opt_in_without_s3_data_path_and_inlining_override(lake_env, recorder, tmp_path):
     lake_env({"STREAMWRIGHT_DUCKLAKE_S3_ENDPOINT": "minio:9000", "STREAMWRIGHT_DUCKLAKE_S3_USE_SSL": "TRUE",
               "STREAMWRIGHT_DUCKLAKE_DATA_INLINING_ROW_LIMIT": "25"})
-    output = open_output("ducklake:%s" % (tmp_path / "c.ducklake"), source=SOURCE)
+    output = open_output("ducklake:%s" % (tmp_path / "c.ducklake"), source=shop_source())
     output._connect()
     calls = recorder.made[0].calls
     assert ("CREATE OR REPLACE TEMPORARY SECRET streamwright_ducklake_s3 (TYPE s3, ENDPOINT ?, USE_SSL ?)",
@@ -483,50 +494,55 @@ def test_ducklake_s3_opt_in_without_s3_data_path_and_inlining_override(lake_env,
 
 def test_ducklake_s3_data_path_without_settings_loads_httpfs_only(lake_env, recorder, tmp_path):
     lake_env({"STREAMWRIGHT_DUCKLAKE_DATA_PATH": "s3://bucket/lake/"})
-    open_output("ducklake:%s" % (tmp_path / "c.ducklake"), source=SOURCE)._connect()
+    open_output("ducklake:%s" % (tmp_path / "c.ducklake"), source=shop_source())._connect()
     queries = recorder.made[0].queries()
     assert "LOAD httpfs" in queries and not any("SECRET" in query for query in queries)
 
 
 @pytest.mark.parametrize("values, message", [
     ({"STREAMWRIGHT_DUCKLAKE_S3_USE_SSL": "yes"}, "STREAMWRIGHT_DUCKLAKE_S3_USE_SSL: expected true or false"),
-    ({"STREAMWRIGHT_DUCKLAKE_S3_URL_STYLE": "virtual"}, "STREAMWRIGHT_DUCKLAKE_S3_URL_STYLE: expected one of: path, vhost"),
-    ({"STREAMWRIGHT_DUCKLAKE_S3_ENDPOINT": "http://localhost:4566"}, "STREAMWRIGHT_DUCKLAKE_S3_ENDPOINT: expected a host"),
+    ({"STREAMWRIGHT_DUCKLAKE_S3_URL_STYLE": "virtual"},
+     "STREAMWRIGHT_DUCKLAKE_S3_URL_STYLE: expected one of: path, vhost"),
+    ({"STREAMWRIGHT_DUCKLAKE_S3_ENDPOINT": "http://localhost:4566"},
+     "STREAMWRIGHT_DUCKLAKE_S3_ENDPOINT: expected a host"),
     ({"STREAMWRIGHT_DUCKLAKE_S3_REGION": "us east"}, "STREAMWRIGHT_DUCKLAKE_S3_REGION: expected a region"),
     ({"STREAMWRIGHT_DUCKLAKE_S3_KEY_ID": KEY_ID}, "set both or neither"),
     ({"STREAMWRIGHT_DUCKLAKE_S3_SECRET": SECRET}, "set both or neither"),
     ({"STREAMWRIGHT_DUCKLAKE_S3_SESSION_TOKEN": TOKEN}, "SESSION_TOKEN needs"),
     ({"STREAMWRIGHT_DUCKLAKE_DATA_PATH": "s3://"}, "STREAMWRIGHT_DUCKLAKE_DATA_PATH: expected s3://BUCKET/PREFIX/"),
     ({"STREAMWRIGHT_DUCKLAKE_DATA_INLINING_ROW_LIMIT": "-1"}, "expected a whole number >= 0"),
-    ({"STREAMWRIGHT_DUCKLAKE_CATALOG_SCHEMA": "lake meta"}, "STREAMWRIGHT_DUCKLAKE_CATALOG_SCHEMA 'lake meta' is not valid"),
+    ({"STREAMWRIGHT_DUCKLAKE_CATALOG_SCHEMA": "lake meta"},
+     "STREAMWRIGHT_DUCKLAKE_CATALOG_SCHEMA 'lake meta' is not valid"),
     ({"STREAMWRIGHT_DUCKLAKE_CATALOG_PASSWORD": PASSWORD}, "is for a postgres catalog"),
 ])
 def test_ducklake_settings_are_checked_without_showing_credentials(lake_env, tmp_path, values, message):
     lake_env(values)
     with pytest.raises(ValueError) as error:
-        open_output("ducklake:%s" % (tmp_path / "c.ducklake"), source=SOURCE)
+        open_output("ducklake:%s" % (tmp_path / "c.ducklake"), source=shop_source())
     assert message in str(error.value)
     for value in (KEY_ID, SECRET, TOKEN, PASSWORD):
         assert value not in str(error.value)
 
 
 @pytest.mark.parametrize("spec, catalog, schema", [
-    ("ducklake:postgres:dbname=lake host=localhost user=streamwright", "postgres:dbname=lake host=localhost user=streamwright",
-     "shop"),
+    ("ducklake:postgres:dbname=lake host=localhost user=streamwright",
+     "postgres:dbname=lake host=localhost user=streamwright", "shop"),
     ("ducklake:postgres:dbname=lake host=localhost user=streamwright:client_a",
      "postgres:dbname=lake host=localhost user=streamwright", "client_a"),
-    ("ducklake:postgres:postgresql://streamwright@localhost:5432/lake", "postgres:postgresql://streamwright@localhost:5432/lake",
-     "shop"),
+    ("ducklake:postgres:postgresql://streamwright@localhost:5432/lake",
+     "postgres:postgresql://streamwright@localhost:5432/lake", "shop"),
     ("ducklake:postgres:host=~db", "postgres:host=~db", "shop"),
 ])
 def test_ducklake_postgres_catalog_spec_keeps_the_whole_connection_string(lake_env, spec, catalog, schema):
-    output = open_output(spec, source=SOURCE)
+    output = open_output(spec, source=shop_source())
     assert (output.path, output.schema, output.postgres) == (catalog, schema, True)
 
 
 def test_ducklake_postgres_catalog_loads_postgres_and_binds_the_password(lake_env, recorder, caplog):
-    lake_env(dict(LOCALSTACK, STREAMWRIGHT_DUCKLAKE_CATALOG_PASSWORD=PASSWORD, STREAMWRIGHT_DUCKLAKE_CATALOG_SCHEMA="lake_meta"))
-    output = open_output("ducklake:postgres:dbname=lake host=localhost user=streamwright:client_a", source=SOURCE)
+    lake_env(dict(LOCALSTACK, STREAMWRIGHT_DUCKLAKE_CATALOG_PASSWORD=PASSWORD,
+                  STREAMWRIGHT_DUCKLAKE_CATALOG_SCHEMA="lake_meta"))
+    output = open_output("ducklake:postgres:dbname=lake host=localhost user=streamwright:client_a",
+                         source=shop_source())
     with caplog.at_level(logging.DEBUG, logger="streamwright.output"):
         output._connect(read_only=True)
     calls = recorder.made[0].calls
@@ -541,51 +557,132 @@ def test_ducklake_postgres_catalog_loads_postgres_and_binds_the_password(lake_en
         assert value not in caplog.text
 
 
-@pytest.mark.parametrize("dsn", ["dbname=lake password=x user=streamwright", "postgresql://streamwright@h/lake?password=x",
-                                 "PASSWORD = x"])
+@pytest.mark.parametrize("dsn", [
+    "dbname=lake " + "pass" + "word=secret user=streamwright",
+    "postgresql://streamwright@h/lake?" + "pass" + "word=secret",
+    "PASSWORD = x",
+    "dbname=lake ssl" + "pass" + "word=secret",
+    "ssl" + "pass" + "word=secret",
+    "postgres://user:" + "pass" + "@host/db",
+    "postgresql://user:" + "pass" + "@host/db",
+    "postgres://:" + "pass" + "@host/db",
+    "//user:" + "pass" + "@host/db",
+])
 def test_ducklake_postgres_catalog_refuses_a_password_in_the_connection_string(lake_env, dsn):
     with pytest.raises(ValueError) as error:
-        open_output("ducklake:postgres:%s" % dsn, source=SOURCE)
+        open_output("ducklake:postgres:%s" % dsn, source=shop_source())
     assert "STREAMWRIGHT_DUCKLAKE_CATALOG_PASSWORD" in str(error.value) and "=x" not in str(error.value)
 
 
+@pytest.mark.parametrize("dsn", [
+    "postgres://user@host/db",
+    "postgresql://user@host/db",
+])
+def test_ducklake_postgres_catalog_accepts_uri_without_password(lake_env, dsn):
+    out = open_output("ducklake:postgres:%s" % dsn, source=shop_source())
+    assert out.settings["catalog_password"] is None
+
+
+def test_warehouse_initial_state_propagates_non_catalog_exceptions():
+
+
+
+    out = DuckDBOutput("test.duckdb", "main", {"name": "test_source"})
+    mock_con = MagicMock()
+    out._state_connection = MagicMock(return_value=mock_con)
+
+    def exec_cat(q, *args, **kwargs):
+        if "SELECT state FROM" in q:
+            raise duckdb.CatalogException("Table not found")
+        return MagicMock()
+
+    mock_con.execute.side_effect = exec_cat
+    assert out.initial_state() is None
+
+    def exec_io(q, *args, **kwargs):
+        if "SELECT state FROM" in q:
+            raise duckdb.IOException("database is locked")
+        return MagicMock()
+
+    mock_con.execute.side_effect = exec_io
+    with pytest.raises(duckdb.IOException, match="database is locked"):
+        out.initial_state()
+
+
+def test_warehouse_table_columns_reads_tables_and_propagates_errors():
+
+
+
+    out = DuckDBOutput("test.duckdb", "client_a", {"name": "test_source"})
+    with duckdb.connect(":memory:") as connection:
+        connection.execute("CREATE SCHEMA client_a")
+        connection.execute("CREATE TABLE client_a.users (id BIGINT, name VARCHAR)")
+        connection.execute("BEGIN")
+        assert out._table_columns(connection, "missing") is None
+        assert out._table_columns(connection, "users") == {"id": "BIGINT", "name": "VARCHAR"}
+        connection.execute("COMMIT")  # (a missing table does not abort the load's transaction)
+
+    broken = MagicMock()
+    broken.execute.side_effect = duckdb.IOException("disk I/O error")
+    with pytest.raises(duckdb.IOException, match="disk I/O error"):
+        out._table_columns(broken, "users")
+
+
 def test_ducklake_postgres_catalog_without_a_lake_yet_has_no_state(lake_env, recorder):
-    import duckdb
     recorder.fail = duckdb.InvalidInputException(
         "Existing DuckLake at metadata catalog \"postgres:dbname=lake\" does not exist - and creating a new "
         "DuckLake is explicitly disabled")
-    assert open_output("ducklake:postgres:dbname=lake", source=SOURCE).initial_state() is None
+    assert open_output("ducklake:postgres:dbname=lake", source=shop_source()).initial_state() is None
     assert recorder.made[0].closed
     recorder.fail = duckdb.IOException("Unable to connect to Postgres")
     with pytest.raises(duckdb.IOException):
-        open_output("ducklake:postgres:dbname=lake", source=SOURCE).initial_state()
+        open_output("ducklake:postgres:dbname=lake", source=shop_source()).initial_state()
 
 
 def test_ducklake_errors_mask_credentials(lake_env, recorder, tmp_path):
-    import duckdb
     lake_env(LOCALSTACK)
     recorder.fail = duckdb.IOException("HTTP 403: the key %s with secret %s was refused" % (KEY_ID, SECRET))
     with pytest.raises(RuntimeError) as error:
-        open_output("ducklake:%s" % (tmp_path / "c.ducklake"), source=SOURCE)._connect()
+        open_output("ducklake:%s" % (tmp_path / "c.ducklake"), source=shop_source())._connect()
     assert str(error.value) == "IO Error: HTTP 403: the key *** with secret *** was refused" or \
         str(error.value) == "HTTP 403: the key *** with secret *** was refused"
     assert error.value.__suppress_context__
 
 
+def test_ducklake_state_read_errors_mask_credentials(lake_env, tmp_path):
+    lake_env(LOCALSTACK)
+
+    class Unreadable:
+        def execute(self, query, parameters=None):
+            if query.startswith("SELECT state"):
+                raise duckdb.IOException("HTTP 403: the key %s with secret %s was refused" % (KEY_ID, SECRET))
+            return self
+
+        def close(self):
+            pass
+
+    output = open_output("ducklake:%s" % (tmp_path / "c.ducklake"), source=shop_source())
+    output._state_connection = Unreadable
+    with pytest.raises(RuntimeError) as error:
+        output.initial_state()
+    assert KEY_ID not in str(error.value) and SECRET not in str(error.value) and "***" in str(error.value)
+    assert error.value.__suppress_context__
+
+
 def test_state_falls_back_to_the_pre_rename_state_table(tmp_path):
     """A warehouse written before the StreamWright rename keeps its state in _adapt_state: a run resumes from it."""
-    import duckdb
     path = tmp_path / "w.duckdb"
     with duckdb.connect(str(path)) as connection:
         connection.execute("CREATE SCHEMA client_a")
         connection.execute("CREATE TABLE client_a._adapt_state (source VARCHAR, state JSON, "
                            "loaded_at TIMESTAMP WITH TIME ZONE)")
-        connection.execute("INSERT INTO client_a._adapt_state VALUES ('shop', '{\"orders\": {\"day\": \"old\"}}', now())")
+        connection.execute("INSERT INTO client_a._adapt_state VALUES ('shop', '{\"orders\": {\"day\": \"old\"}}', "
+                           "now())")
     output = "duckdb:%s:client_a" % path
-    assert open_output(output, source=SOURCE).initial_state() == {"orders": {"day": "old"}}
+    assert open_output(output, source=shop_source()).initial_state() == {"orders": {"day": "old"}}
     with duckdb.connect(str(path)) as connection:
         connection.execute("CREATE TABLE client_a._streamwright_state (source VARCHAR, state JSON, "
                            "loaded_at TIMESTAMP WITH TIME ZONE)")
-        connection.execute("INSERT INTO client_a._streamwright_state VALUES ('shop', '{\"orders\": {\"day\": \"new\"}}', "
-                           "now())")
-    assert open_output(output, source=SOURCE).initial_state() == {"orders": {"day": "new"}}
+        connection.execute("INSERT INTO client_a._streamwright_state VALUES "
+                           "('shop', '{\"orders\": {\"day\": \"new\"}}', now())")
+    assert open_output(output, source=shop_source()).initial_state() == {"orders": {"day": "new"}}
