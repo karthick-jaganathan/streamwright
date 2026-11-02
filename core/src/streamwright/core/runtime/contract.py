@@ -29,6 +29,7 @@ from streamwright.core.runtime.contract_terms import (
     ALL_ENGINES,
     ENGINES,
     FIELD_TYPES,
+    LOGGER_PATTERN,
     NAME_PATTERN,
     TARGET_PATTERN,
     AdapterLoadError,
@@ -108,6 +109,10 @@ class ConnectorDefinition:
     surface: str | None = None  # "module:function": a pure introspection of the installed library (contract v1.3 §6b)
     # the provider error codes worth retrying by default (data, not code); a stream's `retry.codes` replace them
     retry_codes: tuple[str | int, ...] = ()
+    # the vendor library's logger names (for --log NAME=LEVEL); `streamwright connectors` lists them
+    loggers: tuple[str, ...] = ()
+    # the DuckDB extensions its source and DuckDB adapters load (e.g. httpfs); `streamwright connectors` lists them
+    duckdb_extensions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "engine_limits", tuple(self.engine_limits))
@@ -117,6 +122,13 @@ class ConnectorDefinition:
         object.__setattr__(self, "query_builders", MappingProxyType(dict(self.query_builders)))
         object.__setattr__(self, "secret_key_patterns", tuple(self.secret_key_patterns))
         object.__setattr__(self, "retry_codes", tuple(self.retry_codes))
+        object.__setattr__(self, "loggers", (self.loggers,) if isinstance(self.loggers, str) else tuple(self.loggers))
+        object.__setattr__(self, "duckdb_extensions", tuple(self.duckdb_extensions))
+        if not all(isinstance(name, str) and NAME_PATTERN.match(name) for name in self.duckdb_extensions):
+            raise DefinitionError("connector %s: duckdb_extensions are extension names (e.g. httpfs)" % self.name)
+        if not all(isinstance(name, str) and LOGGER_PATTERN.match(name) for name in self.loggers):
+            raise DefinitionError("connector %s: loggers are logger names (e.g. google.ads.googleads.client)"
+                                  % self.name)
         if not all(isinstance(code, (str, int)) and not isinstance(code, bool) for code in self.retry_codes):
             raise DefinitionError("connector %s: retry_codes are provider error codes (text or integers)" % self.name)
         if not NAME_PATTERN.match(self.name) or not self.title or not self.family:

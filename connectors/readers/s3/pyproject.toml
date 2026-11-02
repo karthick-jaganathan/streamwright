@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-s3"
-version = "0.0.2"
+version = "0.0.3"
 description = "StreamWright - s3 connector (csv, tsv, json, jsonl and parquet objects in Amazon S3 or an S3-compatible store, read with DuckDB)"
 readme = "README.md"
 license = "Apache-2.0"
@@ -23,7 +23,7 @@ classifiers = [
 requires-python = ">=3.11"
 # DuckDB (a core dependency) installs its httpfs extension on the first connect (or ahead of time: INSTALL httpfs)
 dependencies = [
-    "streamwright~=0.1.9",
+    "streamwright~=0.1.10",
 ]
 
 [project.optional-dependencies]

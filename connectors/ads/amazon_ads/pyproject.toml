@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-amazon-ads"
-version = "0.0.2"
+version = "0.0.3"
 description = "StreamWright - Amazon Ads connector"
 readme = "README.md"
 license = "Apache-2.0"
@@ -22,7 +22,7 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "streamwright~=0.1.9",
+    "streamwright~=0.1.10",
 ]
 
 [project.urls]

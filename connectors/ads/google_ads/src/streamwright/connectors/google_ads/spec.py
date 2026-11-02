@@ -54,4 +54,5 @@ CONNECTOR = ConnectorDefinition(
     # gRPC statuses and Google Ads error names worth retrying; a stream's `retry.codes` replace them
     retry_codes=("RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE_EXCEEDED", "INTERNAL", "ABORTED",
                  "RESOURCE_TEMPORARILY_EXHAUSTED", "INTERNAL_ERROR", "TRANSIENT_ERROR"),
+    loggers=("google.ads.googleads.client",),
 )

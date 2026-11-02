@@ -26,8 +26,9 @@ from streamwright.core.jobs.duckdb.adapter import ReadContext, WriteContext
 from streamwright.core.jobs.duckdb.steps import build_step
 from streamwright.core.jobs.policy import SKIPPED, ExecutionPolicy, classify_transient, guard
 from streamwright.core.jobs.refs import RefError, decode_value, encode_value
-from streamwright.core.jobs.types import ExecutionResult, WriteReceipt
+from streamwright.core.jobs.types import ExecutionResult, WriteReceipt, written_files
 from streamwright.core.jobs.write_rules import OutputSpec, check_output
+from streamwright.core.runtime.logs.lines import fields
 from streamwright.core.sql.quote import quote_ident
 
 __all__ = ["DuckDBExecutor", "ExecutionError"]
@@ -131,7 +132,11 @@ class DuckDBExecutor:
             if receipt.already_committed:
                 LOG.info("output %s: already committed in an earlier attempt", node.name)
             else:
-                LOG.info("output %s: %s rows to %s", node.name, receipt.rows, receipt.destination)
+                LOG.info("output %s: %s rows to %s", node.name, receipt.rows, receipt.destination,
+                         extra=fields(event="output_end", export=node.name, records=receipt.rows))
+                for path in written_files(receipt):
+                    LOG.info("output %s: wrote %s", node.name, path,
+                             extra=fields(event="output_file", export=node.name, path=path))
         return ExecutionResult(schema_signatures=tuple(run.schema_signatures),
                                schema_reports=tuple(run.schema_reports))
 

@@ -16,4 +16,5 @@ CONNECTOR = ConnectorDefinition(
     connection=http.auth_fields(("oauth2_refresh_token", "bearer"), secrets=("client_id",)),
     operations=(http.REQUEST,),
     adapters={"source": "streamwright.core.io.http:HttpSourceAdapter"},
+    loggers=("streamwright.network", "urllib3"),
 )

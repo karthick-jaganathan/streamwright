@@ -51,4 +51,5 @@ CONNECTOR = ConnectorDefinition(
         "spark": "streamwright.connectors.google_sheets.engines.spark:GoogleSheetsSparkAdapter",
     },
     validator="streamwright.connectors.google_sheets.client:validate_connection",
+    loggers=("streamwright.network", "urllib3", "google.auth"),  # HTTP client calls; google.auth: token refresh
 )

@@ -34,4 +34,5 @@ CONNECTOR = ConnectorDefinition(
         "spark": "streamwright.connectors.postgres.engines.spark:PostgresSparkAdapter",
     },
     validator="streamwright.connectors.postgres.client:validate_connection",
+    duckdb_extensions=("postgres",),
 )

@@ -38,6 +38,7 @@ __all__ = [
     "Message",
     "Observation",
     "WriteReceipt",
+    "written_files",
 ]
 
 CONTRACT_VERSION = "1"
@@ -57,6 +58,15 @@ class Observation:
     """Metrics gathered by a write (the commit's own metrics, for example)."""
     name: str
     values: Mapping[str, Any]
+
+
+def written_files(receipt):
+    """The files a write named beyond its destination (a file_name template's file, or split_by's files)."""
+    if isinstance(receipt, dict):
+        files, destination = receipt.get("files") or (), receipt.get("destination")
+    else:
+        files, destination = receipt.files, receipt.destination
+    return [path for path in files if path != destination]
 
 
 @dataclass(frozen=True)

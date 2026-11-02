@@ -2,6 +2,7 @@
 
 import argparse
 
+from streamwright.core.cli.log_options import add_log_options
 from streamwright.core.jobs.inputs import InputError
 from streamwright.core.jobs.inputs import parse_set as parse_job_set
 
@@ -19,13 +20,28 @@ def parse_set(text):
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+JOB_OPTION = "job_option"
+
+
+def resolve_job(parser, args):
+    """The job path of JOB or --job JOB (one of them, or both the same); a usage error otherwise."""
+    option = getattr(args, JOB_OPTION, None)
+    if args.job and option and args.job != option:
+        parser.error("pass the job once: JOB or --job JOB")
+    args.job = args.job or option
+    if not args.job:
+        parser.error("a job manifest is required: JOB or --job JOB")
+    return args.job
+
+
 def add_job_arguments(parser):
     """Add common job manifest and execution options to an argparse parser."""
-    parser.add_argument("job", metavar="JOB")
+    parser.add_argument("job", nargs="?", metavar="JOB", help="the job manifest (a YAML file or its folder)")
+    parser.add_argument("--job", "-j", dest=JOB_OPTION, metavar="JOB", help="the job manifest, as an option")
     parser.add_argument("--overlay", action="append", default=[], metavar="FILE")
     parser.add_argument("--config", metavar="FILE")
     parser.add_argument("--set", action="append", default=[], type=parse_set, metavar="NAME=VALUE")
     parser.add_argument("--allow-connector", action="append", default=[], metavar="NAME")
-    parser.add_argument("--log-level", metavar="LEVEL")
     parser.add_argument("--strict", action="store_true")
+    add_log_options(parser)
     return parser

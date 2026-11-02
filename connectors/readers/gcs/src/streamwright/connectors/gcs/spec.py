@@ -26,4 +26,5 @@ CONNECTOR = ConnectorDefinition(
         "spark": "streamwright.connectors.gcs.engines.spark:GcsSparkAdapter",
     },
     validator="streamwright.connectors.gcs.client:validate_connection",
+    duckdb_extensions=("httpfs",),
 )

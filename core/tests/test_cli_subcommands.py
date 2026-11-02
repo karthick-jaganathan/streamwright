@@ -73,6 +73,23 @@ def test_job_kind_routes_by_manifest_without_engine_import(tmp_path, monkeypatch
     assert cli.detect_kind(str(manifest)) == "NewJob"
 
 
+def test_job_option_routes_like_the_job_path(tmp_path, capsys, monkeypatch):
+    manifest = tmp_path / "job.yaml"
+    manifest.write_text("kind: NewJob\n")
+    received = []
+    ep, _ = entry("NewJob", plugins.JOB_KINDS, FakeEngine("NewJob", received))
+    monkeypatch.setattr(plugins, "entry_point_source", lambda: {plugins.JOB_KINDS: [ep]})
+    for argv in (["run", "--job", str(manifest)], ["validate", "-j", str(manifest)],
+                 ["plan", "--job=%s" % manifest], ["run", str(manifest), "--job", str(manifest)]):
+        assert cli.main(argv) == 0 and received[-1] == argv
+    source = tmp_path / "source.yaml"
+    source.write_text("kind: source\n")
+    assert cli.main(["run", "--job", str(source)]) == 2
+    assert cli.main(["run"]) == 2
+    error = capsys.readouterr().err
+    assert "is not a job manifest" in error and "run needs a SOURCE, or --job JOB" in error
+
+
 def test_a_job_kind_must_target_a_job_engine_of_that_kind(tmp_path, capsys, monkeypatch):
     manifest = tmp_path / "job.yaml"
     manifest.write_text("kind: NewJob\n")

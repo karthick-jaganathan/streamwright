@@ -74,4 +74,5 @@ CONNECTOR = ConnectorDefinition(
         "spark": "streamwright.connectors.mongodb.engines.spark:MongoDBSparkAdapter",
     },
     validator="streamwright.connectors.mongodb.client:validate_connection",
+    loggers=("pymongo",),
 )

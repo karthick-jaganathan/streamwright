@@ -12,11 +12,14 @@ import subprocess
 import sys
 import threading
 import time
+from importlib import metadata
 from types import MappingProxyType, SimpleNamespace
 
+import duckdb
 import pytest
 
 from streamwright.core import cli
+from streamwright.core.cli.commands import connectors as connectors_command
 from streamwright.core.engine.responses import summarize as job_summary
 from streamwright.core.engine.runner import SourceError, SourceRunner
 from streamwright.core.net.http import Redactor, error_excerpt
@@ -605,7 +608,7 @@ TOKEN_SDK = ConnectorDefinition(
     name="token_sdk", title="Token SDK", family="test",
     connection=(Field("api_secret", "string", required=True, secret=True),),
     operations=(Operation(service="Reports", method="list", arguments=(Field("day", "string"),)),),
-    adapters={"source": __name__ + ":TokenSourceAdapter"})
+    adapters={"source": __name__ + ":TokenSourceAdapter"}, loggers=("token_sdk.wire",))
 
 
 @pytest.fixture
@@ -681,22 +684,51 @@ def test_a_log_config_file_gets_sdk_lines_redacted(token_sdk, tmp_path, capsys):
     assert_no_secrets(text, (SDK_TOKEN, "api-secret-31"))
 
 
-def test_connectors_lists_the_connectors_by_family(token_sdk, capsys, monkeypatch):
-
+def test_connectors_shows_the_connectors_as_pip_show_does(token_sdk, capsys, monkeypatch):
     calls = []
     dist = SimpleNamespace(name="demo-package", version="1.0", metadata={"StreamWright-SDK-Version": "1.0"})
     entry = SimpleNamespace(name="metadata_only", dist=dist, value="demo:Connector",
                             load=lambda: calls.append("loaded"))
     monkeypatch.setattr(plugins, "entry_point_source", lambda: {plugins.CONNECTORS: [entry]})
     assert cli.main(["connectors"]) == 0
-    lines = [line.strip() for line in capsys.readouterr().out.splitlines()]
-    row = lines[lines.index("test:") + 1]
-    # contract v1.2 §6a: a source-only connector is reachable by the job engines through call steps
-    assert row.startswith("token_sdk") and "Token SDK" in row and "registered in-process" in row
-    assert row.endswith("[source, duckdb (call), spark (call)]")
-    assert any(line.startswith("metadata_only") and "targets the pre-contract connector API" in line
-               for line in lines[lines.index("unavailable:"):])
+    blocks = [block.strip().splitlines() for block in capsys.readouterr().out.split("---")]
+    token = next(block for block in blocks if block[0] == "Name: token_sdk")
+    assert token == ["Name: token_sdk", "Title: Token SDK", "Family: test", "Summary:",
+                     "Package: (registered in-process)", "Version:", "Libraries:", "DuckDB-Extensions:",
+                     "Loggers: token_sdk.wire"]  # the SDK's loggers, for --log
+    broken = next(block for block in blocks if block[0] == "Name: metadata_only")
+    assert blocks[-1] == broken and "targets the pre-contract connector API" in broken[1]  # listed last
     assert calls == ["loaded"]  # a connector's spec is imported to list it (nothing else is)
+
+    assert cli.main(["connectors", "token_sdk"]) == 0  # installed names: only those, as `pip show NAME`
+    assert capsys.readouterr().out.splitlines()[0] == "Name: token_sdk"
+
+
+def test_connectors_lists_the_libraries_a_connector_uses(monkeypatch):
+    requires = ["vendor-sdk>=2.0", "streamwright~=0.1.9", "gone_sdk", "pyspark>=3.5; extra == \"spark\""]
+    versions = {"vendor-sdk": "2.4.1"}
+
+    def version(name):
+        if name not in versions:
+            raise metadata.PackageNotFoundError(name)
+        return versions[name]
+
+    monkeypatch.setattr(metadata, "requires", lambda distribution: requires)
+    monkeypatch.setattr(metadata, "version", version)
+    assert connectors_command.libraries("streamwright-vendor") == ["vendor-sdk==2.4.1", "gone_sdk (not installed)"]
+    # logging on streamwright.network: it calls through StreamWright's HTTP client, built on requests
+    versions["requests"] = "2.32.0"
+    assert connectors_command.libraries("streamwright-vendor", ("streamwright.network",))[-1] == "requests==2.32.0"
+    assert connectors_command.libraries(None) == []
+
+
+def test_connectors_lists_the_duckdb_extensions_a_connector_loads():
+    extensions = connectors_command.DuckDBExtensions()
+    assert extensions.describe(()) == (None, [])
+    library, described = extensions.describe(("postgres", "no_such_extension"))
+    # an alias resolves to the extension's name; its version, or that it is not installed yet
+    assert library == "duckdb==%s" % duckdb.__version__ and described[0].startswith("postgres_scanner")
+    assert described[1] == "no_such_extension (not installed)"
 
 
 def test_connector_tokens_are_masked_through_the_context():

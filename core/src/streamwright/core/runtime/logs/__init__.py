@@ -23,7 +23,7 @@ Logs go to stderr; stdout is for Singer messages. streamwright's loggers:
 - `streamwright.network` (WARNING by default, so quiet): INFO, one line per API call - HTTP requests and connector SDK
   calls - and the throttling waits; WARNING, retries; DEBUG, the HTTP headers (credentials masked) and bodies.
 - `streamwright.output`: the files and tables written.
-SDK loggers keep their own names (Connector.network_loggers lists a connector's, for `streamwright connectors`).
+SDK loggers keep their own names (ConnectorDefinition.loggers lists a connector's, for `streamwright connectors`).
 
 - LogSetup: one command's logging - streamwright's stderr handler in the text or JSON format (--log-format) or a
   logging.config.dictConfig file's handlers (--log-config), the levels (--log-level for the `streamwright` loggers,

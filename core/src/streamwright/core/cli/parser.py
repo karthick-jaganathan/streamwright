@@ -20,7 +20,7 @@
 import argparse
 
 from streamwright.core.cli.commands import jobs
-from streamwright.core.cli.jobs import add_job_arguments
+from streamwright.core.cli.jobs import JOB_OPTION, add_job_arguments
 from streamwright.core.cli.log_options import add_log_options, key_value
 from streamwright.core.config.inputs import SECRET_ENV_PREFIX
 from streamwright.core.runtime import plugins
@@ -43,8 +43,13 @@ def build_parser():
     run = commands.add_parser("run", help="run a source and write its records",
                               description="Run a source. Records go to stdout as Singer messages unless --output "
                                           "names a folder for files or a warehouse; logs go to stderr.")
-    run.add_argument("source", metavar="SOURCE",
-                     help="a source folder (source.yaml and one file per stream in streams/) or a source file")
+    run.add_argument("source", nargs="?", metavar="SOURCE",
+                     help="a source folder (source.yaml and one file per stream in streams/) or a source file; or a "
+                          "job manifest (kind: DuckDBJob, SparkJob), which runs on its engine")
+    run.add_argument("--job", "-j", dest=JOB_OPTION, metavar="JOB",
+                     help="a job manifest (kind: DuckDBJob, SparkJob) to run on its engine, e.g. "
+                          "sw run --job jobs/campaigns.yaml (the same as passing it as the path); the job engine's "
+                          "options apply: sw duckdb run --help, sw spark run --help")
     run.add_argument("--config", metavar="FILE",
                      help="YAML/JSON file with `config` (values for spec.config) and `streams` (streams/exports to "
                           "run), e.g. one client's settings for the source")
@@ -85,8 +90,8 @@ def build_parser():
     add_log_options(run)
 
     conn = commands.add_parser("connectors",
-                               help="list, find or install connectors (bare: the installed connectors and their "
-                                    "SDK loggers)")
+                               help="show, list, find or install connectors (bare or NAME ...: the installed "
+                                    "connectors, their libraries, DuckDB extensions and loggers)")
     conn.add_argument("-ls", "--list", action="store_true", dest="flag_list",
                       help="list catalog and installed connectors")
     conn.add_argument("-i", "--install", nargs="+", dest="flag_install", metavar="KEY",
@@ -94,9 +99,10 @@ def build_parser():
     conn.add_argument("-s", "-f", "--search", "--find", nargs="+", dest="flag_search", metavar="TEXT",
                       help="find/search connectors in the catalog by keyword")
     conn.add_argument("action", nargs="?", metavar="{ls,i,find}",
-                      help="ls (catalog + installed), -i KEY (install), or find TEXT (search catalog)")
+                      help="ls (catalog + installed), -i KEY (install), find TEXT (search catalog), or installed "
+                           "connector names (show them, like pip show)")
     conn.add_argument("query", nargs="*", metavar="KEY|TEXT",
-                      help="connector keys (install: one or more) or search words")
+                      help="connector keys (install, show: one or more) or search words")
     conn.add_argument("--yes", action="store_true", help="skip the confirmation prompt when installing")
     conn.add_argument("--hub-url", metavar="URL",
                       help="the connector hub (default: $STREAMWRIGHT_HUB_URL, else the live StreamWright hub; when "

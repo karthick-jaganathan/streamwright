@@ -36,4 +36,5 @@ CONNECTOR = ConnectorDefinition(
     # DuckDB's mysql extension has no MERGE / ON CONFLICT: merges run on the Spark engine
     engine_limits=(EngineLimit(engine="duckdb", operation=databases.WRITE.name,
                                choices={"mode": ("append", "overwrite")}),),
+    duckdb_extensions=("mysql",),
 )

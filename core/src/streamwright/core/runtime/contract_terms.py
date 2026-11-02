@@ -23,6 +23,7 @@ NAME_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]*$")
 # a vendor-native key or alias (kafka `fetch.wait.max.ms`, boto3 `MaxNumberOfMessages`): mixed case, dots allowed
 VENDOR_KEY_PATTERN: Final = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*$")
 TARGET_PATTERN: Final = re.compile(r"^[A-Za-z_][\w.]*:[A-Za-z_]\w*$")
+LOGGER_PATTERN: Final = re.compile(r"^[A-Za-z_][\w-]*(\.[A-Za-z_][\w-]*)*$")  # a dotted logger name
 SECRET_REFERENCE: Final = re.compile(r"^\s*\{\{\s*secrets\.[A-Za-z_][A-Za-z0-9_]*\s*\}\}\s*$")
 SECRET_MENTION: Final = re.compile(r"\{\{\s*secrets\b")
 REFERENCE: Final = re.compile(r"\{\{.*?\}\}")

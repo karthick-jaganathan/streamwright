@@ -331,6 +331,15 @@ silently ignored. Which provider error codes are worth retrying is data, not cod
 `ConnectorDefinition.retry_codes`, every `ConnectorError` carries all of its provider `codes`, and a `retry.codes` list
 replaces the defaults (one rule for streams, steps and outputs: `net.policies.retryable_error`).
 
+A connector built on a vendor library names that library's loggers in `ConnectorDefinition.loggers`
+(e.g. `("google.ads.googleads.client",)`). These are data: `streamwright connectors` lists them, with
+the installed versions of the libraries the connector's distribution requires, so users know what to
+pass to `--log NAME=LEVEL`. A connector that calls over StreamWright's HTTP client declares
+`streamwright.network` (and `urllib3`, the logger of `requests`); the listing then shows `requests` too.
+A connector whose source or DuckDB adapter loads DuckDB extensions names them in
+`ConnectorDefinition.duckdb_extensions` (e.g. `("httpfs",)`); the listing shows DuckDB's version and each
+extension's installed build.
+
 **Engine reach: every engine can use every connector.** A connector supports an engine in one of two ways:
 
 - **natively**, through an adapter for that engine (`adapters["duckdb"]`, `adapters["spark"]`): bulk or distributed

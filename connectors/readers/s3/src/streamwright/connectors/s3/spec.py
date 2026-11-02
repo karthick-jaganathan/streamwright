@@ -32,4 +32,5 @@ CONNECTOR = ConnectorDefinition(
         "spark": "streamwright.connectors.s3.engines.spark:S3SparkAdapter",
     },
     validator="streamwright.connectors.s3.client:validate_connection",
+    duckdb_extensions=("httpfs",),
 )

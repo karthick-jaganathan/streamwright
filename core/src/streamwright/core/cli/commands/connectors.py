@@ -17,41 +17,113 @@
 
 """`streamwright connectors`: the installed connectors, and the catalog's (list, search, install)."""
 
+import re
 import sys
+from importlib import metadata
+
+import duckdb
 
 from streamwright.core import catalog
 from streamwright.core.runtime import components, plugins
-from streamwright.core.runtime.definitions import engine_reach
+from streamwright.core.runtime.logs.lines import NETWORK
+
+_REQUIREMENT_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
+# a connector that logs on streamwright.network calls through StreamWright's HTTP client, which is built on requests
+HTTP_CLIENT_LIBRARY = "requests"
 
 
-def _connector_lines():
+def _installed(name):
+    try:
+        return "%s==%s" % (name, metadata.version(name))
+    except metadata.PackageNotFoundError:
+        return "%s (not installed)" % name
+
+
+def libraries(distribution, loggers=()):
     """
-    The installed (and registered) connectors by family: name, title, distribution and version, and how each engine
-    reaches them — native or via a call step, in the fixed order source, duckdb, spark (only specs are imported).
+    The third-party libraries a connector uses, as "name==version" (or "name (not installed)"): what its distribution
+    requires (not its extras', not StreamWright's), and requests when it calls through StreamWright's HTTP client.
     """
-    metadata = {entry["name"]: entry for entry in plugins.discover(plugins.CONNECTORS)}
-    groups = {}
+    try:
+        requires = (metadata.requires(distribution) or []) if distribution else []
+    except metadata.PackageNotFoundError:
+        requires = []
+    names = []
+    for requirement in requires:
+        spec, _, marker = requirement.partition(";")
+        match = _REQUIREMENT_NAME.match(spec)
+        if "extra" not in marker and match and not match.group(1).lower().startswith("streamwright"):
+            names.append(match.group(1))
+    if NETWORK.name in loggers and HTTP_CLIENT_LIBRARY not in names:
+        names.append(HTTP_CLIENT_LIBRARY)
+    return [_installed(name) for name in names]
+
+
+class DuckDBExtensions:
+    """The installed DuckDB's extensions (one in-memory query, made when a connector names one): name@version."""
+
+    def __init__(self):
+        self._installed = None
+
+    def _load(self):
+        self._installed = {}
+        rows = duckdb.connect().execute(
+            "SELECT extension_name, aliases, installed, extension_version FROM duckdb_extensions()").fetchall()
+        for name, aliases, installed, version in rows:
+            for key in (name, *(aliases or ())):
+                self._installed[key] = (name, version if installed else None)
+        self._installed[None] = ("duckdb", duckdb.__version__)
+
+    def describe(self, names):
+        """("duckdb==VERSION", ["EXTENSION@VERSION" or "EXTENSION (not installed)", ...]); (None, []) for no names."""
+        if not names:
+            return None, []
+        if self._installed is None:
+            self._load()
+        found = []
+        for name in names:
+            extension, version = self._installed.get(name, (name, None))
+            found.append("%s@%s" % (extension, version) if version else "%s (not installed)" % extension)
+        return "duckdb==%s" % self._installed[None][1], found
+
+
+def _fields(name, definition, entry, extensions):
+    """A connector's `pip show`-style fields."""
+    used = libraries(entry.get("distribution"), definition.loggers)
+    duckdb_library, loaded = extensions.describe(definition.duckdb_extensions)
+    return (("Name", name), ("Title", definition.title), ("Family", definition.family),
+            ("Summary", definition.summary), ("Package", entry.get("distribution") or "(registered in-process)"),
+            ("Version", entry.get("version") or ""), ("Libraries", ", ".join(used + [duckdb_library] * bool(loaded))),
+            ("DuckDB-Extensions", ", ".join(loaded)), ("Loggers", ", ".join(definition.loggers)))
+
+
+def _connector_lines(names=None):
+    """
+    The installed (and registered) connectors, sorted by family and name, as `pip show` shows packages (`---` between
+    them): name, title, family, summary, distribution and version, the third-party libraries and DuckDB extensions it
+    uses (installed versions) and its loggers (for --log). `names`: only these. Only specs are imported.
+    """
+    metadata_of = {entry["name"]: entry for entry in plugins.discover(plugins.CONNECTORS)}
+    blocks, extensions = [], DuckDBExtensions()
     for name in components.available():
-        entry = metadata.get(name, {})
-        package = "%s %s" % (entry.get("distribution") or "registered in-process", entry.get("version") or "")
+        if names is not None and name not in names:
+            continue
         try:
             definition = components.load(name)
         except components.ComponentLoadError as exc:
-            groups.setdefault("unavailable", []).append("  %-15s%s" % (name, exc))
+            blocks.append(("~", name, (("Name", name), ("Error", str(exc)))))  # (after the families)
             continue
-        groups.setdefault(definition.family, []).append("  %-15s%-23s%-34s[%s]" % (
-            name, definition.title, package.strip(), ", ".join(engine_reach(definition))))
+        blocks.append((definition.family, name, _fields(name, definition, metadata_of.get(name, {}), extensions)))
     lines = []
-    for family in sorted(groups):
+    for _, _, fields in sorted(blocks, key=lambda block: block[:2]):
         if lines:
-            lines.append("")
-        lines.append("%s:" % family)
-        lines.extend(sorted(groups[family]))
+            lines.append("---")
+        lines.extend(("%s: %s" % (key, value)).rstrip() for key, value in fields)
     return lines
 
 
 def run_connectors_command(args):
-    """`streamwright connectors`: bare = installed list; ls/i/find use the catalog (the hub)."""
+    """`streamwright connectors`: bare or installed names = installed connectors; ls/i/find use the catalog (hub)."""
     if getattr(args, "flag_list", False):
         action = "ls"
         query = []
@@ -82,22 +154,20 @@ def run_connectors_command(args):
             return 2
         return catalog.install_many(query, assume_yes=args.yes, hub_url=args.hub_url)
 
+    words = [action, *query]
     if norm_action in ("find", "search", "s", "-s", "-f", "--find", "--search"):
-        text = " ".join(query)
-        hits = catalog.search(text, args.hub_url)
-        if not hits:
-            print("no connectors match %r" % text)
-            return 0
-        for key, entry in sorted(hits.items()):
-            print("  %-16s %-10s %s" % (key, entry.get("trust", "community"), entry.get("summary", "")))
+        words = query
+    elif set(words) <= set(components.available()):
+        # installed connector names show those connectors, as `pip show NAME` does (`sw connectors google_ads s3`)
+        print("\n".join(_connector_lines(set(words))))
         return 0
+    return _search(" ".join(words), args.hub_url)  # any other words search the catalog (`sw connectors ads`)
 
-    # If action was not a reserved verb, treat it as a direct search query (e.g. `sw connectors ads`)
-    text = " ".join([action, *query])
-    hits = catalog.search(text, args.hub_url)
+
+def _search(text, hub_url):
+    hits = catalog.search(text, hub_url)
     if not hits:
         print("no connectors match %r" % text)
-        return 0
     for key, entry in sorted(hits.items()):
         print("  %-16s %-10s %s" % (key, entry.get("trust", "community"), entry.get("summary", "")))
     return 0

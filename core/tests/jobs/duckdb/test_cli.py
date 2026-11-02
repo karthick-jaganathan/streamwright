@@ -41,6 +41,27 @@ def test_inputs_errors_are_usage_errors(tmp_path, capsys):
     assert "unknown config: nope" in capsys.readouterr().err
 
 
+def test_jobs_take_the_logging_options_of_streamwright_run(tmp_path, capsys):
+    # --log is its own option: not a prefix of --log-level
+    assert main(["validate", _job(tmp_path), "--log-level", "debug", "--log", "streamwright.network=DEBUG",
+                 "--log", "vendor.sdk=INFO", "--log-format", "json", "--log-max-chars", "100"]) == 0
+    with pytest.raises(SystemExit) as usage:
+        main(["validate", _job(tmp_path), "--log", "DEBUG"])
+    assert usage.value.code == 2 and "expected NAME=LEVEL" in capsys.readouterr().err
+
+
+def test_the_job_is_a_path_or_the_job_option(tmp_path, capsys):
+    job = _job(tmp_path)
+    assert main(["validate", "--job", job]) == 0 and main(["plan", "-j", job]) == 0
+    assert main(["validate", job, "--job", job]) == 0
+    for argv in (["validate"], ["validate", job, "--job", str(tmp_path / "other.yaml")]):
+        with pytest.raises(SystemExit) as usage:
+            main(argv)
+        assert usage.value.code == 2
+    error = capsys.readouterr().err
+    assert "a job manifest is required" in error and "pass the job once" in error
+
+
 def test_run_then_list_state(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("STREAMWRIGHT_SECRET_PASSWORD", "x")
     config = tmp_path / "config.yaml"

@@ -25,6 +25,7 @@ import yaml
 from streamwright.core.cli.commands import jobs
 from streamwright.core.cli.commands.connectors import run_connectors_command
 from streamwright.core.cli.commands.source import run
+from streamwright.core.cli.jobs import JOB_OPTION
 from streamwright.core.cli.log_options import log_options, log_setup
 from streamwright.core.cli.parser import build_parser, build_validate_parser, command_parsers
 from streamwright.core.validation import engine
@@ -43,9 +44,14 @@ def _extract_all_paths(args, command="run"):
     index = 0
     while index < len(args):
         item = args[index]
-        option, equals, _ = item.partition("=")
+        option, equals, value = item.partition("=")
         action = options.get(option)
         if action is not None:
+            if action.dest == JOB_OPTION:  # --job JOB: a manifest path too
+                if not equals and index + 1 < len(args):
+                    value = args[index + 1]
+                if value:
+                    paths.append(value)
             if not equals and action.nargs != 0:
                 index += 1
                 if action.nargs in ("+", "*"):
@@ -118,7 +124,7 @@ def _job_kind(argv):
     """The manifest kind of a job command's path (None: a source, or not a job command); raises ValueError."""
     if argv[0] not in ("run", "validate", "plan"):
         return None
-    paths = _extract_all_paths(argv[1:], argv[0])
+    paths = list(dict.fromkeys(_extract_all_paths(argv[1:], argv[0])))  # JOB and --job JOB may name the same
     kinds = {detect_kind(path) for path in paths} - {None, "source"}
     if len(kinds) > 1 or (kinds and len(paths) > 1):
         raise ValueError("a job command requires one manifest kind and path")
@@ -145,6 +151,18 @@ def main(argv=None):
         return run_connectors_command(args)
     if hasattr(args, "command_handler"):
         return args.command_handler(args)
+    return _run_source(args)
+
+
+def _run_source(args):
+    """`streamwright run SOURCE`: a job manifest (JOB or --job JOB) was routed to its engine before."""
+    if getattr(args, JOB_OPTION, None):
+        sys.stderr.write("streamwright: --job %s is not a job manifest (kind: DuckDBJob, SparkJob); run a source "
+                         "as: streamwright run SOURCE\n" % getattr(args, JOB_OPTION))
+        return 2
+    if not args.source:
+        sys.stderr.write("streamwright: run needs a SOURCE, or --job JOB\n")
+        return 2
     setup = log_setup(args)
     if setup is None:
         return 2

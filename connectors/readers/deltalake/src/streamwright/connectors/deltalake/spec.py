@@ -59,4 +59,5 @@ CONNECTOR = ConnectorDefinition(
     validator="streamwright.connectors.deltalake.client:validate_connection",
     engine_limits=(EngineLimit(engine="duckdb", operation=QUERY.name),
                    EngineLimit(engine="spark", operation=QUERY.name)),
+    duckdb_extensions=("delta", "httpfs", "azure")  # delta, and the extension of the table's object store,
 )

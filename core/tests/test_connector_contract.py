@@ -75,6 +75,14 @@ def test_definitions_are_frozen_and_checked_when_built():
         EngineCapabilities(engine="cli", operation_kinds=frozenset(), arguments={})
     with pytest.raises(DefinitionError):
         ConnectorDefinition("sample", "Sample", "test", connection=(), operations=(), adapters={"cli": "a:B"})
+    with pytest.raises(DefinitionError, match="duckdb_extensions are extension names"):
+        ConnectorDefinition("sample", "Sample", "test", connection=(), operations=(), adapters={},
+                            duckdb_extensions=("http fs",))
+    with pytest.raises(DefinitionError, match="loggers are logger names"):
+        ConnectorDefinition("sample", "Sample", "test", connection=(), operations=(), adapters={},
+                            loggers=("vendor sdk",))
+    assert ConnectorDefinition("sample", "Sample", "test", connection=(), operations=(), adapters={},
+                               loggers="vendor.sdk").loggers == ("vendor.sdk",)
     with pytest.raises(AttributeError):
         SAMPLE.name = "other"
     with pytest.raises(TypeError):

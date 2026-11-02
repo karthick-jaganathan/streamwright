@@ -45,4 +45,5 @@ CONNECTOR = ConnectorDefinition(
     # Graph API error codes worth retrying (throttling, temporary errors); a stream's `retry.codes` replace them
     retry_codes=(1, 2, 4, 17, 32, 341, 613, 80000, 80001, 80002, 80003, 80004, 80005, 80006, 80008, 80009, 80014),
     surface="streamwright.connectors.meta_ads.client:surface",
+    loggers=("urllib3",)  # facebook_business sends its requests through requests/urllib3,
 )

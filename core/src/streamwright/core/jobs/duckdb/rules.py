@@ -34,6 +34,12 @@ __all__ = ["KIND", "DuckDBRules"]
 
 KIND = "DuckDBJob"
 _TEXT = Field("string")
+FILE_NAME_HELP = (
+    "file outputs: the file's name inside `path` (then a folder). Placeholders: {today} and {now}/{batch_ts}, the "
+    "batch's UTC date and time, with offsets and strftime formats ({today-1d:%Y%m%d}, {now+2h:%Y%m%d%H%M%S}; "
+    "offsets +/-N with s m h d w); {batch_id}; {seq}, the split's 5-digit number; and the split_by columns ({col}). "
+    "No '/', and at least one placeholder"
+)
 # the execution-policy vocabulary (contract v1.2 §6a), accepted structurally on steps and outputs
 _POLICY_FIELDS = MappingProxyType({
     "retry": Field("object"), "rate_limit": Field("object"), "paginator": Field("object"),
@@ -51,7 +57,9 @@ _COLUMN_GROUP = Field("object", fields={
     "keep_nulls": Field("boolean")})
 _STEP_FIELDS = MappingProxyType({
     "name": Field("string", required=True, pattern=NAME_PATTERN), "description": _TEXT,
-    "sql": Field("string", description="DuckDB SQL over earlier steps (in call/source steps: over `records`)"),
+    "sql": Field("string", description="DuckDB SQL over earlier steps; in a call or source step, over the table "
+                                       "`records`, whose one column `record` (JSON) holds each record: extract "
+                                       "scalars with ->> (record->>'$.campaign.id'), which returns VARCHAR, not JSON"),
     "materialize": Field("string", enum=("view", "table")),
     "connection": _TEXT,
     "path": Field("string", description="a file, glob or {{ step.column }} (relative to the connection's roots)"),
@@ -71,7 +79,11 @@ _STEP_FIELDS = MappingProxyType({
     "paginator": Field("object"), "retry": Field("object"), "rate_limit": Field("object"),
     "page_size": _POLICY_FIELDS["page_size"], "on_error": _TEXT, "timeout": _POLICY_FIELDS["timeout"],
     "partitions": Field("array", items=_named(**{"from": Field("string", required=True),
-                                                  "field": Field("string", required=True), "name": _TEXT})),
+                                                  "field": Field("string", required=True), "name": _TEXT}),
+                        description="call steps: one call per distinct value of `field` in the step `from` (crossed "
+                                    "when several), read as {{ partition.NAME }} in the call's arguments (`name` "
+                                    "defaults to `field`). The values are not columns of `records`: request the key "
+                                    "in the call and extract it from `record`"),
     "source": Field("string", description="a StreamWright source folder (relative to the job's folder)"),
     "stream": _TEXT, "config": Field("object"),
 })
@@ -84,8 +96,14 @@ _OUTPUT_FIELDS = MappingProxyType({
     "when_matched": Field("array", items=Field("object")), "when_not_matched": Field("array", items=Field("object")),
     "when_not_matched_by_source": Field("array", items=Field("object")),
     "schema_evolution": Field("string", enum=("strict", "add_columns")),
-    "partition_by": Field("array", items=_TEXT), "split_by": Field("array", items=_TEXT),
-    "file_name": _TEXT, "layout": _TEXT, "options": Field("object"),
+    "partition_by": Field("array", items=_TEXT, description="file outputs: Hive folders (col=value/) under `path`"),
+    "split_by": Field("array", items=_TEXT,
+                      description="file outputs: one file per distinct combination of these columns; file_name and "
+                                  "layout may use {col} (with a format, {col:%Y%m%d}, for a date or timestamp column)"),
+    "file_name": Field("string", description=FILE_NAME_HELP),
+    "layout": Field("string", description="the subfolders of file_name's file under `path`; the placeholders of "
+                                          "file_name, and '/', e.g. {today:%Y/%m} or client={client_id}"),
+    "options": Field("object"),
     **_POLICY_FIELDS,
 })
 _RUNTIME = _named(

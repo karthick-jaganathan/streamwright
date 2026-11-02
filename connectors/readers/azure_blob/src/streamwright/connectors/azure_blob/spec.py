@@ -38,4 +38,5 @@ CONNECTOR = ConnectorDefinition(
     validator="streamwright.connectors.azure_blob.client:validate_connection",
     # DuckDB's azure extension cannot COPY to Azure storage
     engine_limits=(EngineLimit(engine="duckdb", operation=files.WRITE.name),),
+    duckdb_extensions=("azure",),
 )

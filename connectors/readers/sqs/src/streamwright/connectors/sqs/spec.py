@@ -44,4 +44,5 @@ CONNECTOR = ConnectorDefinition(
         "spark": "streamwright.connectors.sqs.engines.spark:SqsSparkAdapter",
     },
     validator="streamwright.connectors.sqs.client:validate_connection",
+    loggers=("botocore",),
 )

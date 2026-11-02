@@ -4,7 +4,9 @@ import os
 
 import duckdb
 import pytest
+import yaml
 
+from streamwright.core.jobs.duckdb.cli import main
 from streamwright.core.jobs.duckdb.engine import JobInvalidError, run_job
 
 ROWS = "SELECT * FROM (VALUES (1, 'US', 'a'), (2, 'CA', 'b'), (3, 'US', 'c')) t(id, country, v)"
@@ -55,6 +57,24 @@ def test_split_by_writes_one_named_file_per_split_and_keeps_the_column(tmp_path)
     folder = tmp_path / "lake" / "export"
     assert sorted(os.listdir(folder)) == ["sales_CA_00001.csv", "sales_US_00002.csv"]
     assert (folder / "sales_US_00002.csv").read_text().splitlines() == ["id,country,v", "1,US,a", "3,US,c"]
+
+
+def test_the_run_reports_and_logs_the_files_it_wrote(tmp_path, caplog, capsys):
+    output = {"connection": "lake", "path": "export", "format": "csv", "mode": "overwrite", "split_by": ["country"],
+              "file_name": "sales_{country}_{seq}.csv"}
+    folder = tmp_path / "lake" / "export"
+    files = [str(folder / "sales_CA_00001.csv"), str(folder / "sales_US_00002.csv")]
+    with caplog.at_level("INFO", logger="streamwright.duckdb"):
+        result = _run(_job(tmp_path, output))
+    assert result.locations == {"out": files}
+    assert [record.path for record in caplog.records if getattr(record, "event", None) == "output_file"] == files
+    assert "output out: wrote %s" % files[0] in caplog.text
+
+    job = tmp_path / "job.yaml"
+    job.write_text(yaml.safe_dump(_job(tmp_path, {"connection": "lake", "path": "one.csv", "format": "csv",
+                                                  "mode": "overwrite"})))
+    assert main(["run", str(job)]) == 0
+    assert "3 rows -> %s" % (tmp_path / "lake" / "one.csv") in capsys.readouterr().out
 
 
 def test_file_name_without_split_by_names_the_one_file_in_its_folder(tmp_path):

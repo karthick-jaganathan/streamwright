@@ -55,4 +55,5 @@ CONNECTOR = ConnectorDefinition(
     # SOAP error codes (InternalError, CallRateExceeded, ConcurrentRequestOverLimit) and OAuth errors worth
     # retrying; a stream's `retry.codes` replace them
     retry_codes=(0, 117, 207, "temporarily_unavailable", "server_error"),
+    loggers=("suds.client", "suds.transport")  # bingads SOAP messages and HTTP,
 )

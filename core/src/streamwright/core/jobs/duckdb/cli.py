@@ -22,7 +22,8 @@ The DuckDBJob command line (registered for `kind: DuckDBJob` in the `streamwrigh
   plan JOB
   run JOB [--secrets FILE] [--dry-run]
   state list|retry|abandon JOB [--batch ID] [--secrets FILE]
-  (every command: --config FILE, --set NAME=VALUE, --overlay FILE, --allow-connector NAME, --strict, --log-level)
+  (every command: --config FILE, --set NAME=VALUE, --overlay FILE, --allow-connector NAME, --strict, and the logging
+  options of `streamwright run`: --log-level, --log NAME=LEVEL, --log-format, --log-config, --log-max-chars)
 
 The job options, exit codes and logging are the shared ones of `streamwright.core.cli.jobs`: 0 success, 1 invalid
 job or failed run, 2 usage or input error. Validation and planning never need secret values.
@@ -31,14 +32,14 @@ job or failed run, 2 usage or input error. Validation and planning never need se
 import argparse
 import sys
 
-from streamwright.core.cli.jobs import FAILURE, INVALID_INPUT, SUCCESS, add_job_arguments
+from streamwright.core.cli.jobs import FAILURE, INVALID_INPUT, SUCCESS, add_job_arguments, resolve_job
+from streamwright.core.cli.log_options import log_setup
 from streamwright.core.config.inputs import InputError, read_values_file
 from streamwright.core.jobs.duckdb.engine import JobInvalidError, job_state, redactor, run_job, validate_job
 from streamwright.core.jobs.inputs import read_config_values
 from streamwright.core.jobs.manifest import JobError
 from streamwright.core.jobs.runner import owner_id
 from streamwright.core.jobs.state import StateError
-from streamwright.core.runtime.logs import LogSetup
 
 __all__ = ["main"]
 
@@ -100,8 +101,16 @@ def _cmd_run(args):
     for name, rows in sorted(result.outputs.items()):
         if name in result.skipped:
             sys.stdout.write("  %-28s already committed in an earlier attempt\n" % name)
-        else:
-            sys.stdout.write("  %-28s %s rows\n" % (name, "?" if rows is None else rows))
+            continue
+        locations = [location for location in result.locations.get(name, ()) if location]
+        written = "%s rows" % ("?" if rows is None else rows)
+        if len(locations) == 1:
+            written += " -> %s" % locations[0]
+        elif locations:
+            written += " -> %d files" % len(locations)
+        sys.stdout.write("  %-28s %s\n" % (name, written))
+        if len(locations) > 1:
+            sys.stdout.writelines("      %s\n" % location for location in locations)
     if result.exit_code:
         _err("Run failed: %s" % (result.error or "see the log"))
     return result.exit_code
@@ -146,25 +155,26 @@ def _inputs(parser, secrets=False):
 
 
 def _build_parser(prog):
-    parser = argparse.ArgumentParser(prog=prog, description="StreamWright DuckDBJob engine.")
+    # no prefix matching: --log must not be taken for --log-level
+    parser = argparse.ArgumentParser(prog=prog, description="StreamWright DuckDBJob engine.", allow_abbrev=False)
     sub = parser.add_subparsers(dest="subcommand")
-    validate = sub.add_parser("validate", help="check a DuckDBJob manifest (no secrets needed)")
+    validate = sub.add_parser("validate", allow_abbrev=False, help="check a DuckDBJob manifest (no secrets needed)")
     validate.add_argument("--graph", action="store_true", help="print the plan of a valid job")
     _inputs(validate)
-    validate.set_defaults(func=_cmd_validate)
-    plan = sub.add_parser("plan", help="print the execution plan (no secrets needed)")
+    validate.set_defaults(func=_cmd_validate, parser=validate)
+    plan = sub.add_parser("plan", allow_abbrev=False, help="print the execution plan (no secrets needed)")
     _inputs(plan)
-    plan.set_defaults(func=_cmd_plan)
-    run = sub.add_parser("run", help="run a DuckDBJob (unfinished batches resume first)")
+    plan.set_defaults(func=_cmd_plan, parser=plan)
+    run = sub.add_parser("run", allow_abbrev=False, help="run a DuckDBJob (unfinished batches resume first)")
     run.add_argument("--dry-run", action="store_true", help="check and plan, write nothing")
     _inputs(run, secrets=True)
-    run.set_defaults(func=_cmd_run)
-    state = sub.add_parser("state", help="list, retry or abandon a job's batches (runtime.state)")
+    run.set_defaults(func=_cmd_run, parser=run)
+    state = sub.add_parser("state", allow_abbrev=False, help="list, retry or abandon a job's batches (runtime.state)")
     state.add_argument("action", choices=["list", "retry", "abandon"])
     state.add_argument("--batch", help="the batch id (retry, abandon)")
     state.add_argument("--limit", type=int, default=20, help="batches to list")
     _inputs(state, secrets=True)
-    state.set_defaults(func=_cmd_state)
+    state.set_defaults(func=_cmd_state, parser=state)
     return parser
 
 
@@ -174,10 +184,9 @@ def main(argv=None, prog="streamwright"):
     if not getattr(args, "func", None):
         parser.print_help()
         return INVALID_INPUT
-    try:
-        args.log_setup = LogSetup(args.log_level)
-    except ValueError as exc:
-        _err("Error: %s" % exc)
+    resolve_job(args.parser, args)
+    args.log_setup = log_setup(args)
+    if args.log_setup is None:
         return INVALID_INPUT
     try:
         return args.func(args)

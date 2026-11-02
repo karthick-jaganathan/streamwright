@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-deltalake"
-version = "0.0.2"
+version = "0.0.3"
 description = "StreamWright - Delta Lake connector (Delta table reads and queries; DuckDBJob and SparkJob appends, overwrites and merges)"
 readme = "README.md"
 license = "Apache-2.0"
@@ -23,7 +23,7 @@ classifiers = [
 requires-python = ">=3.11"
 # DuckDB is provided by streamwright (duckdb>=1.5.2)
 dependencies = [
-    "streamwright~=0.1.9",
+    "streamwright~=0.1.10",
 ]
 
 [project.optional-dependencies]

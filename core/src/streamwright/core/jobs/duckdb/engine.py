@@ -42,6 +42,7 @@ from streamwright.core.jobs.refs import resolve
 from streamwright.core.jobs.runner import Runner
 from streamwright.core.jobs.schema import json_schema as generate_schema
 from streamwright.core.jobs.state import DEFAULT_SCHEMA, open_sqlite, open_store
+from streamwright.core.jobs.types import written_files
 from streamwright.core.runtime.redact import Redactor
 
 __all__ = [
@@ -78,6 +79,8 @@ class RunResult:
     outputs: dict[str, int | None] = field(default_factory=dict)      # output -> rows, from the receipts
     skipped: set[str] = field(default_factory=set)                    # outputs already committed in an earlier attempt
     error: str | None = None
+    # output -> where it wrote: its files (a file_name template's, split_by's), else its destination
+    locations: dict[str, list[str]] = field(default_factory=dict)
 
 
 def _providers(job):
@@ -236,14 +239,16 @@ def _run(raw, *, config, secret_map, allowed_connectors, dry_run, base_dir, reda
                         engine_metadata={"engine": "duckdb"})
         session.start_clock()
         code = runner.run(mode="once", run_key=state.get("run_key"), max_messages=0 if resume_only else 500)
-        outputs = {}
+        outputs, locations = {}, {}
         skipped = set()
         for batch_id in runner.processed:
             for name, receipt in store.get_receipts(job["name"], batch_id).items():
                 outputs[name] = receipt.get("rows")
+                locations[name] = written_files(receipt) or [receipt.get("destination")]
                 if receipt.get("already_committed"):
                     skipped.add(name)
-        return RunResult(code, job["name"], plan.describe(), list(runner.processed), outputs, skipped, runner.error)
+        return RunResult(code, job["name"], plan.describe(), list(runner.processed), outputs, skipped, runner.error,
+                         locations)
     finally:
         session.close()
 
