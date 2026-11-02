@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-google-sheets"
-version = "0.0.3"
+version = "0.0.1"
 description = "StreamWright - Google Sheets connector (read-only row streaming from spreadsheets via Google Sheets API v4)"
 readme = "README.md"
 license = "Apache-2.0"

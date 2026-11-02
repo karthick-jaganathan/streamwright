@@ -6,46 +6,49 @@ arguments}`) can make. Each folder is its own distribution, installed only where
 a vendor SDK. Four reader connectors read files, object storage and databases the same way, with DuckDB instead of a
 vendor SDK: `files` (local files), `s3` and `gcs` (object storage) and `postgres` (PostgreSQL).
 
-| Folder | Package | Connector | SDK | SDK loggers |
+| Folder | Package | Connector | Libraries | Loggers (for `--log`) |
 |---|---|---|---|---|
 | [google_ads](ads/google_ads/README.md) | `streamwright-google-ads` | `google_ads` | google-ads | `google.ads.googleads.client` |
 | [microsoft_ads](ads/microsoft_ads/README.md) | `streamwright-microsoft-ads` | `microsoft_ads` | bingads | `suds.client`, `suds.transport` |
-| [meta_ads](ads/meta_ads/README.md) | `streamwright-meta-ads` | `meta_ads` | facebook_business | `urllib3.connectionpool` |
-| [openai_ads](ads/openai_ads/README.md) | `streamwright-openai-ads` | `openai_ads` | requests | `urllib3.connectionpool` |
-| [linkedin_ads](ads/linkedin_ads/README.md) | `streamwright-linkedin-ads` | `linkedin_ads` | requests | `urllib3.connectionpool` |
-| [amazon_ads](ads/amazon_ads/README.md) | `streamwright-amazon-ads` | `amazon_ads` | requests | `urllib3.connectionpool` |
-| [apple_ads](ads/apple_ads/README.md) | `streamwright-apple-ads` | `apple_ads` | requests | `urllib3.connectionpool` |
+| [meta_ads](ads/meta_ads/README.md) | `streamwright-meta-ads` | `meta_ads` | facebook_business | `urllib3` |
+| [openai_ads](ads/openai_ads/README.md) | `streamwright-openai-ads` | `openai_ads` | requests | `streamwright.network`, `urllib3` |
+| [linkedin_ads](ads/linkedin_ads/README.md) | `streamwright-linkedin-ads` | `linkedin_ads` | requests | `streamwright.network`, `urllib3` |
+| [amazon_ads](ads/amazon_ads/README.md) | `streamwright-amazon-ads` | `amazon_ads` | requests | `streamwright.network`, `urllib3` |
+| [apple_ads](ads/apple_ads/README.md) | `streamwright-apple-ads` | `apple_ads` | requests | `streamwright.network`, `urllib3` |
 | [files](readers/files/README.md) | `streamwright-files` | `files` | duckdb | - |
-| [s3](readers/s3/README.md) | `streamwright-s3` | `s3` | duckdb (its httpfs extension) | - |
-| [gcs](readers/gcs/README.md) | `streamwright-gcs` | `gcs` | duckdb (its httpfs extension) | - |
-| [azure_blob](readers/azure_blob/README.md) | `streamwright-azure-blob` | `azure_blob` | duckdb (its azure extension) | - |
-| [postgres](readers/postgres/README.md) | `streamwright-postgres` | `postgres` | duckdb (its postgres extension) | - |
-| [mysql](readers/mysql/README.md) | `streamwright-mysql` | `mysql` | duckdb (its mysql extension) | - |
-| [mongodb](readers/mongodb/README.md) | `streamwright-mongodb` | `mongodb` | pymongo | - |
-| [deltalake](readers/deltalake/README.md) | `streamwright-deltalake` | `deltalake` | duckdb (its delta extension) | - |
-| [google_sheets](readers/google_sheets/README.md) | `streamwright-google-sheets` | `google_sheets` | google-auth | `google.auth` |
-| [restapi](http/restapi/README.md) | `streamwright-restapi` | `restapi` | requests | `streamwright.network` |
+| [s3](readers/s3/README.md) | `streamwright-s3` | `s3` | duckdb (httpfs) | - |
+| [gcs](readers/gcs/README.md) | `streamwright-gcs` | `gcs` | duckdb (httpfs) | - |
+| [azure_blob](readers/azure_blob/README.md) | `streamwright-azure-blob` | `azure_blob` | duckdb (azure) | - |
+| [postgres](readers/postgres/README.md) | `streamwright-postgres` | `postgres` | duckdb (postgres) | - |
+| [mysql](readers/mysql/README.md) | `streamwright-mysql` | `mysql` | duckdb (mysql) | - |
+| [mongodb](readers/mongodb/README.md) | `streamwright-mongodb` | `mongodb` | pymongo | `pymongo` |
+| [deltalake](readers/deltalake/README.md) | `streamwright-deltalake` | `deltalake` | duckdb (delta, httpfs, azure) | - |
+| [google_sheets](readers/google_sheets/README.md) | `streamwright-google-sheets` | `google_sheets` | google-auth, requests | `streamwright.network`, `urllib3`, `google.auth` |
+| [kafka](readers/kafka/README.md) | `streamwright-kafka` | `kafka` | confluent-kafka | - |
+| [sqs](readers/sqs/README.md) | `streamwright-sqs` | `sqs` | boto3 | `botocore` |
+| [restapi](http/restapi/README.md) | `streamwright-restapi` | `restapi` | requests | `streamwright.network`, `urllib3` |
 
 ```bash
 make install-connectors         # all of them, from the repository root; or: pip install ./connectors/ads/google_ads
-make install-files           # one of them: install-files, install-s3, install-gcs, install-postgres, ...
-streamwright connectors                # the installed connectors, with their SDK loggers
+make install-files              # one of them: install-files, install-s3, install-gcs, install-postgres, ...
+streamwright connectors         # the installed connectors, as pip show shows packages
 ```
 
 ```text
-$ streamwright connectors
-advertising:
-  meta_ads — Meta Ads (facebook-business SDK) (SDK loggers: urllib3.connectionpool)
-  google_ads — Google Ads (GAQL via the google-ads SDK) (SDK loggers: google.ads.googleads.client)
-  microsoft_ads — Microsoft Advertising (Bing Ads SDK) (SDK loggers: suds.client, suds.transport)
-databases:
-  postgres — PostgreSQL tables, read-only
-files:
-  files — Local files: CSV, JSON, JSONL, Parquet, TSV
-object storage:
-  gcs — Google Cloud Storage objects
-  s3 — Amazon S3 objects (DuckDB httpfs)
+$ streamwright connectors google_ads
+Name: google_ads
+Title: Google Ads
+Family: advertising
+Summary: Google Ads API campaigns, ad groups, keywords and metrics through GAQL
+Package: streamwright-google-ads
+Version: 0.0.1
+Libraries: google-ads==33.0.0
+DuckDB-Extensions:
+Loggers: google.ads.googleads.client
 ```
+
+Connectors are installed from the [hub](https://github.com/karthick-jaganathan/streamwright-hub), which pins each one
+to a tag or commit of this repository; their version stays `0.0.1` until they are published to PyPI.
 
 An SDK's loggers show its own request and response logs, redacted like streamwright's lines; streamwright never turns them on. Name
 them with `--log` (each connector's README has an example):

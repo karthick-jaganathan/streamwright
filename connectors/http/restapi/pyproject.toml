@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-restapi"
-version = "0.0.3"
+version = "0.0.1"
 description = "StreamWright - Generic REST API / HTTP connector"
 readme = "README.md"
 license = "Apache-2.0"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-files"
-version = "0.0.3"
+version = "0.0.1"
 description = "StreamWright - files connector (local csv, tsv, json, jsonl and parquet files read with DuckDB)"
 readme = "README.md"
 license = "Apache-2.0"

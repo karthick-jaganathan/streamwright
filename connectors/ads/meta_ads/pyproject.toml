@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-meta-ads"
-version = "0.0.4"
+version = "0.0.1"
 description = "StreamWright - Meta Ads connector (the meta_ads auth provider and Marketing API reads)"
 readme = "README.md"
 license = "Apache-2.0"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-azure-blob"
-version = "0.0.3"
+version = "0.0.1"
 description = "StreamWright - azure_blob connector (csv, tsv, json, jsonl and parquet objects in Azure Blob Storage, read with DuckDB)"
 readme = "README.md"
 license = "Apache-2.0"

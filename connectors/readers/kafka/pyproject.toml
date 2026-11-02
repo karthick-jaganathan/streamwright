@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-kafka"
-version = "0.0.3"
+version = "0.0.1"
 description = "StreamWright - kafka connector (read-only peek at the messages of a Kafka topic; the Spark runner consumes with offsets of its own)"
 readme = "README.md"
 license = "Apache-2.0"

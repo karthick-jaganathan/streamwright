@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-sqs"
-version = "0.0.3"
+version = "0.0.1"
 description = "StreamWright - sqs connector (read-only peek at the messages of an Amazon SQS queue; nothing is deleted)"
 readme = "README.md"
 license = "Apache-2.0"

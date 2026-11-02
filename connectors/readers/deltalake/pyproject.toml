@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-deltalake"
-version = "0.0.3"
+version = "0.0.1"
 description = "StreamWright - Delta Lake connector (Delta table reads and queries; DuckDBJob and SparkJob appends, overwrites and merges)"
 readme = "README.md"
 license = "Apache-2.0"

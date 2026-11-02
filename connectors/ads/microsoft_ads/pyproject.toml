@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright-microsoft-ads"
-version = "0.0.4"
+version = "0.0.1"
 description = "StreamWright - Microsoft Advertising connector (the microsoft_ads auth provider, SOAP requests and reports)"
 readme = "README.md"
 license = "Apache-2.0"
