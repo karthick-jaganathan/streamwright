@@ -63,7 +63,7 @@ COMPANIONS ?= ../streamwright-spark ../streamwright-mcp
 check-vendored:
 	@for repo in $(COMPANIONS); do \
 		copy="$$repo/scripts/check_code_standards.py"; \
-		if [ -d "$$repo" ]; then \
+		if [ -f "$$copy" ]; then \
 			cmp scripts/check_code_standards.py "$$copy" || { echo "$$copy differs from scripts/check_code_standards.py"; exit 1; }; \
 			echo "$$copy is identical"; \
 		else echo "skipped $$repo (not checked out)"; fi; \
