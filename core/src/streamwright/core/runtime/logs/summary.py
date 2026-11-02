@@ -22,6 +22,26 @@ import json
 import os
 import tempfile
 
+LOG_SUMMARY = "-"  # a bare --summary: the summary as a log line
+
+
+def log_summary(logger, summary):
+    """The run summary as one INFO log line of compact JSON (event `run_summary`), on the command's log handlers."""
+    logger.info("run summary: %s", json.dumps(summary, separators=(",", ":"), default=str),
+                extra={"event": "run_summary"})
+
+
+def summary_problem(path):
+    """Why --summary FILE cannot be written (checked before a run starts), or None."""
+    if not path or path == LOG_SUMMARY:
+        return None
+    if os.path.isdir(path):
+        return "--summary %s is a folder" % path
+    folder = os.path.dirname(os.path.abspath(path))
+    if not os.path.isdir(folder):
+        return "--summary %s: the folder %s does not exist" % (path, folder)
+    return None
+
 
 def write_summary(path, summary):
     """Writes the run summary as JSON to `path`, atomically (a temporary file in its folder, then renamed)."""

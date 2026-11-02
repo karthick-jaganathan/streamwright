@@ -57,7 +57,7 @@ from streamwright.core.runtime.logs.metrics import RunMetrics, StreamMetrics
 from streamwright.core.runtime.logs.network import http_details, http_summary, request_details, sdk_summary
 from streamwright.core.runtime.logs.redaction import mask_form, mask_headers, mask_text, mask_url, sensitive
 from streamwright.core.runtime.logs.setup import LogSetup
-from streamwright.core.runtime.logs.summary import write_summary
+from streamwright.core.runtime.logs.summary import LOG_SUMMARY, log_summary, summary_problem, write_summary
 
 __all__ = [
     "DEFAULT_MAX_CHARS",
@@ -65,6 +65,7 @@ __all__ = [
     "FORMATS",
     "LEVELS",
     "LOG",
+    "LOG_SUMMARY",
     "NETWORK",
     "PROGRESS_PAGES",
     "PROGRESS_SECONDS",
@@ -78,6 +79,7 @@ __all__ = [
     "http_details",
     "http_summary",
     "level_number",
+    "log_summary",
     "mask_form",
     "mask_headers",
     "mask_text",
@@ -85,6 +87,7 @@ __all__ = [
     "request_details",
     "sdk_summary",
     "sensitive",
+    "summary_problem",
     "write_summary",
 ]
 

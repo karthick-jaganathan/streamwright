@@ -52,6 +52,9 @@ def _extract_all_paths(args, command="run"):
                     value = args[index + 1]
                 if value:
                     paths.append(value)
+            if action.nargs == "?" and not equals and (index + 1 >= len(args) or args[index + 1].startswith("-")):
+                index += 1  # an optional value that is not given (a bare --summary)
+                continue
             if not equals and action.nargs != 0:
                 index += 1
                 if action.nargs in ("+", "*"):

@@ -20,7 +20,7 @@ The DuckDBJob command line (registered for `kind: DuckDBJob` in the `streamwrigh
 
   validate JOB [--graph]
   plan JOB
-  run JOB [--secrets FILE] [--dry-run]
+  run JOB [--secrets FILE] [--dry-run] [--summary FILE]
   state list|retry|abandon JOB [--batch ID] [--secrets FILE]
   (every command: --config FILE, --set NAME=VALUE, --overlay FILE, --allow-connector NAME, --strict, and the logging
   options of `streamwright run`: --log-level, --log NAME=LEVEL, --log-format, --log-config, --log-max-chars)
@@ -30,6 +30,7 @@ job or failed run, 2 usage or input error. Validation and planning never need se
 """
 
 import argparse
+import logging
 import sys
 
 from streamwright.core.cli.jobs import FAILURE, INVALID_INPUT, SUCCESS, add_job_arguments, resolve_job
@@ -40,8 +41,12 @@ from streamwright.core.jobs.inputs import read_config_values
 from streamwright.core.jobs.manifest import JobError
 from streamwright.core.jobs.runner import owner_id
 from streamwright.core.jobs.state import StateError
+from streamwright.core.runtime import logs
+from streamwright.core.runtime.logs.lines import iso_time, utc_now
 
 __all__ = ["main"]
+
+LOG = logging.getLogger("streamwright.duckdb")
 
 
 def _err(text):
@@ -91,13 +96,54 @@ def _cmd_plan(args):
     return SUCCESS
 
 
+def _run_summary(args, result, started_at, failure):
+    """The --summary of a job run: status, times, job, batches, each output's rows and files, and the error."""
+    finished_at = utc_now()
+    outputs = [{"name": name, "rows": rows, "files": [location for location in result.locations.get(name, ())
+                                                       if location],
+                "already_committed": name in result.skipped}
+               for name, rows in sorted(result.outputs.items())] if result is not None else []
+    summary = {"status": "ok" if failure is None and result is not None and not result.exit_code else "failed",
+               "started_at": iso_time(started_at), "finished_at": iso_time(finished_at),
+               "duration_s": round((finished_at - started_at).total_seconds(), 3),
+               "job": result.job_name if result else None, "manifest": args.job, "dry_run": args.dry_run,
+               "batches": list(result.batches) if result else [], "outputs": outputs}
+    if summary["status"] != "ok":
+        if failure is not None and not isinstance(failure, Exception):
+            error = "interrupted"
+        elif failure is not None:
+            error = "%s: %s" % (type(failure).__name__, failure)
+        else:
+            error = result.error or "the run failed"
+        summary["error"] = args.log_setup.message(error)
+    return summary
+
+
 def _cmd_run(args):
-    result = run_job(args.job, config=_config(args), secrets=_secrets(args), overlays=args.overlay,
-                     allowed_connectors=_allowed(args), dry_run=args.dry_run, strict=args.strict)
+    problem = logs.summary_problem(args.summary)
+    if problem:
+        _err("Error: %s" % problem)
+        return INVALID_INPUT
+    started_at, result, failure, summary_written = utc_now(), None, None, True
+    try:
+        result = run_job(args.job, config=_config(args), secrets=_secrets(args), overlays=args.overlay,
+                         allowed_connectors=_allowed(args), dry_run=args.dry_run, strict=args.strict)
+    except BaseException as exc:
+        failure = exc
+        raise
+    finally:
+        if args.summary == logs.LOG_SUMMARY:  # a bare --summary: a log line, whatever the outcome
+            logs.log_summary(LOG, _run_summary(args, result, started_at, failure))
+        elif args.summary:
+            try:
+                logs.write_summary(args.summary, _run_summary(args, result, started_at, failure))
+            except (OSError, TypeError, ValueError) as exc:
+                _err("Error: could not write the summary %s: %s" % (args.summary, exc))
+                summary_written = False
     sys.stdout.write("Job: %s\n" % result.job_name)
     if args.dry_run:
         sys.stdout.write(result.plan + "\n")
-        return SUCCESS
+        return SUCCESS if summary_written else FAILURE
     for name, rows in sorted(result.outputs.items()):
         if name in result.skipped:
             sys.stdout.write("  %-28s already committed in an earlier attempt\n" % name)
@@ -113,7 +159,7 @@ def _cmd_run(args):
             sys.stdout.writelines("      %s\n" % location for location in locations)
     if result.exit_code:
         _err("Run failed: %s" % (result.error or "see the log"))
-    return result.exit_code
+    return result.exit_code or (SUCCESS if summary_written else FAILURE)
 
 
 def _cmd_state(args):
@@ -167,6 +213,10 @@ def _build_parser(prog):
     plan.set_defaults(func=_cmd_plan, parser=plan)
     run = sub.add_parser("run", allow_abbrev=False, help="run a DuckDBJob (unfinished batches resume first)")
     run.add_argument("--dry-run", action="store_true", help="check and plan, write nothing")
+    run.add_argument("--summary", nargs="?", const=logs.LOG_SUMMARY, metavar="FILE",
+                     help="also write the run's summary as JSON to FILE, atomically, whatever the outcome: status (ok "
+                          "or failed), times, the batches, each output's rows and files, and the error; a bare "
+                          "--summary logs it instead, as one INFO line of compact JSON (event run_summary)")
     _inputs(run, secrets=True)
     run.set_defaults(func=_cmd_run, parser=run)
     state = sub.add_parser("state", allow_abbrev=False, help="list, retry or abandon a job's batches (runtime.state)")

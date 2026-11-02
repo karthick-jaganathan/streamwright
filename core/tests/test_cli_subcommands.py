@@ -82,6 +82,8 @@ def test_job_option_routes_like_the_job_path(tmp_path, capsys, monkeypatch):
     for argv in (["run", "--job", str(manifest)], ["validate", "-j", str(manifest)],
                  ["plan", "--job=%s" % manifest], ["run", str(manifest), "--job", str(manifest)]):
         assert cli.main(argv) == 0 and received[-1] == argv
+    for argv in (["run", "--summary", "--job", str(manifest)], ["run", "--job", str(manifest), "--summary"]):
+        assert cli.main(argv) == 0 and received[-1] == argv  # a bare --summary takes no path
     source = tmp_path / "source.yaml"
     source.write_text("kind: source\n")
     assert cli.main(["run", "--job", str(source)]) == 2

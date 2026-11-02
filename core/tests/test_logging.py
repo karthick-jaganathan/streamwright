@@ -931,6 +931,8 @@ def test_the_summary_of_a_run_that_cannot_start(api, tmp_path, monkeypatch, caps
 
     code, _, err = run_cli(capsys, path, "--summary", tmp_path / "nowhere" / "run.json")
     assert code == 2 and "the folder %s does not exist" % (tmp_path / "nowhere") in err and api.requests == []
+    code, _, err = run_cli(capsys, path, "--summary")  # bare: a log line (a source's stdout carries its records)
+    assert code == 2 and 'run summary: {"status":"failed"' in err and api.requests == []
 
 
 # * ----------------------------------

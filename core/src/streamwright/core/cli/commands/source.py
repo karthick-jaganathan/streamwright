@@ -102,18 +102,6 @@ def _load_state(path):
     return state.get("value", state) if state.get("type") == "STATE" else state
 
 
-def _summary_problem(path):
-    """Why --summary FILE cannot be written (checked before the run starts), or None."""
-    if not path:
-        return None
-    if os.path.isdir(path):
-        return "--summary %s is a folder" % path
-    folder = os.path.dirname(os.path.abspath(path))
-    if not os.path.isdir(folder):
-        return "--summary %s: the folder %s does not exist" % (path, folder)
-    return None
-
-
 def run(args, logging_setup=None):
     """
     streamwright run. Whatever the outcome, a run that started logs its end (RunMetrics.finish), and --summary FILE is
@@ -121,7 +109,7 @@ def run(args, logging_setup=None):
     the loggers' levels and handlers can drop - redacted and cut as log lines are. `logging_setup`: the command's
     logs.LogSetup, which gets the run's Redactor and the network loggers of the source's connector.
     """
-    problem = _summary_problem(getattr(args, "summary", None))
+    problem = logs.summary_problem(getattr(args, "summary", None))
     if problem:
         LOG.error("%s", problem)
         return 2
@@ -150,7 +138,10 @@ def run(args, logging_setup=None):
                     messages.append(message)
             metrics.error = "; ".join(messages) or None
             try:
-                logs.write_summary(args.summary, metrics.summary())
+                if args.summary == logs.LOG_SUMMARY:  # a bare --summary: a log line (stdout carries the records)
+                    logs.log_summary(LOG, metrics.summary())
+                else:
+                    logs.write_summary(args.summary, metrics.summary())
             except (OSError, TypeError, ValueError) as exc:
                 LOG.error("could not write the summary %s: %s", args.summary, exc)
                 code = 1 if code == 0 else code

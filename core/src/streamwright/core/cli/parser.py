@@ -23,7 +23,7 @@ from streamwright.core.cli.commands import jobs
 from streamwright.core.cli.jobs import JOB_OPTION, add_job_arguments
 from streamwright.core.cli.log_options import add_log_options, key_value
 from streamwright.core.config.inputs import SECRET_ENV_PREFIX
-from streamwright.core.runtime import plugins
+from streamwright.core.runtime import logs, plugins
 from streamwright.core.validation import engine
 
 
@@ -83,10 +83,11 @@ def build_parser():
                           "EXPORT.TIMESTAMP.UNIQUE.jsonl, or .csv, .tsv, .parquet)")
     run.add_argument("--allow-connector", action="append", dest="allowed_connectors", metavar="NAME",
                      help="allow only this connector (repeatable); by default any installed connector can be used")
-    run.add_argument("--summary", metavar="FILE",
+    run.add_argument("--summary", nargs="?", const=logs.LOG_SUMMARY, metavar="FILE",
                      help="also write the run's summary as JSON to FILE, atomically, whatever the outcome: status "
                           "(ok or failed), times, the streams' counts (partitions, windows, pages, requests, retries, "
-                          "records read and written), the outputs written, the state's bookmarks and the error")
+                          "records read and written), the outputs written, the state's bookmarks and the error; a "
+                          "bare --summary logs it instead, as one INFO line of compact JSON (event run_summary)")
     add_log_options(run)
 
     conn = commands.add_parser("connectors",
