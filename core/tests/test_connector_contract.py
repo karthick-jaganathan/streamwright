@@ -245,7 +245,8 @@ def test_entry_points_naming_a_definition_bind_to_the_engines_without_importing_
         load_definition("old", entry_points=source)
     adapters, missing = load_adapters(["sample", "old", "absent"], entry_points=source)
     assert adapters == {} and "does not support the duckdb engine" in missing["sample"]
-    assert "pre-contract connector API" in missing["old"] and "streamwright connectors install absent" in missing["absent"]
+    assert "pre-contract connector API" in missing["old"]
+    assert "streamwright connectors install absent" in missing["absent"]
     assert [item["name"] for item in engine_connectors("source", entry_points=source)] == ["sample"]
     # contract v1.2 §6a: a job engine reaches a source-only connector through a call step
     duckdb_reach = engine_connectors("duckdb", entry_points=source)

@@ -24,10 +24,9 @@ from types import MappingProxyType
 import pytest
 
 from streamwright.connectors.files import CONNECTOR
-from streamwright.core.jobs.duckdb.adapter import AdapterError
 from streamwright.core.jobs.duckdb.definition_adapter import DefinitionDuckDBAdapter
 from streamwright.core.sdk.contract import resolve_values
-from streamwright.core.sdk.engines.duckdb import DuckDBWriteAdapter, ReadContext
+from streamwright.core.sdk.engines.duckdb import AdapterError, DuckDBWriteAdapter, ReadContext
 from streamwright.core.sdk.testing import DuckDBAdapterContract, DuckDBRules, Session, check_job, run_job
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))

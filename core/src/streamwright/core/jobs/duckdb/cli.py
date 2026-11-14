@@ -280,12 +280,12 @@ Print a valid job's execution plan: its steps and outputs in dependency order, w
 Run a DuckDBJob: the batches its runtime.state scope left unfinished resume first (a failed one is abandoned by
 default; --failed-job-policy retry resumes it, block stops the run), then new batches run.
 A job
-that consumes a broker (a step with method: consume, e.g. Kafka or SQS) polls a batch of messages, commits its
+that consumes a broker (a step with method: consume) polls a batch of messages, commits its
 outputs and outbox events, then acknowledges the messages; --drain, --available-now and --follow make more batches.
 
   streamwright duckdb run jobs/orders.yaml --secrets secrets.yaml --set client=acme
-  streamwright duckdb run jobs/kafka_orders.yaml --drain --max-messages 1000 --summary
-  streamwright duckdb run jobs/kafka_orders.yaml --follow --interval 30s""",
+  streamwright duckdb run jobs/order_events.yaml --drain --max-messages 1000 --summary
+  streamwright duckdb run jobs/order_events.yaml --follow --interval 30s""",
 })
 
 

@@ -41,10 +41,10 @@ _CONNECTORS_DESCRIPTION = """\
 Show the installed connectors, or list, find and install connectors from the hub's catalog.
 
   streamwright connectors                     the installed connectors: version, libraries, DuckDB extensions, loggers
-  streamwright connectors google_ads          one or more installed connectors, in detail (like pip show)
+  streamwright connectors postgres            one or more installed connectors, in detail (like pip show)
   streamwright connectors ls                  the catalog and what is installed (-ls, --list)
   streamwright connectors find ads            search the catalog (-s, -f, --search, --find)
-  streamwright connectors -i google_ads --yes install from the hub (i KEY ...)"""
+  streamwright connectors -i postgres --yes   install from the hub (i KEY ...)"""
 
 
 def build_plan_parser():

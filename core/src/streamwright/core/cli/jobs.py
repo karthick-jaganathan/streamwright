@@ -97,8 +97,8 @@ def add_batch_arguments(parser):
                       help="jobs that consume a broker: batches until a poll finds no message")
     mode.add_argument("--available-now", action="store_true",
                       help="jobs that consume a broker: batches until the messages there at the start are processed, "
-                           "later ones wait for the next run (Kafka: the end offsets at the start; a broker without "
-                           "them, such as SQS, runs as --drain)")
+                           "later ones wait for the next run (the broker's end offsets at the start; a broker "
+                           "without them runs as --drain)")
     mode.add_argument("--follow", action="store_true",
                       help="jobs that consume a broker: keep polling until interrupted, pausing --interval when a poll "
                            "finds nothing")

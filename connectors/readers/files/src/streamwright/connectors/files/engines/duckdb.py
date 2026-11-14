@@ -23,9 +23,8 @@ from functools import partial
 from typing import Any
 
 from streamwright.core.io import files
-from streamwright.core.jobs.duckdb.adapter import AdapterError
 from streamwright.core.sdk.contract import Operation, ResolvedConnection
-from streamwright.core.sdk.engines.duckdb import DuckDBSession, ReadContext, WriteContext, WriteReceipt
+from streamwright.core.sdk.engines.duckdb import AdapterError, DuckDBSession, ReadContext, WriteContext, WriteReceipt
 
 __all__ = ["FilesDuckDBAdapter"]
 
