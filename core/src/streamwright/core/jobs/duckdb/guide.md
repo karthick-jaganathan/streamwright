@@ -182,6 +182,23 @@ batches, as JSON. A `source` + `stream` step loads its records the same way.
     FROM records
 ```
 
+A REST API connector (an `http.request` connector: restapi, openai_ads, ...) takes a `request` instead of
+`service`/`method`. Its connection holds the authentication keys and the HTTP defaults (`base_url`, `headers`,
+`params_encoding`, `paginator`, `records`, `retry`, `rate_limit`) directly, with no `http:` block; the request's
+`path` is relative to `base_url`, or an absolute URL. Each REST connector's guide has a complete job.
+
+```yaml
+- name: campaigns
+  connection: ads_api            # provider: openai_ads, type: bearer, token, base_url: https://api.ads.openai.com
+  request:
+    path: /v1/campaigns
+    params: {account_id: "{{ config.account_id }}", limit: 100}
+    records: {path: data}        # where the records are in each response
+  paginator: {type: cursor, token_path: last_id, param: after, has_more_path: has_more}
+  retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
+  sql: SELECT record->>'id' AS campaign_id, record->>'name' AS campaign_name FROM records
+```
+
 ## File names
 A file output's `path` is the file; with `file_name` it is the folder, and `file_name` names the file inside it
 (`layout` adds subfolders). With `split_by: [col_a, col_b]` the output writes one file per distinct combination,

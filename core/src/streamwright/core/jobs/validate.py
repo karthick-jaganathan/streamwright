@@ -32,7 +32,7 @@ from streamwright.core.jobs.check import check_job
 from streamwright.core.jobs.inputs import declared_inputs
 from streamwright.core.jobs.locking import check_lock_source
 from streamwright.core.jobs.log_labels import check_log_labels
-from streamwright.core.jobs.lookups.rules import check_lookups
+from streamwright.core.jobs.lookups.rules import check_lookup_drivers, check_lookups
 from streamwright.core.jobs.manifest import JobError, load_job, load_job_text, merge_overlay
 from streamwright.core.jobs.plan import PlanError, build_plan
 from streamwright.core.jobs.refs import input_references, resolve
@@ -56,8 +56,11 @@ class JobReport:
 
     @property
     def run_problems(self):
-        """What stops a run: the problems, and a step or output whose connector is not installed (a warning offline)."""
-        return [issue for issue in self.issues if issue.severity == ERROR or (
+        """
+        What stops a run: the problems, a step or output whose connector is not installed and a database lookup whose
+        driver is not (warnings offline).
+        """
+        return [issue for issue in self.issues if issue.severity == ERROR or issue.code == "driver-not-installed" or (
             issue.code == "connector-not-installed" and issue.path.startswith(("steps", "outputs")))]
 
     @property
@@ -87,9 +90,11 @@ def resolve_for_checks(raw, config=None):
                             dict(config or {}), "config")
     values.update({name: "{{ config.%s }}" % name for name, definition in declared.items()
                    if values[name] is None and (definition or {}).get("required", True)})
-    # a lookup fills these at run time: a stand-in of the type keeps SQL that renders them checkable
-    values.update({name: _STAND_INS.get((definition or {}).get("type"), "lookup") for name, definition
-                   in declared.items() if (definition or {}).get("lookup") and _config_missing(config, name)})
+    # a lookup fills these at run time: a stand-in of the type keeps SQL that renders them checkable; text stays a
+    # reference, which the connector's argument checks (patterns, choices) skip
+    values.update({name: _STAND_INS.get((definition or {}).get("type"), "{{ config.%s }}" % name)
+                   for name, definition in declared.items()
+                   if (definition or {}).get("lookup") and _config_missing(config, name)})
     kept = {name: "{{ secrets.%s }}" % name for name in input_references(raw, "secrets")}
     return resolve(raw, values, kept)
 
@@ -109,6 +114,8 @@ def _report(read, rules_for, config, strict, filename):
                  for text in check_lock_source(raw)]
               + [Issue(ERROR, "bad-lookup", text, filename, ".".join(map(str, path)))
                  for path, text in check_lookups(raw)]
+              + [Issue(ERROR, "driver-not-installed", text, filename, "spec." + ".".join(map(str, path)))
+                 for path, text in check_lookup_drivers(raw)]
               + [Issue(ERROR, "bad-label", text, filename, ".".join(map(str, path)))
                  for path, text in check_log_labels(raw)]
               + check_job(job, rules, filename))

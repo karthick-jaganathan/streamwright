@@ -21,7 +21,7 @@ import re
 from types import MappingProxyType
 
 from streamwright.core.jobs import ingest
-from streamwright.core.jobs.calls import partition_dependencies, partition_problems
+from streamwright.core.jobs.calls import call_problems, connection_problems, partition_dependencies, partition_problems
 from streamwright.core.jobs.check.findings import connections_of
 from streamwright.core.jobs.check.rules import NAME_PATTERN, RESERVED_NAMES, JobRules, input_field, install_hint
 from streamwright.core.jobs.duckdb.steps import (
@@ -222,6 +222,8 @@ class DuckDBRules(JobRules):
                               False))
             if "request" in step and ("service" in step or "method" in step):
                 found.append(("bad-value", "a call is `request` (HTTP) or `service`/`method` (SDK), not both", False))
+            elif provider in self.connectors:
+                found.extend(call_problems(step, connections[step["connection"]]))
         elif kind == CONSUME:
             found.extend(self._adapter(connections, step).check_message(step))
         elif kind == SOURCE and "stream" not in step:
@@ -258,7 +260,7 @@ class DuckDBRules(JobRules):
         if connection["provider"] not in self.connectors:
             return [("connector-not-installed", "provider %r has neither a DuckDB adapter nor a connector "
                      "installed: %s" % (connection["provider"], install_hint(connection["provider"])), False)]
-        return []
+        return connection_problems(connection)
 
     def write_target(self, connection):
         adapter = self.adapters.get(connection["provider"])

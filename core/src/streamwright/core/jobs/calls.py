@@ -30,9 +30,18 @@ import json
 
 from streamwright.core.config.inputs import resolve_inputs
 from streamwright.core.engine.runner import SourceRunner
+from streamwright.core.runtime import components
+from streamwright.core.runtime.contract_validation import check_connection
+from streamwright.core.runtime.source_connectors import select_transport
+from streamwright.core.validation.checker import suggest
 
-__all__ = ["PARTITION_KEYS", "call_records", "ephemeral_source", "partition_dependencies", "partition_problems",
-           "partition_scopes", "record_value", "source_inputs"]
+__all__ = ["HTTP_DEFAULT_KEYS", "PARTITION_KEYS", "call_problems", "call_records", "connection_problems",
+           "ephemeral_source", "partition_dependencies", "partition_problems", "partition_scopes", "record_value",
+           "source_inputs"]
+
+# a call step connection's HTTP defaults (a source's `http:` block), written directly on the connection
+HTTP_DEFAULT_KEYS = ("base_url", "headers", "params_encoding", "paginator", "records", "retry", "rate_limit")
+_ABSOLUTE = ("http://", "https://", "{{")
 
 # a call step's `partitions: [{from, field, name}]`: one call per distinct `field` value of the earlier step `from`
 # (crossed when there are several), the value read as `{{ partition.<name> }}` (`name` defaults to `field`)
@@ -83,8 +92,7 @@ def ephemeral_source(step, connection, scope=None):
             stream[key] = step[key]
     if scope:
         stream["partitions"] = [{"name": name, "values": [value]} for name, value in scope.items()]
-    http = {k: connection[k] for k in ("base_url", "headers", "paginator", "records", "retry", "rate_limit")
-            if k in connection}
+    http = {k: connection[k] for k in HTTP_DEFAULT_KEYS if k in connection}
     auth = {k: v for k, v in connection.items() if k not in http}
     return {"kind": "source", "name": "step_%s" % step["name"], "auth": auth, "http": http, "streams": [stream]}
 
@@ -121,3 +129,66 @@ def call_records(step, connection, config, secrets, *, allowed_connectors=None, 
             yield record_value(record)
 
     return records(), collected
+
+
+def _definition(provider):
+    try:
+        return components.load(provider)
+    except components.ComponentLoadError:
+        return None                       # not installed or broken: the engine's rules report that
+
+
+def connection_problems(connection):
+    """
+    What the call step connector of `connection` would reject or ignore, as [(code, message, is_warning)]: its keys
+    as the connector declares them and, for a REST connector (whose HTTP engine reads only its declared keys and the
+    HTTP defaults), any other key.
+    """
+    definition = _definition(connection.get("provider"))
+    if definition is None:
+        return []
+    declared = {k: v for k, v in connection.items() if k != "provider" and k not in HTTP_DEFAULT_KEYS}
+    is_http = select_transport(definition) == "http"
+    # a REST connection without `type` calls the API unauthenticated, as the HTTP engine does
+    issues = [] if is_http and "type" not in declared else check_connection(definition, declared)
+    found = [("bad-connection", "%s: %s" % (issue.path, issue.message) if issue.path else issue.message,
+              issue.severity != "error") for issue in issues if not (is_http and issue.code == "unknown-key")]
+    if is_http:
+        known = [name for item in definition.connection for name in (item.name, *item.aliases)]
+        for key in declared:
+            if key in known:
+                continue
+            hint = (": write its keys (%s) directly on the connection" % ", ".join(HTTP_DEFAULT_KEYS)
+                    if key == "http" else suggest(key, known + list(HTTP_DEFAULT_KEYS)))
+            found.append(("unsupported-key", "%s is a REST API connector: `%s` would be ignored%s (keys: %s; HTTP "
+                          "defaults: %s)" % (definition.name, key, hint, ", ".join(known) or "none",
+                                             ", ".join(HTTP_DEFAULT_KEYS)), False))
+    return found
+
+
+def call_problems(step, connection):
+    """
+    What the source engine would reject in a call step before calling, as [(code, message, is_warning)]: a call
+    style its connector does not take, the connector's checks of an SDK call, and a relative request path with no
+    `base_url` on the connection.
+    """
+    definition = _definition(connection.get("provider"))
+    if definition is None:
+        return []
+    is_http = select_transport(definition) == "http"
+    if "request" in step:
+        if not is_http:
+            return [("bad-call", "%s is an SDK connector: a call step takes `service`/`method` with `arguments`, not "
+                                 "`request`" % definition.name, False)]
+        path = (step["request"] or {}).get("path") if isinstance(step["request"], dict) else None
+        if isinstance(path, str) and not path.startswith(_ABSOLUTE) and not connection.get("base_url"):
+            return [("bad-call", "request.path %r is relative and the connection has no `base_url`: give an "
+                                 "absolute URL (https://...) or set the connection's base_url" % path, False)]
+        return []
+    if "service" not in step and "method" not in step:
+        return []
+    if is_http:
+        return [("bad-call", "%s is a REST API connector: a call step takes `request: {path, method, params, ...}`, "
+                             "not `service`/`method`" % definition.name, False)]
+    call = {key: step.get(key) for key in ("service", "method", "arguments")}
+    return [("bad-call", problem, False) for problem in components.check_call(definition, call)]

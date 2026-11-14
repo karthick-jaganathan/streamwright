@@ -24,8 +24,9 @@ from streamwright.core.jobs.lookups.extract import FORMATS
 from streamwright.core.jobs.lookups.providers import KINDS, TRANSFORM_KINDS
 from streamwright.core.jobs.lookups.resolver import FAN_OUT_DEFAULTS
 from streamwright.core.jobs.refs import MOUSTACHE
+from streamwright.core.jobs.state.url import missing_driver
 
-__all__ = ["FAN_OUT_FIELD", "INPUT_LOOKUP_FIELD", "LOOKUPS_FIELD", "check_lookups"]
+__all__ = ["FAN_OUT_FIELD", "INPUT_LOOKUP_FIELD", "LOOKUPS_FIELD", "check_lookup_drivers", "check_lookups"]
 
 _TEXT = Field("string")
 _FORMAT = Field("string", enum=FORMATS, default="auto",
@@ -92,6 +93,23 @@ FAN_OUT_FIELD = Field("object", fields={
 }, description="run the whole job once per item (account): its lookups, connections, steps, outputs and state; "
                "runtime.state.scope must name the item, so each keeps its own history")
 
+
+
+def check_lookup_drivers(job):
+    """The database lookups whose connection's driver is not installed here, as (path, message)."""
+    spec = job.get("spec") if isinstance(job.get("spec"), dict) else {}
+    lookups = spec.get("lookups") if isinstance(spec.get("lookups"), dict) else {}
+    connections = job.get("connections") if isinstance(job.get("connections"), dict) else {}
+    found = []
+    for name, lookup in lookups.items():
+        if not isinstance(lookup, dict) or lookup.get("type") != "database":
+            continue
+        connection = connections.get(lookup.get("connection"))
+        problem = missing_driver(connection.get("provider")) if isinstance(connection, dict) else None
+        if problem:
+            found.append((("lookups", name, "connection"), "lookup %r opens connection %r (provider %s): %s" % (
+                name, lookup["connection"], connection["provider"], problem)))
+    return found
 
 
 def check_lookups(job):

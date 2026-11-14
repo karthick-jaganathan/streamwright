@@ -30,12 +30,14 @@ User names and passwords are percent-decoded. `schema` defaults to `streamwright
 """
 
 import importlib
+import importlib.util
 import os
 import sqlite3
 import urllib.parse
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from streamwright.core.jobs.state.dialects import (
@@ -52,7 +54,8 @@ from streamwright.core.jobs.state.target import describe_url
 
 ENV_STATE_URL = "STREAMWRIGHT_STATE_URL"
 
-__all__ = ["ENV_STATE_URL", "ResolvedStateUrl", "migration_runner_for_url", "open_url", "resolve_state_url"]
+__all__ = ["DRIVERS", "ENV_STATE_URL", "ResolvedStateUrl", "migration_runner_for_url", "missing_driver", "open_url",
+           "resolve_state_url"]
 
 _MEMORY = ("", ":memory:")
 _OUR_PARAMETERS = ("schema", "catalog")
@@ -120,6 +123,20 @@ def _sqlite(url, parsed, schema):
                             lambda: sqlite3.connect(path, timeout=30, isolation_level=None), schema)
 
 
+# the DB-API drivers a database connection opens with (optional dependencies), and how to install one
+DRIVERS = MappingProxyType({"postgres": (("psycopg", "psycopg2"), "pip install 'psycopg[binary]'"),
+                            "mysql": (("pymysql",), "pip install pymysql")})
+
+
+def missing_driver(provider):
+    """None when `provider`'s connections can be opened here (a driver is importable, or none is needed), else what
+    is missing and how to install it. Nothing is imported or connected."""
+    names, install = DRIVERS.get(provider, ((), None))
+    if not names or any(importlib.util.find_spec(name) is not None for name in names):
+        return None
+    return "%s is not installed (%s)" % (" or ".join(names), install)
+
+
 def _driver(*names):
     """The first of these DB-API modules that is installed (drivers are optional)."""
     for name in names:
@@ -146,7 +163,7 @@ def _postgres(url, parsed, query, schema):
         [(key, value) for key, value in query if key not in _OUR_PARAMETERS])))
 
     def connect():
-        driver = _driver("psycopg", "psycopg2")
+        driver = _driver(*DRIVERS["postgres"][0])
         connection = driver.connect(driver_url)
         return connection if hasattr(connection, "execute") else _CursorConnection(connection)  # psycopg2
 
@@ -158,7 +175,7 @@ def _mysql(url, parsed, schema):
     unquote = urllib.parse.unquote
 
     def connect():
-        return _CursorConnection(_driver("pymysql").connect(host=parsed.hostname, port=parsed.port or 3306,
+        return _CursorConnection(_driver(*DRIVERS["mysql"][0]).connect(host=parsed.hostname, port=parsed.port or 3306,
                                           user=unquote(parsed.username) if parsed.username else None,
                                           password=unquote(parsed.password) if parsed.password else "",
                                           database=database, autocommit=False))

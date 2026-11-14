@@ -93,6 +93,77 @@ parameters you call are whatever the API exposes, never a closed list in the con
 example `params: {statusFilter: ENABLED}` reaches the request URL unchanged; pagination cursors the paginator
 injects take precedence.
 
+## DuckDBJob
+
+A complete DuckDBJob that calls this connector (`streamwright duckdb validate` checks it offline; only the account values and the secret are yours):
+
+```yaml
+kind: DuckDBJob
+version: 1
+name: amazon_ads_sp_campaigns
+spec:
+  config:
+    profile_id: {type: string, required: true, description: "the advertising profile"}
+    client_id: {type: string, required: true, description: "the Login with Amazon client id, sent as a header"}
+  secrets:
+    amazon_client_id: {type: string, required: true}
+    amazon_client_secret: {type: string, required: true}
+    amazon_refresh_token: {type: string, required: true}
+
+connections:
+  amazon_ads_api:
+    provider: amazon_ads
+    type: oauth2_refresh_token
+    token_url: https://api.amazon.com/auth/o2/token
+    client_id: "{{ secrets.amazon_client_id }}"
+    client_secret: "{{ secrets.amazon_client_secret }}"
+    refresh_token: "{{ secrets.amazon_refresh_token }}"
+    base_url: https://advertising-api.amazon.com
+    headers:
+      Amazon-Advertising-API-ClientId: "{{ config.client_id }}"    # headers take no secrets: the public id
+      Amazon-Advertising-API-Scope: "{{ config.profile_id }}"
+  out:
+    provider: files
+    roots: [output]
+
+steps:
+  - name: sp_campaigns
+    connection: amazon_ads_api
+    request:
+      path: /v2/sp/campaigns
+      method: GET
+    paginator: {type: offset, offset_param: startIndex, limit_param: count, page_size: 100}
+    retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
+    sql: |
+      SELECT record->>'campaignId' AS campaign_id,
+             record->>'name' AS campaign_name,
+             record->>'state' AS state,
+             (record->>'dailyBudget')::DOUBLE AS daily_budget
+      FROM records
+
+outputs:
+  - name: sp_campaigns_file
+    connection: out
+    step: sp_campaigns
+    mode: overwrite
+    path: amazon_ads_sp_campaigns_{{ config.profile_id }}.parquet
+    format: parquet
+```
+
+- **Connection**: the authentication keys and the HTTP defaults (`base_url`, `headers`, `params_encoding`,
+  `paginator`, `records`, `retry`, `rate_limit`) written directly on it. There is no `http:` block (that is a
+  source manifest's): `validate` rejects keys the connector would ignore.
+- **Step**: `request: {path, method, params, headers, json, records}`, plus `paginator`, `retry`, `rate_limit`.
+  `path` is relative to the connection's `base_url`, or an absolute `https://` URL. This is a REST API connector:
+  a step takes `request`, never `service`/`method` (those are SDK connectors' calls).
+- **SQL**: the step's `sql` reads the table `records`, one JSON column `record`; extract with `->>`.
+
+```bash
+STREAMWRIGHT_SECRET_AMAZON_CLIENT_ID=... STREAMWRIGHT_SECRET_AMAZON_CLIENT_SECRET=... \
+  STREAMWRIGHT_SECRET_AMAZON_REFRESH_TOKEN=... streamwright duckdb run sp_campaigns.yaml \
+  --set profile_id=PROFILE_ID --set client_id=CLIENT_ID
+```
+
 ## Engines
 
 ### Execution & Behavior

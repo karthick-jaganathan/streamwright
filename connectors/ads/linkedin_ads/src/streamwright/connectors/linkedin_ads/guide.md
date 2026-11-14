@@ -98,6 +98,74 @@ parameters you call are whatever the API exposes, never a closed list in the con
 example `params: {statusFilter: ENABLED}` reaches the request URL unchanged; pagination cursors the paginator
 injects take precedence.
 
+## DuckDBJob
+
+A complete DuckDBJob that calls this connector (`streamwright duckdb validate` checks it offline; only the account values and the secret are yours):
+
+```yaml
+kind: DuckDBJob
+version: 1
+name: linkedin_ads_campaigns
+spec:
+  config:
+    account_id: {type: string, required: true, description: "the sponsored ad account"}
+    api_version: {type: string, default: "202401"}
+  secrets:
+    linkedin_access_token: {type: string, required: true}
+
+connections:
+  linkedin_ads_api:
+    provider: linkedin_ads
+    type: bearer
+    token: "{{ secrets.linkedin_access_token }}"
+    base_url: https://api.linkedin.com
+    headers:
+      LinkedIn-Version: "{{ config.api_version }}"
+      X-Restli-Protocol-Version: "2.0.0"
+  out:
+    provider: files
+    roots: [output]
+
+steps:
+  - name: campaigns
+    connection: linkedin_ads_api
+    request:
+      path: /rest/adCampaigns
+      method: GET
+      params:
+        q: search
+        search.account.values[0]: "urn:li:sponsoredAccount:{{ config.account_id }}"
+      records: {path: elements}
+    paginator: {type: offset, offset_param: start, limit_param: count, page_size: 100, total_path: paging.total}
+    retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
+    sql: |
+      SELECT (record->>'id')::BIGINT AS campaign_id,
+             record->>'name' AS campaign_name,
+             record->>'status' AS status,
+             (record->>'$.dailyBudget.amount')::DOUBLE AS daily_budget
+      FROM records
+
+outputs:
+  - name: campaigns_file
+    connection: out
+    step: campaigns
+    mode: overwrite
+    path: linkedin_ads_campaigns_{{ config.account_id }}.parquet
+    format: parquet
+```
+
+- **Connection**: the authentication keys and the HTTP defaults (`base_url`, `headers`, `params_encoding`,
+  `paginator`, `records`, `retry`, `rate_limit`) written directly on it. There is no `http:` block (that is a
+  source manifest's): `validate` rejects keys the connector would ignore.
+- **Step**: `request: {path, method, params, headers, json, records}`, plus `paginator`, `retry`, `rate_limit`.
+  `path` is relative to the connection's `base_url`, or an absolute `https://` URL. This is a REST API connector:
+  a step takes `request`, never `service`/`method` (those are SDK connectors' calls).
+- **SQL**: the step's `sql` reads the table `records`, one JSON column `record`; extract with `->>`.
+
+```bash
+STREAMWRIGHT_SECRET_LINKEDIN_ACCESS_TOKEN=... streamwright duckdb run campaigns.yaml --set account_id=ACCOUNT_ID
+```
+
 ## Engines
 
 ### Execution & Behavior

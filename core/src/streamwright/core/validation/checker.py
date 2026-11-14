@@ -35,7 +35,7 @@ __all__ = ["DURATION", "ERROR", "NON_STRICT_CODES", "WARNING", "Checker", "descr
 ERROR = "error"
 WARNING = "warning"
 # the warnings that do not fail a --strict validation
-NON_STRICT_CODES = ("connector-not-installed",)
+NON_STRICT_CODES = ("connector-not-installed", "driver-not-installed")
 DURATION = re.compile(vocabulary.DURATION_PATTERN)
 _DATE = re.compile(r"^(today|-?[0-9]+d|[0-9]{4}-[0-9]{2}-[0-9]{2})$")
 

@@ -95,6 +95,69 @@ parameters you call are whatever the API exposes, never a closed list in the con
 example `params: {statusFilter: ENABLED}` reaches the request URL unchanged; pagination cursors the paginator
 injects take precedence.
 
+## DuckDBJob
+
+A complete DuckDBJob that calls this connector (`streamwright duckdb validate` checks it offline; only the account values and the secret are yours):
+
+```yaml
+kind: DuckDBJob
+version: 1
+name: rest_items
+spec:
+  config:
+    base_url: {type: string, default: "https://api.example.com/v1"}
+  secrets:
+    api_token: {type: string, required: true}
+
+connections:
+  rest_api:
+    provider: restapi
+    type: bearer
+    token: "{{ secrets.api_token }}"
+    base_url: "{{ config.base_url }}"
+    headers: {Accept: application/json}
+    rate_limit: {requests: 10, per: 1s}
+  out:
+    provider: files
+    roots: [output]
+
+steps:
+  - name: items
+    connection: rest_api
+    request:
+      path: /items
+      method: GET
+      params: {status: active}
+      records: {path: data.items}
+    paginator: {type: cursor, param: starting_after, token_path: meta.next_cursor}
+    retry: {codes: [429, 500, 502, 503], max_attempts: 5, backoff: exponential}
+    sql: |
+      SELECT record->>'id' AS item_id,
+             record->>'name' AS name,
+             CAST(record->>'price' AS DECIMAL(10, 2)) AS price
+      FROM records
+
+outputs:
+  - name: items_file
+    connection: out
+    step: items
+    mode: overwrite
+    path: rest_items.parquet
+    format: parquet
+```
+
+- **Connection**: the authentication keys and the HTTP defaults (`base_url`, `headers`, `params_encoding`,
+  `paginator`, `records`, `retry`, `rate_limit`) written directly on it. There is no `http:` block (that is a
+  source manifest's): `validate` rejects keys the connector would ignore.
+- **Step**: `request: {path, method, params, headers, json, records}`, plus `paginator`, `retry`, `rate_limit`.
+  `path` is relative to the connection's `base_url`, or an absolute `https://` URL. This is a REST API connector:
+  a step takes `request`, never `service`/`method` (those are SDK connectors' calls).
+- **SQL**: the step's `sql` reads the table `records`, one JSON column `record`; extract with `->>`.
+
+```bash
+STREAMWRIGHT_SECRET_API_TOKEN=... streamwright duckdb run items.yaml
+```
+
 ## Engines
 
 ### Execution & Behavior
