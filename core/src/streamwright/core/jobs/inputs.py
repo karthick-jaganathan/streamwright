@@ -31,6 +31,7 @@ from streamwright.core.config.inputs import (
     resolve_inputs,
     secrets_from_env,
 )
+from streamwright.core.jobs.refs import input_references
 
 __all__ = [
     "InputError",
@@ -40,13 +41,20 @@ __all__ = [
     "parse_set",
     "read_config_values",
     "secret_values",
+    "state_secrets",
 ]
 
 
 def parse_set(items):
-    """`--set NAME=VALUE` items as a mapping; raises InputError for an item without `=` or a name."""
+    """
+    `--set NAME=VALUE` items (or (name, value) pairs, as the shared --set option parses them) as a mapping; raises
+    InputError for an item without `=` or a name.
+    """
     values = {}
     for item in items or ():
+        if isinstance(item, tuple):
+            values[item[0]] = item[1]
+            continue
         name, separator, value = str(item).partition("=")
         name = name.strip()
         if not separator or not name:
@@ -91,7 +99,27 @@ def secret_values(job, provided=None, environ=None):
     values = dict(provided or {})
     for name, value in secrets_from_env(list(declared), environ).items():
         values.setdefault(name, value)
-    return resolve_inputs(declared, values, "secrets", hide_values=True)
+    return resolve_inputs(declared, values, "secrets", hide_values=True,
+                          config_names=tuple(declared_inputs(job, "config")))
+
+
+def state_secrets(job, provided=None, environ=None):
+    """
+    The secrets a state command needs: those runtime.state and its connection reference, resolved from `provided`
+    values and STREAMWRIGHT_SECRET_<NAME> variables; every other declared secret stays a `{{ secrets.NAME }}`
+    reference, so listing or retrying batches never asks for the credentials of the job's sources.
+    """
+    declared = declared_inputs(job, "secrets")
+    state = (job.get("runtime") or {}).get("state") or {}
+    connection = (job.get("connections") or {}).get(state.get("connection") or "") if isinstance(state, dict) else None
+    needed = input_references([state, connection], "secrets")
+    values = dict(provided or {})
+    for name, value in secrets_from_env(list(declared), environ).items():
+        values.setdefault(name, value)
+    found = resolve_inputs({name: definition for name, definition in declared.items() if name in needed},
+                           {name: value for name, value in values.items() if name in needed}, "secrets",
+                           hide_values=True)
+    return {**{name: "{{ secrets.%s }}" % name for name in declared if name not in needed}, **found}
 
 
 def job_inputs(job, config_file=None, set_items=(), secrets_file=None, *, environ=None, warn=None):

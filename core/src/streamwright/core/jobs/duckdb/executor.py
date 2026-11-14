@@ -18,16 +18,23 @@
 """
 The DuckDB executor: builds a job's steps in a Session and writes its outputs through their adapters. It implements
 `streamwright.core.jobs.types.Executor`, so the shared Runner gives it leases, receipts, replay and fencing.
+
+Per batch: the batch's broker messages are the table `input` (a consume step shapes them), the steps are built, the
+write outputs run (each recorded with its receipt), then `_commits` (output, table_name, version, rows, batch_id) and
+`_file_errors` (step, path, reason) describe them, and the publish outputs' rows become the batch's events, which
+the runner commits to the outbox with the batch and relays after the messages are acknowledged.
 """
 
+import json
 import logging
 
 from streamwright.core.jobs.duckdb.adapter import ReadContext, WriteContext
-from streamwright.core.jobs.duckdb.steps import build_step
+from streamwright.core.jobs.duckdb.steps import MESSAGES_TABLE, build_step, message_kind
 from streamwright.core.jobs.policy import SKIPPED, ExecutionPolicy, classify_transient, guard
 from streamwright.core.jobs.refs import RefError, decode_value, encode_value
 from streamwright.core.jobs.types import ExecutionResult, WriteReceipt, written_files
 from streamwright.core.jobs.write_rules import OutputSpec, check_output
+from streamwright.core.runtime.logs.context import log_context
 from streamwright.core.runtime.logs.lines import fields
 from streamwright.core.sql.quote import quote_ident
 
@@ -114,30 +121,86 @@ class DuckDBExecutor:
         self.built = []
 
     def execute(self, context, manifest, done, hooks):
+        self.session.start_clock()            # runtime.timeout_seconds bounds each batch
+        try:
+            return self._execute(context, manifest, done, hooks)
+        finally:
+            self.session.stop_clock()
+
+    def _publishes(self, item):
+        return message_kind(item, self.connections, self.adapters) == "publish"
+
+    def _messages(self, manifest):
+        con = self.session.con
+        con.execute("CREATE OR REPLACE TEMP TABLE %s (message_id VARCHAR, key VARCHAR, body VARCHAR, "
+                    "headers MAP(VARCHAR, VARCHAR), timestamp VARCHAR)" % quote_ident(MESSAGES_TABLE))
+        rows = [(m["message_id"], m.get("key"), m["body"], list((m.get("headers") or {}).keys()),
+                 [str(value) for value in (m.get("headers") or {}).values()], m.get("timestamp"))
+                for m in manifest.get("messages") or ()]
+        if rows:
+            con.executemany("INSERT INTO %s VALUES (?, ?, ?, MAP(?::VARCHAR[], ?::VARCHAR[]), ?)"
+                            % quote_ident(MESSAGES_TABLE), rows)
+
+    def _runtime_tables(self, run, receipts):
+        con = self.session.con
+        con.execute("CREATE OR REPLACE TEMP TABLE _commits (output VARCHAR, table_name VARCHAR, version BIGINT, "
+                    "rows BIGINT, batch_id VARCHAR)")
+        rows = [(name, receipt.get("destination"), receipt.get("version"), receipt.get("rows"), run.batch.batch_id)
+                for name, receipt in sorted(receipts.items())]
+        if rows:
+            con.executemany("INSERT INTO _commits VALUES (?, ?, ?, ?, ?)", rows)
+        con.execute("CREATE OR REPLACE TEMP TABLE _file_errors (step VARCHAR, path VARCHAR, reason VARCHAR)")
+        if run.file_errors:
+            con.executemany("INSERT INTO _file_errors VALUES (?, ?, ?)", [tuple(e) for e in run.file_errors])
+
+    def _events(self, item):
+        """The rows of a publish output (its `sql`, or its `step`), as JSON-ready events."""
+        cap = int(self.limits.get("events", 10000))
+        sql = item.get("sql") or "SELECT * FROM %s" % quote_ident(item["step"])
+        cursor = self.session.con.execute("SELECT * FROM (%s) LIMIT %d" % (sql, cap + 1))
+        names = [column[0] for column in cursor.description]
+        rows = cursor.fetchall()
+        if len(rows) > cap:
+            raise ExecutionError("publish output %s has more than %d events (runtime.limits.events)" % (
+                item["name"], cap))
+        return [json.loads(json.dumps(dict(zip(names, row, strict=True)), default=str)) for row in rows]
+
+    def _execute(self, context, manifest, done, hooks):
         run = _BatchRun(self, context, manifest)
+        self._messages(manifest)
         for name in self.plan.order:
             self.session.check_clock()
-            self._build(run, self.plan.by_name[name].item)
+            with log_context(step=name):
+                self._build(run, self.plan.by_name[name].item)
             self.built.append(name)
         for step, path, reason in run.file_errors:
             LOG.warning("step %s rejected %s: %s", step, path, reason)
         hooks.save_manifest(manifest)
-        for node in self.plan.outputs:
-            if node.name in done:
-                LOG.info("output %s already has a receipt for batch %s: skipped", node.name, context.batch_id)
-                continue
-            self.session.check_clock()
-            receipt = self._write(run, node.item, hooks)
-            hooks.record_receipt(receipt, manifest)
-            if receipt.already_committed:
-                LOG.info("output %s: already committed in an earlier attempt", node.name)
-            else:
-                LOG.info("output %s: %s rows to %s", node.name, receipt.rows, receipt.destination,
-                         extra=fields(event="output_end", export=node.name, records=receipt.rows))
-                for path in written_files(receipt):
-                    LOG.info("output %s: wrote %s", node.name, path,
-                             extra=fields(event="output_file", export=node.name, path=path))
-        return ExecutionResult(schema_signatures=tuple(run.schema_signatures),
+        receipts = dict(done)
+        publishes = [node for node in self.plan.outputs if self._publishes(node.item)]
+        for node in (node for node in self.plan.outputs if not self._publishes(node.item)):
+            with log_context(output=node.name):
+                if node.name in done:
+                    LOG.info("output %s already has a receipt for batch %s: skipped", node.name, context.batch_id)
+                    continue
+                self.session.check_clock()
+                receipt = self._write(run, node.item, hooks)
+                hooks.record_receipt(receipt, manifest)
+                receipts[node.name] = receipt.to_dict()
+                if receipt.already_committed:
+                    LOG.info("output %s: already committed in an earlier attempt", node.name)
+                else:
+                    LOG.info("output %s: %s rows to %s", node.name, receipt.rows, receipt.destination,
+                             extra=fields(event="output_end", export=node.name, records=receipt.rows))
+                    for path in written_files(receipt):
+                        LOG.info("output %s: wrote %s", node.name, path,
+                                 extra=fields(event="output_file", export=node.name, path=path))
+        self._runtime_tables(run, receipts)
+        events = {node.name: self._events(node.item) for node in publishes}
+        for name, rows in events.items():
+            LOG.info("output %s: %d events to the outbox", name, len(rows),
+                     extra=fields(event="output_end", export=name, records=len(rows)))
+        return ExecutionResult(events=events, schema_signatures=tuple(run.schema_signatures),
                                schema_reports=tuple(run.schema_reports))
 
     def _build(self, run, step):

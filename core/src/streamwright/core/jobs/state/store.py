@@ -16,382 +16,335 @@
 # **************************************************************************/
 
 """
-The bookkeeping store (runtime.state): leases with epoch fencing, batches with a status machine, pinned manifests,
-write receipts, a transactional outbox and accepted file-schema signatures.
+The StreamWright bookkeeping state store (runtime.state), on the `sw_*` tables:
 
-One implementation over a DB-API connection factory and a Dialect (SQLite, PostgreSQL, DuckDB). How the connection is
-opened is the engine's business (a connector adapter, a DuckDB session, a SQLite file); nothing here is ever a business
-write target.
+- sw_leases: fencing leases, one row per lock token (the job's scope token and any `runtime.state.lock` tokens),
+  each with the epoch of the run that holds it and a database-clock expiry.
+- sw_jobs: the runs (batches) of each job and scope: lifecycle, pinned manifest, lock tokens, metrics.
+- sw_sequences: the run counter of each job and scope; Delta transaction versions come from it, so it never goes
+  back, even when runs are purged.
+- sw_receipts: output write receipts; sw_events: the transactional outbox; sw_signatures: input schema hashes.
+- sw_migrations: the applied migrations and the store's persistent identity.
 
-Every write carries its Lease and checks the epoch inside the same transaction (`FOR SHARE` on PostgreSQL blocks a
-takeover until it commits), so a slow or partitioned worker cannot overwrite the state of the worker that took over.
-Lease expiry is computed by the database clock. Batch sequences come from `job_sequences`, which only ever grows: a
-purge never makes a sequence (a table-format transaction version, a batch id) come back.
+Every write runs in one transaction and is fenced: it is rejected (StaleLeaseError) once any token of the writer's
+lease has a newer epoch. The Python API speaks of batches (batch_id, manifest); the columns are job_id,
+checkpoint and job_key.
 """
 
-import json
-import logging
+import datetime
+from collections.abc import Mapping, Sequence
 from types import MappingProxyType
+from typing import Any
 
-from streamwright.core.jobs.state.dialects import DEFAULT_SCHEMA
-from streamwright.core.jobs.state.migrations import MIGRATIONS
-from streamwright.core.jobs.state.protocol import (
-    STATUSES,
-    TERMINAL_STATUSES,
-    LeaseHeldError,
-    StaleLeaseError,
-    StateError,
-)
-from streamwright.core.jobs.types import Lease
+from streamwright.core.jobs.state.leases import LOCK_POLICIES, LeaseOperations
+from streamwright.core.jobs.state.protocol import STATUSES, TERMINAL_STATUSES, StateError
+from streamwright.core.jobs.state.sql import json_text as _json_text
+from streamwright.core.jobs.state.sql import json_value as _json_value
+from streamwright.core.jobs.types import Lease, WriteReceipt
 
-__all__ = ["SqlStateStore"]
+__all__ = ["LOCK_POLICIES", "SqlStateStore"]
 
-LOG = logging.getLogger("streamwright.jobs.state")
-
-_NEXT = MappingProxyType({"received": ("processing", "failed", "abandoned"),
-                          "processing": ("committed", "failed", "abandoned"),
-                          "committed": ("acked", "failed", "abandoned"),
-                          "acked": ("completed", "failed", "abandoned"),
-                          "failed": ("abandoned",),                       # back to work only through retry_batch
-                          "completed": (), "abandoned": ()})
-_TABLES = ("job_leases", "job_sequences", "batches", "output_receipts", "outbox_events", "schema_signatures",
-           "store_metadata", "schema_migrations")
+_NEXT = MappingProxyType({
+    "received": ("processing", "failed", "abandoned"),
+    "processing": ("committed", "failed", "abandoned"),
+    "committed": ("acked", "failed", "abandoned"),
+    "acked": ("completed", "failed", "abandoned"),
+    "failed": ("abandoned",),  # back to work only through retry_batch
+    "completed": (),
+    "abandoned": (),
+    "skipped": (),
+})
+_BATCH_COLUMNS = ("job_id, scope, sequence, job_key, status, tokens, checkpoint, failed_from, started_at, "
+                  "finished_at, duration_ms, rows_written, error_message, metadata, created_at, updated_at, attempts")
 
 
-def _json_text(value):
-    return json.dumps(value, sort_keys=True, default=str)
+def _parse_time(text: str | None) -> datetime.datetime | None:
+    if not text:
+        return None
+    return datetime.datetime.fromisoformat(str(text).replace("Z", "+00:00"))
 
 
-def _json_value(value):
-    return json.loads(value) if isinstance(value, (str, bytes)) else value
+class SqlStateStore(LeaseOperations):
+    """ACID state store for StreamWright jobs: leases, runs, receipts, outbox and signatures."""
 
+    # --- sequences (sw_sequences) ---------------------------------------------------------------------------
 
-class SqlStateStore:
-    def __init__(self, connect, dialect, schema=DEFAULT_SCHEMA, catalog=None):
-        """`connect()` returns a new DB-API connection (closed after each operation); `catalog` is DuckDB only."""
-        self._connect, self._dialect = connect, dialect
-        prefix, self._create_schema = dialect.namespace(schema, catalog)
-        # constraint and index names use the physical table name (prefixed on SQLite, plain inside a schema)
-        label_prefix = "" if prefix.endswith(".") else prefix
-        self._labels = {name: label_prefix + name for name in _TABLES}
-        tokens = {name: prefix + name for name in _TABLES}
-        tokens.update(now=dialect.now, json=dialect.json_parameter, expires=dialect.expires_in("?"))
-        self._tokens = tokens
-        self._identity = None
+    def _next_sequence(self, conn: Any, job_name: str, scope: str) -> int:
+        self._x(conn, "INSERT INTO {sw_sequences} (job_name, scope, last_sequence, created_at, updated_at) "
+                      "VALUES (?, ?, 0, {now}, {now}) " + self._dialect.conflict_ignore(("job_name", "scope")),
+                (job_name, scope))
+        self._x(conn, "UPDATE {sw_sequences} SET last_sequence = last_sequence + 1, updated_at = {now} "
+                      "WHERE job_name = ? AND scope = ?", (job_name, scope))
+        return int(self._x(conn, "SELECT last_sequence FROM {sw_sequences} WHERE job_name = ? AND scope = ?",
+                           (job_name, scope)).fetchone()[0])
 
-    # --- plumbing -------------------------------------------------------------------------------------------
-
-    def _sql(self, text):
-        return self._dialect.placeholders(text.format(**self._tokens))
-
-    def _x(self, conn, text, args=()):
-        return conn.execute(self._sql(text), tuple(args))
-
-    def _run(self, work):
+    def next_batch_sequence(self, lease: Lease, scope: str = "") -> int:
         """
-        One transaction. A failed commit propagates; a failing rollback or close never replaces the original error;
-        a close that fails after a successful commit is reported too.
+        Issues the next run sequence of the job and scope (fenced): one more than any issued before, never
+        reused, even after purges. Delta outputs use it as the transaction version.
         """
-        conn = self._connect()
-        try:
-            if self._dialect.begin:
-                conn.execute(self._dialect.begin)
-            result = work(conn)
-            conn.commit()
-        except BaseException as error:
-            for cleanup in (conn.rollback, conn.close):
-                try:
-                    cleanup()
-                except Exception as exc:
-                    LOG.warning("state store %s failed after %s: %s", cleanup.__name__, type(error).__name__, exc)
-            raise
-        conn.close()
-        return result
-
-    def _check(self, conn, lease):
-        row = self._x(conn, "SELECT lease_epoch FROM {job_leases} WHERE job_name = ?" + self._dialect.share_lock,
-                      (lease.job_name,)).fetchone()
-        if row is None or int(row[0]) != lease.epoch:
-            raise StaleLeaseError("lease for %s is no longer held by %s (epoch %s)" % (
-                lease.job_name, lease.owner_id, lease.epoch))
-
-    def _lease_row(self, conn, job_name, lock=""):
-        return self._x(conn, "SELECT owner_id, lease_epoch, expires_at, CASE WHEN expires_at > {now} THEN 1 ELSE 0 "
-                             "END FROM {job_leases} WHERE job_name = ?" + lock, (job_name,)).fetchone()
-
-    # --- schema ---------------------------------------------------------------------------------------------
-
-    def initialize(self):
-        dialect = self._dialect
-
         def work(conn):
-            if self._create_schema:
-                conn.execute(self._create_schema)
-            self._x(conn, "CREATE TABLE IF NOT EXISTS {schema_migrations} (version BIGINT NOT NULL, applied_at %s "
-                          "NOT NULL, CONSTRAINT pk_%s PRIMARY KEY (version))" % (
-                              dialect.timestamp_type, self._labels["schema_migrations"]))
-            applied = {int(r[0]) for r in self._x(conn, "SELECT version FROM {schema_migrations}").fetchall()}
-            for version, build in MIGRATIONS:
-                if version in applied:
-                    continue
-                for statement in build(dialect, self._tokens.__getitem__, self._labels.__getitem__):
-                    conn.execute(statement)
-                self._x(conn, "INSERT INTO {schema_migrations} (version, applied_at) VALUES (?, {now})", (version,))
-        self._run(work)
+            self._check(conn, lease)
+            return self._next_sequence(conn, lease.job_name, scope)
 
-    def store_identity(self):
-        """This store's identity (seeded by the migration, persisted), unique across stores for idempotency keys."""
-        if self._identity is None:
-            self._identity = self._run(lambda conn: self._x(
-                conn, "SELECT store_identity FROM {store_metadata} WHERE store_key = ?", ("default",)).fetchone()[0])
-        return self._identity
-
-    def schema_version(self):
-        return self._run(lambda conn: self._x(conn, "SELECT MAX(version) FROM {schema_migrations}").fetchone()[0])
-
-    # --- leases ---------------------------------------------------------------------------------------------
-
-    def acquire_lease(self, job_name, owner_id, ttl_seconds):
-        def work(conn):
-            self._x(conn, "INSERT INTO {job_leases} (job_name, owner_id, lease_epoch, acquired_at, expires_at) "
-                          "VALUES (?, ?, 0, {now}, NULL) ON CONFLICT (job_name) DO NOTHING", (job_name, owner_id))
-            current, epoch, expires_at, held = self._lease_row(conn, job_name, self._dialect.update_lock)
-            if int(held) and current != owner_id:
-                raise LeaseHeldError("job %s is held by %s until %s" % (
-                    job_name, current, self._dialect.read_timestamp(expires_at)))
-            epoch = int(epoch) + 1
-            self._x(conn, "UPDATE {job_leases} SET owner_id = ?, lease_epoch = ?, acquired_at = {now}, "
-                          "expires_at = {expires} WHERE job_name = ?", (owner_id, epoch, int(ttl_seconds), job_name))
-            row = self._lease_row(conn, job_name)
-            return Lease(job_name, owner_id, epoch, self._dialect.read_timestamp(row[2]))
         return self._run(work)
 
-    def renew_lease(self, lease, ttl_seconds):
-        def work(conn):
-            row = self._lease_row(conn, lease.job_name, self._dialect.update_lock)
-            if row is None or int(row[1]) != lease.epoch:
-                raise StaleLeaseError("lease for %s is no longer held by %s (epoch %s)" % (
-                    lease.job_name, lease.owner_id, lease.epoch))
-            self._x(conn, "UPDATE {job_leases} SET expires_at = {expires} WHERE job_name = ? AND lease_epoch = ?",
-                    (int(ttl_seconds), lease.job_name, lease.epoch))
-            return Lease(lease.job_name, lease.owner_id, lease.epoch,
-                         self._dialect.read_timestamp(self._lease_row(conn, lease.job_name)[2]))
-        return self._run(work)
+    # --- batches (sw_jobs) ----------------------------------------------------------------------------------
 
-    def check_lease(self, lease):
-        def work(conn):
-            row = self._lease_row(conn, lease.job_name, self._dialect.share_lock)
-            if row is None or int(row[1]) != lease.epoch or not int(row[3]):
-                raise StaleLeaseError("lease for %s (epoch %s) was taken over or has expired" % (
-                    lease.job_name, lease.epoch))
-        self._run(work)
-
-    def release_lease(self, lease):
-        self._run(lambda conn: self._x(conn, "UPDATE {job_leases} SET expires_at = NULL WHERE job_name = ? "
-                                             "AND lease_epoch = ?", (lease.job_name, lease.epoch)))
-
-    def get_lease(self, job_name):
-        def work(conn):
-            row = self._lease_row(conn, job_name)
-            if row is None:
-                return None
-            return {"job_name": job_name, "owner_id": row[0], "epoch": int(row[1]),
-                    "expires_at": self._dialect.read_timestamp(row[2]), "held": bool(int(row[3]))}
-        return self._run(work)
-
-    # --- batches --------------------------------------------------------------------------------------------
-
-    def next_batch_sequence(self, job_name):
-        def work(conn):
-            row = self._x(conn, "SELECT batch_sequence FROM {job_sequences} WHERE job_name = ?", (job_name,)).fetchone()
-            return int(row[0]) + 1 if row else 1
-        return self._run(work)
-
-    def record_batch(self, lease, batch_id, status, manifest, *, batch_sequence=None, run_key=None, error=None,
-                     engine_metadata=None):
+    def record_batch(self, lease: Lease, batch_id: str, status: str, manifest: Mapping[str, Any], *,
+                     batch_sequence: int | None = None, scope: str = "", job_key: str | None = None,
+                     tokens: Mapping[str, Any] | None = None, error: str | None = None,
+                     engine_metadata: Mapping[str, Any] | None = None) -> None:
+        """
+        Creates a batch (received or processing; needs batch_sequence from next_batch_sequence) or moves it along
+        the status machine, storing its manifest; fenced by the lease. `tokens` defaults to the lease's.
+        """
         if status not in STATUSES:
             raise StateError("unknown status %r" % (status,))
-        metadata = None if engine_metadata is None else _json_text(engine_metadata)
 
         def work(conn):
             self._check(conn, lease)
-            row = self._x(conn, "SELECT status FROM {batches} WHERE job_name = ? AND batch_id = ?",
+            row = self._x(conn, "SELECT status FROM {sw_jobs} WHERE job_name = ? AND job_id = ?",
                           (lease.job_name, batch_id)).fetchone()
-            if row is None:
-                self._insert_batch(conn, lease, batch_id, status, manifest, batch_sequence=batch_sequence,
-                                   run_key=run_key, error=error, metadata=metadata)
+            if row is not None:
+                self._move(conn, lease.job_name, batch_id, row[0], status, manifest=manifest, error=error,
+                           engine_metadata=engine_metadata)
                 return
-            self._move_batch(conn, lease, batch_id, row[0], status, manifest=manifest, error=error, metadata=metadata)
+            if status not in ("received", "processing"):
+                raise StateError("a new batch starts as received or processing, not %s" % status)
+            if batch_sequence is None:
+                raise StateError("a new batch needs its batch_sequence")
+            admitted = tokens if tokens is not None else {
+                "accepted": [token for token in lease.tokens if token], "skipped": list(lease.pruned_tokens)}
+            self._insert(conn, lease.job_name, batch_id, scope=scope, sequence=batch_sequence, job_key=job_key,
+                         status=status, tokens=admitted, manifest=manifest, error=error,
+                         engine_metadata=engine_metadata)
+
         self._run(work)
 
-    def _insert_batch(self, conn, lease, batch_id, status, manifest, *, batch_sequence, run_key, error, metadata):
-        if batch_sequence is None:
-            raise StateError("a new batch needs a batch_sequence")
-        if status not in ("received", "processing"):
-            raise StateError("a new batch starts as received or processing, not %s" % status)
-        high = self._x(conn, "SELECT batch_sequence FROM {job_sequences} WHERE job_name = ?",
-                       (lease.job_name,)).fetchone()
-        if high and int(batch_sequence) <= int(high[0]):
-            raise StateError("batch sequence %s must exceed the last sequence %s of %s" % (
-                batch_sequence, high[0], lease.job_name))
-        self._x(conn, "INSERT INTO {batches} (job_name, batch_id, batch_sequence, run_key, status, failed_from, "
-                      "manifest_json, error_message, engine_metadata, created_at, updated_at) "
-                      "VALUES (?, ?, ?, ?, ?, NULL, {json}, ?, {json}, {now}, {now})",
-                (lease.job_name, batch_id, int(batch_sequence), run_key, status, _json_text(manifest), error,
-                 metadata))
-        self._x(conn, "INSERT INTO {job_sequences} (job_name, batch_sequence) VALUES (?, ?) ON CONFLICT (job_name) "
-                      "DO UPDATE SET batch_sequence = excluded.batch_sequence", (lease.job_name, int(batch_sequence)))
+    def record_skipped(self, job_name: str, batch_id: str, manifest: Mapping[str, Any], *, scope: str = "",
+                       tokens: Mapping[str, Any] | None = None) -> int:
+        """
+        Records a run that did nothing because the lock policy pruned all it needed (status skipped); not fenced,
+        as the run holds no lease. Returns its sequence.
+        """
+        def work(conn):
+            sequence = self._next_sequence(conn, job_name, scope)
+            self._insert(conn, job_name, batch_id, scope=scope, sequence=sequence, job_key=None, status="skipped",
+                         tokens=tokens or {}, manifest=manifest)
+            self._finish(conn, job_name, batch_id)
+            return sequence
 
-    def _move_batch(self, conn, lease, batch_id, current, status, *, manifest, error, metadata):
-        if current in TERMINAL_STATUSES and status != current:
-            raise StateError("batch %s is %s and cannot become %s" % (batch_id, current, status))
+        return self._run(work)
+
+    def _insert(self, conn: Any, job_name: str, batch_id: str, *, scope: str, sequence: int,
+                job_key: str | None, status: str, tokens: Mapping[str, Any], manifest: Mapping[str, Any],
+                error: str | None = None, engine_metadata: Mapping[str, Any] | None = None) -> None:
+        self._x(conn, "INSERT INTO {sw_jobs} (job_name, job_id, scope, sequence, job_key, status, tokens, checkpoint, "
+                      "failed_from, started_at, finished_at, duration_ms, rows_written, error_message, metadata, "
+                      "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, {json}, {json}, NULL, {now}, NULL, NULL, 0, "
+                      "?, {json}, {now}, {now})",
+                (job_name, batch_id, scope, int(sequence), job_key, status, _json_text(tokens),
+                 _json_text(manifest), error, None if engine_metadata is None else _json_text(engine_metadata)))
+
+    def _move(self, conn: Any, job_name: str, batch_id: str, current: str, status: str, *,
+              manifest: Mapping[str, Any], error: str | None = None,
+              engine_metadata: Mapping[str, Any] | None = None) -> None:
         if status != current and status not in _NEXT[current]:
             raise StateError("batch %s cannot go from %s to %s" % (batch_id, current, status))
         failed_from = current if status == "failed" and current != "failed" else None
-        self._x(conn, "UPDATE {batches} SET status = ?, manifest_json = {json}, error_message = ?, "
-                      "failed_from = COALESCE(?, failed_from), engine_metadata = COALESCE({json}, engine_metadata), "
-                      "updated_at = {now} WHERE job_name = ? AND batch_id = ?",
-                (status, _json_text(manifest), error, failed_from, metadata, lease.job_name, batch_id))
+        self._x(conn, "UPDATE {sw_jobs} SET status = ?, checkpoint = {json}, error_message = ?, "
+                      "failed_from = COALESCE(?, failed_from), metadata = COALESCE({json}, metadata), "
+                      "rows_written = COALESCE((SELECT SUM(r.rows_written) FROM {sw_receipts} r "
+                      "WHERE r.job_name = ? AND r.job_id = ?), 0), updated_at = {now} "
+                      "WHERE job_name = ? AND job_id = ?",
+                (status, _json_text(manifest), error, failed_from,
+                 None if engine_metadata is None else _json_text(engine_metadata), job_name, batch_id, job_name,
+                 batch_id))
+        if status in TERMINAL_STATUSES and status != current:
+            self._finish(conn, job_name, batch_id)
 
-    def record_receipt(self, lease, batch_id, receipt, manifest=None):
+    def _finish(self, conn: Any, job_name: str, batch_id: str) -> None:
+        """Stamps finished_at (database clock) and duration_ms of a batch reaching a terminal status."""
+        self._x(conn, "UPDATE {sw_jobs} SET finished_at = {now} WHERE job_name = ? AND job_id = ?",
+                (job_name, batch_id))
+        started, finished = self._x(conn, "SELECT started_at, finished_at FROM {sw_jobs} WHERE job_name = ? AND "
+                                          "job_id = ?", (job_name, batch_id)).fetchone()
+        started, finished = (_parse_time(self._dialect.read_timestamp(value)) for value in (started, finished))
+        duration = max(0, round((finished - started).total_seconds() * 1000))
+        self._x(conn, "UPDATE {sw_jobs} SET duration_ms = ? WHERE job_name = ? AND job_id = ?",
+                (duration, job_name, batch_id))
+
+    def retry_batch(self, lease: Lease, batch_id: str) -> str:
+        """
+        Moves a failed batch back to the status it failed from, counting one more attempt; returns that status.
+        """
         def work(conn):
             self._check(conn, lease)
-            self._x(conn, "INSERT INTO {output_receipts} (job_name, batch_id, output_name, receipt_json, recorded_at) "
-                          "VALUES (?, ?, ?, {json}, {now}) ON CONFLICT (job_name, batch_id, output_name) "
-                          "DO UPDATE SET receipt_json = excluded.receipt_json, recorded_at = excluded.recorded_at",
-                    (lease.job_name, batch_id, receipt.output_name, _json_text(receipt.to_dict())))
-            if manifest is not None:
-                self._x(conn, "UPDATE {batches} SET manifest_json = {json}, updated_at = {now} "
-                              "WHERE job_name = ? AND batch_id = ?", (_json_text(manifest), lease.job_name, batch_id))
-        self._run(work)
-
-    def commit_batch(self, lease, batch_id, manifest, events, schema_signatures=()):
-        for output_name, (destination, _) in events.items():
-            if not destination:
-                raise StateError("output %s has no event destination" % output_name)
-
-        def work(conn):
-            self._check(conn, lease)
-            row = self._x(conn, "SELECT status FROM {batches} WHERE job_name = ? AND batch_id = ?",
-                          (lease.job_name, batch_id)).fetchone()
-            if row is None:
-                raise StateError("batch %s does not exist" % batch_id)
-            self._move_batch(conn, lease, batch_id, row[0], "committed", manifest=manifest, error=None, metadata=None)
-            for output_name, (destination, rows) in sorted(events.items()):
-                for number, payload in enumerate(rows):
-                    self._x(conn, "INSERT INTO {outbox_events} (job_name, batch_id, output_name, event_sequence, "
-                                  "destination, payload_json, status, created_at, sent_at) "
-                                  "VALUES (?, ?, ?, ?, ?, {json}, 'pending', {now}, NULL) "
-                                  "ON CONFLICT (job_name, batch_id, output_name, event_sequence) DO NOTHING",
-                            (lease.job_name, batch_id, output_name, number, destination, _json_text(payload)))
-            self._store_signatures(conn, lease, schema_signatures)
-        self._run(work)
-
-    def retry_batch(self, lease, batch_id):
-        def work(conn):
-            self._check(conn, lease)
-            row = self._x(conn, "SELECT status, failed_from FROM {batches} WHERE job_name = ? AND batch_id = ?",
+            row = self._x(conn, "SELECT status, failed_from FROM {sw_jobs} WHERE job_name = ? AND job_id = ?",
                           (lease.job_name, batch_id)).fetchone()
             if row is None or row[0] != "failed":
                 raise StateError("batch %s is not failed" % batch_id)
             if not row[1]:
                 raise StateError("batch %s has no status to resume from" % batch_id)
-            self._x(conn, "UPDATE {batches} SET status = ?, failed_from = NULL, error_message = NULL, "
-                          "updated_at = {now} WHERE job_name = ? AND batch_id = ?", (row[1], lease.job_name, batch_id))
+            self._x(conn, "UPDATE {sw_jobs} SET status = ?, failed_from = NULL, error_message = NULL, "
+                          "attempts = attempts + 1, updated_at = {now} WHERE job_name = ? AND job_id = ?",
+                    (row[1], lease.job_name, batch_id))
             return row[1]
+
         return self._run(work)
 
-    def get_receipts(self, job_name, batch_id):
-        def work(conn):
-            rows = self._x(conn, "SELECT output_name, receipt_json FROM {output_receipts} WHERE job_name = ? "
-                                 "AND batch_id = ? ORDER BY output_name", (job_name, batch_id)).fetchall()
-            return {r[0]: _json_value(r[1]) for r in rows}
-        return self._run(work)
+    # --- batch queries --------------------------------------------------------------------------------------
 
-    _BATCH_COLUMNS = ("batch_id, batch_sequence, run_key, status, failed_from, manifest_json, error_message, "
-                      "engine_metadata, created_at, updated_at")
-
-    def _batch(self, row):
+    def _batch(self, row: Sequence[Any]) -> dict[str, Any]:
         read = self._dialect.read_timestamp
-        return {"batch_id": row[0], "batch_sequence": int(row[1]), "run_key": row[2], "status": row[3],
-                "failed_from": row[4], "manifest": _json_value(row[5]), "error": row[6],
-                "engine_metadata": _json_value(row[7]) if row[7] is not None else None,
-                "created_at": read(row[8]), "updated_at": read(row[9])}
+        return {
+            "batch_id": row[0], "scope": row[1] or "", "batch_sequence": int(row[2]), "job_key": row[3],
+            "status": row[4], "tokens": _json_value(row[5]) if row[5] is not None else None,
+            "manifest": _json_value(row[6]), "failed_from": row[7], "started_at": read(row[8]),
+            "finished_at": read(row[9]), "duration_ms": None if row[10] is None else int(row[10]),
+            "rows_written": int(row[11] or 0), "error": row[12],
+            "engine_metadata": _json_value(row[13]) if row[13] is not None else None,
+            "created_at": read(row[14]), "updated_at": read(row[15]), "attempts": int(row[16] or 1),
+        }
 
-    def _batches(self, where, args, suffix=""):
+    def _batches(self, where: str, args: Sequence[Any], suffix: str = "") -> list[dict[str, Any]]:
+        rows = self._run(lambda conn: self._x(
+            conn, "SELECT " + _BATCH_COLUMNS + " FROM {sw_jobs} WHERE " + where + suffix, args).fetchall())
+        return [self._batch(row) for row in rows]
+
+    def get_batch(self, job_name: str, batch_id: str) -> dict[str, Any] | None:
+        found = self._batches("job_name = ? AND job_id = ?", (job_name, batch_id))
+        return found[0] if found else None
+
+    def find_batch_by_job_key(self, job_name: str, job_key: str, scope: str = "") -> dict[str, Any] | None:
+        found = self._batches("job_name = ? AND scope = ? AND job_key = ?", (job_name, scope, job_key))
+        return found[0] if found else None
+
+    def find_latest_completed_batch(self, job_name: str, scope: str = "") -> dict[str, Any] | None:
+        found = self._batches("job_name = ? AND scope = ? AND status = 'completed'", (job_name, scope),
+                              " ORDER BY sequence DESC LIMIT 1")
+        return found[0] if found else None
+
+    def list_incomplete_batches(self, job_name: str, scope: str = "") -> list[dict[str, Any]]:
+        """The scope's batches not yet completed, abandoned or skipped, oldest first."""
+        return self._batches("job_name = ? AND scope = ? AND status NOT IN (%s)" % self._marks(TERMINAL_STATUSES),
+                             (job_name, scope, *TERMINAL_STATUSES), " ORDER BY sequence")
+
+    def list_batches(self, job_name: str, limit: int = 20, scope: str | None = None) -> list[dict[str, Any]]:
+        """The newest batches of the job (of one scope, or all when scope is None), newest first."""
+        where, args = ("job_name = ?", [job_name]) if scope is None else ("job_name = ? AND scope = ?",
+                                                                          [job_name, scope])
+        return self._batches(where, (*args, int(limit)), " ORDER BY created_at DESC, sequence DESC LIMIT ?")
+
+    def purge_batches(self, job_name: str, older_than: Any, scope: str | None = None) -> int:
+        """
+        Deletes the completed, abandoned and skipped batches last updated before `older_than` (an aware datetime),
+        with their receipts and sent events; sequences are kept.
+        """
+        cutoff = self._dialect.timestamp_parameter(older_than)
+        where = "job_name = ? AND status IN (%s) AND updated_at < ?" % self._marks(TERMINAL_STATUSES)
+        args = [job_name, *TERMINAL_STATUSES, cutoff]
+        if scope is not None:
+            where, args = where + " AND scope = ?", [*args, scope]
+
         def work(conn):
-            rows = self._x(conn, "SELECT %s FROM {batches} WHERE %s%s" % (self._BATCH_COLUMNS, where, suffix),
-                           args).fetchall()
-            return [self._batch(row) for row in rows]
+            ids = [row[0] for row in self._x(conn, "SELECT job_id FROM {sw_jobs} WHERE " + where, args).fetchall()]
+            for batch_id in ids:
+                self._x(conn, "DELETE FROM {sw_receipts} WHERE job_name = ? AND job_id = ?", (job_name, batch_id))
+                self._x(conn, "DELETE FROM {sw_events} WHERE job_name = ? AND job_id = ? AND status = 'sent'",
+                        (job_name, batch_id))
+                self._x(conn, "DELETE FROM {sw_jobs} WHERE job_name = ? AND job_id = ?", (job_name, batch_id))
+            return len(ids)
+
         return self._run(work)
 
-    def get_batch(self, job_name, batch_id):
-        found = self._batches("job_name = ? AND batch_id = ?", (job_name, batch_id))
-        return found[0] if found else None
+    # --- receipts (sw_receipts) -----------------------------------------------------------------------------
 
-    def find_batch_by_run_key(self, job_name, run_key):
-        found = self._batches("job_name = ? AND run_key = ?", (job_name, run_key))
-        return found[0] if found else None
+    def record_receipt(self, lease: Lease, batch_id: str, receipt: WriteReceipt,
+                       manifest: Mapping[str, Any] | None = None) -> None:
+        """Stores an output's receipt (and the batch manifest, in the same transaction); fenced."""
+        details = receipt.to_dict()
 
-    def find_latest_completed_batch(self, job_name):
-        found = self._batches("job_name = ? AND status = 'completed'", (job_name,),
-                              " ORDER BY batch_sequence DESC LIMIT 1")
-        return found[0] if found else None
-
-    def list_incomplete_batches(self, job_name):
-        return self._batches("job_name = ? AND status NOT IN ('completed', 'abandoned')", (job_name,),
-                             " ORDER BY batch_sequence")
-
-    def list_batches(self, job_name, limit=20):
-        return self._batches("job_name = ?", (job_name, int(limit)), " ORDER BY batch_sequence DESC LIMIT ?")
-
-    # --- outbox ---------------------------------------------------------------------------------------------
-
-    def list_pending_events(self, job_name):
         def work(conn):
-            rows = self._x(conn, "SELECT batch_id, output_name, event_sequence, destination, payload_json "
-                                 "FROM {outbox_events} WHERE job_name = ? AND status = 'pending' "
-                                 "ORDER BY batch_id, output_name, event_sequence", (job_name,)).fetchall()
-            return [{"batch_id": r[0], "output_name": r[1], "event_sequence": int(r[2]), "destination": r[3],
-                     "payload": _json_value(r[4])} for r in rows]
-        return self._run(work)
+            self._check(conn, lease)
+            self._x(conn, "INSERT INTO {sw_receipts} (job_name, job_id, target, rows_written, destination, files, "
+                          "details, committed_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, {json}, {json}, "
+                          "{now}, {now}, {now}) " + self._dialect.conflict_update(
+                              ("job_name", "job_id", "target"),
+                              ("rows_written", "destination", "files", "details", "committed_at", "updated_at")),
+                    (lease.job_name, batch_id, receipt.output_name, receipt.rows, receipt.destination,
+                     _json_text(list(receipt.files)), _json_text(details)))
+            if manifest is not None:
+                self._x(conn, "UPDATE {sw_jobs} SET checkpoint = {json}, updated_at = {now} "
+                              "WHERE job_name = ? AND job_id = ?", (_json_text(manifest), lease.job_name, batch_id))
 
-    def mark_events_sent(self, lease, batch_id, output_name, event_sequences):
+        self._run(work)
+
+    def get_receipts(self, job_name: str, batch_id: str) -> dict[str, dict[str, Any]]:
+        rows = self._run(lambda conn: self._x(
+            conn, "SELECT target, details FROM {sw_receipts} WHERE job_name = ? AND job_id = ? ORDER BY target",
+            (job_name, batch_id)).fetchall())
+        return {row[0]: _json_value(row[1]) for row in rows}
+
+    # --- commit & outbox (sw_events) ------------------------------------------------------------------------
+
+    def commit_batch(self, lease: Lease, batch_id: str, manifest: Mapping[str, Any],
+                     events: Mapping[str, tuple[str, Sequence[Mapping[str, Any]]]],
+                     schema_signatures: Sequence[tuple[str, str, str]] = ()) -> None:
+        """
+        Marks the batch committed and stores its outbox events ({output: (destination, rows)}) and the accepted
+        schema signatures ([(path prefix, header hash, signature)]) atomically.
+        """
+        for output, (destination, _) in events.items():
+            if not destination:
+                raise StateError("output %s has no event destination" % output)
+
+        def work(conn):
+            self._check(conn, lease)
+            row = self._x(conn, "SELECT status FROM {sw_jobs} WHERE job_name = ? AND job_id = ?",
+                          (lease.job_name, batch_id)).fetchone()
+            if row is None:
+                raise StateError("batch %s does not exist" % batch_id)
+            self._move(conn, lease.job_name, batch_id, row[0], "committed", manifest=manifest)
+            for output, (destination, rows) in sorted(events.items()):
+                for number, payload in enumerate(rows):
+                    self._x(conn, "INSERT INTO {sw_events} (job_name, job_id, target, sequence, destination, payload, "
+                                  "status, sent_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, {json}, 'pending', "
+                                  "NULL, {now}, {now}) "
+                            + self._dialect.conflict_ignore(("job_name", "job_id", "target", "sequence")),
+                            (lease.job_name, batch_id, output, number, destination, _json_text(payload)))
+            for path, header_hash, signature in schema_signatures:
+                self._x(conn, "INSERT INTO {sw_signatures} (job_name, path, hash, signature, created_at, updated_at) "
+                              "VALUES (?, ?, ?, ?, {now}, {now}) "
+                        + self._dialect.conflict_update(("job_name", "path"), ("hash", "signature", "updated_at")),
+                        (lease.job_name, path, header_hash, signature))
+
+        self._run(work)
+
+    def list_pending_events(self, job_name: str, scope: str = "") -> list[dict[str, Any]]:
+        """The scope's events not yet sent, in batch, output and event order."""
+        rows = self._run(lambda conn: self._x(
+            conn, "SELECT e.job_id, e.target, e.sequence, e.destination, e.payload FROM {sw_events} e "
+                  "JOIN {sw_jobs} j ON j.job_name = e.job_name AND j.job_id = e.job_id "
+                  "WHERE e.job_name = ? AND j.scope = ? AND e.status = 'pending' "
+                  "ORDER BY j.sequence, e.target, e.sequence", (job_name, scope)).fetchall())
+        return [{"batch_id": row[0], "output_name": row[1], "event_sequence": int(row[2]), "destination": row[3],
+                 "payload": _json_value(row[4])} for row in rows]
+
+    def mark_events_sent(self, lease: Lease, batch_id: str, output_name: str, event_sequences: Sequence[int]) -> None:
         def work(conn):
             self._check(conn, lease)
             for number in event_sequences:
-                self._x(conn, "UPDATE {outbox_events} SET status = 'sent', sent_at = {now} WHERE job_name = ? "
-                              "AND batch_id = ? AND output_name = ? AND event_sequence = ?",
+                self._x(conn, "UPDATE {sw_events} SET status = 'sent', sent_at = {now}, updated_at = {now} "
+                              "WHERE job_name = ? AND job_id = ? AND target = ? AND sequence = ?",
                         (lease.job_name, batch_id, output_name, int(number)))
+
         self._run(work)
 
-    def purge_batches(self, job_name, older_than):
-        cutoff = self._dialect.timestamp_parameter(older_than)
+    # --- schema signatures (sw_signatures) ------------------------------------------------------------------
 
-        def work(conn):
-            ids = [r[0] for r in self._x(conn, "SELECT batch_id FROM {batches} WHERE job_name = ? AND status IN "
-                                               "('completed', 'abandoned') AND updated_at < ?",
-                                         (job_name, cutoff)).fetchall()]
-            for batch_id in ids:
-                self._x(conn, "DELETE FROM {output_receipts} WHERE job_name = ? AND batch_id = ?", (job_name, batch_id))
-                self._x(conn, "DELETE FROM {outbox_events} WHERE job_name = ? AND batch_id = ? AND status = 'sent'",
-                        (job_name, batch_id))
-                self._x(conn, "DELETE FROM {batches} WHERE job_name = ? AND batch_id = ?", (job_name, batch_id))
-            return len(ids)
-        return self._run(work)
-
-    # --- file schema signatures -----------------------------------------------------------------------------
-
-    def get_schema_signatures(self, job_name):
-        def work(conn):
-            rows = self._x(conn, "SELECT path_prefix, header_hash FROM {schema_signatures} WHERE job_name = ?",
-                           (job_name,)).fetchall()
-            return {r[0]: r[1] for r in rows}
-        return self._run(work)
-
-    def _store_signatures(self, conn, lease, signatures):
-        for prefix, header_hash, signature in signatures:
-            self._x(conn, "INSERT INTO {schema_signatures} (job_name, path_prefix, header_hash, signature, "
-                          "updated_at) VALUES (?, ?, ?, ?, {now}) ON CONFLICT (job_name, path_prefix) DO UPDATE "
-                          "SET header_hash = excluded.header_hash, signature = excluded.signature, "
-                          "updated_at = excluded.updated_at", (lease.job_name, prefix, header_hash, signature))
+    def get_schema_signatures(self, job_name: str) -> dict[str, str]:
+        rows = self._run(lambda conn: self._x(
+            conn, "SELECT path, hash FROM {sw_signatures} WHERE job_name = ?", (job_name,)).fetchall())
+        return {row[0]: row[1] for row in rows}

@@ -53,6 +53,25 @@ class JobError(Exception):
     """A manifest or overlay cannot be read or is not a YAML mapping."""
 
 
+class _JobLoader(yaml.SafeLoader):
+    """Safe YAML loader that rejects duplicate scalar keys instead of silently taking the last value."""
+
+    def compose_mapping_node(self, anchor):
+        node = super().compose_mapping_node(anchor)
+        seen = set()
+        for key_node, _ in node.value:
+            if not isinstance(key_node, yaml.ScalarNode) or key_node.tag == "tag:yaml.org,2002:merge":
+                continue
+            if key_node.value in seen:
+                raise yaml.constructor.ConstructorError(
+                    "while reading a job manifest", node.start_mark,
+                    "duplicate key %r: YAML keeps only the last value" % key_node.value,
+                    key_node.start_mark,
+                )
+            seen.add(key_node.value)
+        return node
+
+
 def read_local(location, limit):
     """The text of a local manifest (a file, or a directory holding job.yaml / job.yml)."""
     path = str(location)
@@ -96,13 +115,16 @@ def _read(location, readers):
 def _parse(text, where):
     if len(text) > MAX_MANIFEST_BYTES:
         raise JobError("%s is larger than %d bytes" % (where, MAX_MANIFEST_BYTES))
+    loader = _JobLoader(text)
     try:
-        data = yaml.safe_load(text)
+        data = loader.get_single_data()
     except yaml.YAMLError as exc:
         mark = getattr(exc, "problem_mark", None)
         position = " at line %d, column %d" % (mark.line + 1, mark.column + 1) if mark is not None else ""
         problem = getattr(exc, "problem", None)
         raise JobError("%s is not valid YAML%s%s" % (where, position, ": %s" % problem if problem else "")) from None
+    finally:
+        loader.dispose()
     if not isinstance(data, dict):
         raise JobError("%s must be a mapping" % where)
     return data

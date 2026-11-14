@@ -139,7 +139,8 @@ class Session:
     # --- run limits -----------------------------------------------------------------------------------------
 
     def start_clock(self):
-        """Starts runtime.timeout_seconds: running SQL is interrupted, and check_clock raises, once it is over."""
+        """(Re)starts runtime.timeout_seconds: running SQL is interrupted, and check_clock raises, once it is over."""
+        self.stop_clock()
         timeout = self.runtime.get("timeout_seconds")
         if timeout:
             self._deadline = time.monotonic() + float(timeout)
@@ -147,9 +148,15 @@ class Session:
             self._timer.daemon = True
             self._timer.start()
 
+    def stop_clock(self):
+        if self._timer is not None:
+            self._timer.cancel()
+        self._timer = self._deadline = None
+
     def check_clock(self):
         if self._deadline is not None and time.monotonic() >= self._deadline:
-            raise SessionError("the job ran longer than runtime.timeout_seconds (%s)" % self.runtime["timeout_seconds"])
+            raise SessionError("the batch ran longer than runtime.timeout_seconds (%s)"
+                               % self.runtime["timeout_seconds"])
 
     def close(self):
         if self._timer is not None:

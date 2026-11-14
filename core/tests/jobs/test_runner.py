@@ -1,3 +1,20 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """Crash-window tests of the shared Runner with a SQLite store and fakes that implement the contracts (TST-01)."""
 
 import time
@@ -5,6 +22,8 @@ import time
 import duckdb
 import pytest
 
+from streamwright.core.config.inputs import InputError
+from streamwright.core.jobs.locking import FailedJobPolicy, LockPlan
 from streamwright.core.jobs.runner import BrokerCall, Runner
 from streamwright.core.jobs.state import LeaseHeldError, open_sqlite, open_store
 from streamwright.core.jobs.types import Broker, ExecutionResult, Executor, Message, WriteReceipt
@@ -77,7 +96,7 @@ def state(tmp_path):
 
 
 def _run(state, executor, **kwargs):
-    run_args = {k: kwargs.pop(k) for k in ("mode", "run_key", "max_messages") if k in kwargs}
+    run_args = {k: kwargs.pop(k) for k in ("mode", "job_key", "max_messages") if k in kwargs}
     runner = Runner("job", state, executor, **kwargs)
     return runner, runner.run(**run_args)
 
@@ -103,15 +122,61 @@ def test_a_failure_keeps_the_receipts_and_retry_writes_only_the_rest(state):
     batch_id = runner.processed[0]
     assert (state.get_batch("job", batch_id)["status"], state.get_batch("job", batch_id)["failed_from"]) == (
         "failed", "processing")
-    blocked, code = _run(state, FakeExecutor())
-    assert code == 1 and "retry or abandon" in blocked.error
+    blocked, code = _run(state, FakeExecutor(), failed_jobs=FailedJobPolicy("block"))
+    assert code == 1 and "not retried (failed job policy block): retry or abandon it" in blocked.error
     lease = state.acquire_lease("job", "operator", 60)
     state.retry_batch(lease, batch_id)
     state.release_lease(lease)
     second = FakeExecutor()
-    _, code = _run(state, second, max_messages=0)
+    _, code = _run(state, second, max_messages=0, failed_jobs=FailedJobPolicy("block"))
     assert code == 0 and second.written == ["b"]
     assert state.get_batch("job", batch_id)["status"] == "completed"
+    assert state.get_batch("job", batch_id)["attempts"] == 2
+
+
+def test_by_default_a_run_abandons_a_failed_batch_keeping_its_error_then_runs_new_work(state, caplog):
+    runner, _ = _run(state, FakeExecutor(fail_at="b"))
+    failed = runner.processed[0]
+    second = FakeExecutor()
+    runner, code = _run(state, second)
+    assert code == 0 and runner.processed == ["job-00000002"] and second.written == ["a", "b"]
+    abandoned = state.get_batch("job", failed)
+    assert (abandoned["status"], abandoned["error"], abandoned["attempts"]) == ("abandoned", "RuntimeError: boom", 1)
+    assert "abandoned: job_id=job-00000001, reason=failed job policy abandon, error=RuntimeError: boom" in caplog.text
+
+
+def test_an_abandoned_keyed_batch_says_its_key_will_not_run_again(state, caplog):
+    _run(state, FakeExecutor(fail_at="b"), job_key="day-1")
+    runner, code = _run(state, FakeExecutor(), job_key="day-1")
+    assert code == 0 and runner.processed == []
+    assert "job_key=day-1 (a later run with this key does nothing)" in caplog.text
+
+
+def test_a_run_retries_a_failed_batch_from_where_it_failed_then_runs_new_work(state, caplog):
+    first = FakeExecutor(fail_at="b")
+    runner, _ = _run(state, first)
+    failed = runner.processed[0]
+    second = FakeExecutor()
+    runner, code = _run(state, second, failed_jobs=FailedJobPolicy("retry"))
+    assert code == 0 and runner.processed == [failed, "job-00000002"]
+    assert second.written == ["b", "a", "b"] and second.pins[0] == "pinned-1"   # the failed batch kept its pins
+    assert state.get_batch("job", failed)["status"] == "completed"
+    assert state.get_batch("job", failed)["attempts"] == 2
+    assert "retry: job_id=job-00000001, attempt=2 of 3, resumes_from=processing, error=RuntimeError: boom" in (
+        caplog.text)
+
+
+def test_a_failed_batch_is_retried_up_to_max_job_attempts_then_blocks(state):
+    policy = FailedJobPolicy("retry", 2)
+    runner, code = _run(state, FakeExecutor(fail_at="b"), failed_jobs=policy)
+    failed = runner.processed[0]
+    runner, code = _run(state, FakeExecutor(fail_at="b"), failed_jobs=policy)   # attempt 2 fails too
+    assert code == 1 and runner.processed == [failed]
+    untouched = FakeExecutor()
+    runner, code = _run(state, untouched, failed_jobs=policy)
+    assert code == 1 and untouched.calls == 0 and runner.processed == []
+    assert "not retried (started 2 time(s), max job attempts 2)" in runner.error
+    assert state.get_batch("job", failed)["attempts"] == 2
 
 
 def test_a_crash_resumes_with_the_pinned_values_saved_before_the_first_write(state):
@@ -149,12 +214,14 @@ def test_the_heartbeat_keeps_the_lease_during_a_long_batch(state):
     assert code == 0 and blocked and executor.written == ["a", "b"]
 
 
-def test_a_run_key_runs_once(state):
+def test_a_job_key_runs_once(state):
     first = FakeExecutor()
-    assert _run(state, first, run_key="2026-11-01")[1] == 0
+    assert _run(state, first, job_key="2026-11-01")[1] == 0
     second = FakeExecutor()
-    assert _run(state, second, run_key="2026-11-01")[1] == 0
+    assert _run(state, second, job_key="2026-11-01")[1] == 0
     assert second.calls == 0 and len(state.list_batches("job")) == 1
+    with pytest.raises(InputError, match=r"the job key .* is 192 characters: at most 191"):
+        _run(state, FakeExecutor(), job_key="k" * 192)
 
 
 def test_events_are_committed_with_the_batch_then_acked_then_relayed(state):
@@ -236,9 +303,9 @@ def test_the_carry_section_follows_the_last_completed_batch(state):
 
     first, second = Carrying(), Carrying()
     _run(state, first)
-    _run(state, Carrying(fail_at="a"))                    # a failed batch carries nothing on
+    failed_runner, _ = _run(state, Carrying(fail_at="a"))  # a failed batch carries nothing on
     lease = state.acquire_lease("job", "op", 60)
-    state.record_batch(lease, "job-00000002", "abandoned", {})
+    state.record_batch(lease, failed_runner.processed[0], "abandoned", {})
     state.release_lease(lease)
     _run(state, second)
     assert first.seen == {} and second.seen == {"bookmark": 1}
@@ -269,7 +336,7 @@ def test_a_transient_conflict_on_lease_renewal_is_retried_not_a_lost_lease(tmp_p
     def hold_the_lease_row(context):         # a contending acquire_lease that rolls back: renewals conflict meanwhile
         other = con.cursor()
         other.execute("BEGIN TRANSACTION")
-        other.execute("UPDATE job.streamwright.job_leases SET expires_at = expires_at")
+        other.execute("UPDATE job.streamwright.sw_leases SET expires_at = expires_at")
         time.sleep(0.7)
         other.execute("ROLLBACK")
         time.sleep(0.5)
@@ -280,3 +347,93 @@ def test_a_transient_conflict_on_lease_renewal_is_retried_not_a_lost_lease(tmp_p
     assert code == 0, runner.error
     assert store.get_batch("job", runner.processed[0])["status"] == "completed"
     assert "lease_renewal_retried" in logged
+
+
+def _lock(policy="prune", scope="", items=("1", "2", "3")):
+    return LockPlan(scope, policy, 0.0, None, "accounts", tuple(items), tuple("acct:%s" % i for i in items),
+                    {"accounts": list(items), "client": scope})
+
+
+def _prepared(executors):
+    def prepare(inputs):
+        executors.append((inputs, FakeExecutor()))
+        return executors[-1][1]
+    return prepare
+
+
+def test_prune_runs_the_free_items_and_pins_them(state):
+    other = state.acquire_lease("job", "w", 300, tokens=["acct:3"])
+    executors = []
+    runner = Runner("job", state, lock=_lock(), prepare=_prepared(executors))
+    assert runner.run() == 0
+    (inputs, _), = executors
+    assert inputs == {"scope": "", "config": {"accounts": ["1", "2"], "client": ""}, "tokens": ["acct:1", "acct:2"]}
+    batch = state.get_batch("job", runner.processed[0])
+    assert batch["manifest"]["inputs"] == inputs
+    assert batch["tokens"] == {"accepted": ["acct:1", "acct:2"], "skipped": ["acct:3"]}
+    state.release_lease(other)
+
+
+def test_a_run_whose_items_are_all_held_is_recorded_as_skipped(state):
+    other = state.acquire_lease("job", "w", 300, tokens=["acct:1", "acct:2"])
+    runner = Runner("job", state, lock=_lock(items=("1", "2")), prepare=_prepared([]))
+    assert runner.run() == 0 and runner.skipped and runner.processed == []
+    skipped, = state.list_batches("job")
+    assert (skipped["status"], skipped["tokens"]["skipped"]) == ("skipped", ["acct:1", "acct:2"])
+    assert state.get_lease("job", "")["held"] is False                  # the scope's lease was released
+    state.release_lease(other)
+
+
+def test_a_held_scope_is_skipped_under_prune_and_fails_otherwise(state):
+    other = state.acquire_lease("job", "w", 300, tokens=["scope:a"])
+    runner = Runner("job", state, scope="a", lock=_lock(scope="a"), prepare=_prepared([]))
+    assert runner.run() == 0 and runner.skipped
+    runner = Runner("job", state, scope="a", lock=_lock("fail", scope="a"), prepare=_prepared([]))
+    assert runner.run() == 1 and "scope:a" in runner.error
+    state.release_lease(other)
+
+
+def test_the_fail_policy_stops_on_a_held_item(state):
+    other = state.acquire_lease("job", "w", 300, tokens=["acct:1"])
+    runner = Runner("job", state, lock=_lock("fail"), prepare=_prepared([]))
+    assert runner.run() == 1 and "acct:1" in runner.error
+    state.release_lease(other)
+
+
+def test_scopes_keep_their_own_batches(state):
+    executors = []
+    failing = Runner("job", state, scope="a", lock=_lock("fail", "a", ("1",)),
+                     prepare=lambda inputs: FakeExecutor(fail_at="a"))
+    assert failing.run() == 1
+    runner = Runner("job", state, scope="b", lock=_lock("fail", "b", ("2",)), prepare=_prepared(executors))
+    assert runner.run() == 0                                           # a's failed batch does not stop b
+    assert executors[0][0]["config"]["accounts"] == ["2"]
+    a, b = failing.processed[0], runner.processed[0]
+    assert a != b and state.get_batch("job", a)["status"] == "failed"
+    assert state.get_batch("job", b)["scope"] == "b" and state.get_batch("job", b)["batch_sequence"] == 1
+    assert state.get_batch("job", a)["batch_sequence"] == 1
+
+
+def test_a_resumed_batch_needs_its_pinned_tokens_and_runs_with_its_pinned_inputs(state):
+    crashed = Runner("job", state, lock=_lock("fail", items=("1",)),
+                     prepare=lambda inputs: FakeExecutor(fail_at="a", error=KeyboardInterrupt()))
+    assert crashed.run() == 130                                        # left processing, its lease released
+    other = state.acquire_lease("job", "w", 300, tokens=["acct:1"])
+    executors = []
+    later = Runner("job", state, lock=_lock("fail", items=("2",)), prepare=_prepared(executors))
+    assert later.run() == 1 and "acct:1" in later.error and executors == []
+    state.release_lease(other)
+    assert later.run() == 0
+    resumed, new = executors
+    assert resumed[0]["config"]["accounts"] == ["1"] and new[0]["config"]["accounts"] == ["2"]
+    assert state.get_batch("job", crashed.processed[0])["status"] == "completed"
+
+
+def test_batch_sequences_are_real_and_ids_name_the_scope(state):
+    first = Runner("job", state, FakeExecutor())
+    second = Runner("job", state, FakeExecutor())
+    assert first.run() == 0 and second.run() == 0
+    assert first.processed == ["job-00000001"] and second.processed == ["job-00000002"]
+    scoped = Runner("job", state, FakeExecutor(), scope="client:x")
+    assert scoped.run() == 0
+    assert scoped.processed[0].startswith("job-") and scoped.processed[0].endswith("-00000001")

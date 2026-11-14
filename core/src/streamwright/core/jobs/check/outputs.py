@@ -40,6 +40,11 @@ def check_outputs(job, rules, findings):
                 findings.error("unknown-connection", (*path, "connection"), "unknown connection %r" % (
                     item["connection"],))
             continue
+        published = rules.check_publish(item, conn)
+        if published is not None:
+            for code, message, is_warning in published:
+                findings.add(code, path, message, is_warning)
+            continue
         target = rules.write_target(conn)
         if target is None:
             findings.error("not-writable", (*path, "connection"), "connection %r (provider %s) cannot be written "

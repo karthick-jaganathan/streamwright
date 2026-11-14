@@ -14,6 +14,7 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # **************************************************************************/
+
 """The request tables of a stream: their columns, names, partition conditions and `$name` parameter types."""
 
 import datetime

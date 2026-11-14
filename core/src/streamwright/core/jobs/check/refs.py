@@ -33,6 +33,8 @@ def check_references(job, rules, findings):
     declared = set(config) if isinstance(config, dict) else set()
     steps = {item["name"] for _, item in named_items(job, "steps")}
     connections = job.get("connections") if isinstance(job.get("connections"), dict) else {}
+    lock = ((job.get("runtime") or {}).get("state") or {}).get("lock")
+    lock_vars = {str(lock.get("as") or "item")} if isinstance(lock, dict) and "each" in lock else set()
     places = []
     for section in ("connections", "runtime"):
         if isinstance(job.get(section), dict):
@@ -45,6 +47,8 @@ def check_references(job, rules, findings):
     for path, key, value, rendered in places:
         for text in walk_strings(value):
             for expr in references(text):
+                if path == ("runtime", "state") and expr in lock_vars:
+                    continue
                 problem = _problem(expr, key, declared, steps, rules, rendered)
                 if problem:
                     findings.error(problem[0], path, problem[1])

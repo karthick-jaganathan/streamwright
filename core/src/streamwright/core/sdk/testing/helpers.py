@@ -14,6 +14,7 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # **************************************************************************/
+
 """Helpers for connector tests: a registered connector, installed DuckDB extensions, the CLI entry."""
 
 import contextlib

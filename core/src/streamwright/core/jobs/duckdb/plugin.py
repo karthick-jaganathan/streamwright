@@ -34,6 +34,9 @@ class DuckDBJobEngine:
     def main(self, argv=None, prog="streamwright"):
         return cli.main(argv, prog=prog)
 
+    def parser(self, prog="streamwright duckdb"):
+        return cli.build_parser(prog)
+
     def validate_job(self, job, *, overlays=(), config=None, strict=False, allowed=None):
         return engine.validate_job(job, overlays=overlays, config=config, strict=strict, allowed=allowed)
 

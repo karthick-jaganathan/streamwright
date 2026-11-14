@@ -46,6 +46,8 @@ class JobEngine(Protocol):
         may also take `prog`, the command's name in its usage lines (`streamwright duckdb` for the explicit form).
         """
 
+    # optional: parser(prog) -> argparse.ArgumentParser, the engine's command line (for help and MCP clients)
+
     def validate_job(self, job: str | Mapping[str, Any], *, overlays: Sequence[str] = (),
                      config: Mapping[str, Any] | None = None, strict: bool = False) -> JobReport:
         """Validates a manifest path or mapping without secret values."""

@@ -15,7 +15,6 @@
 # * limitations under the License.
 # **************************************************************************/
 
-
 """Reading files that async jobs produce: csv, jsonl or json, optionally zip or gzip compressed."""
 
 import csv

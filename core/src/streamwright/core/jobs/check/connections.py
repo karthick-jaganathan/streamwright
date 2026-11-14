@@ -23,6 +23,21 @@ __all__ = ["check_connections"]
 
 
 def check_connections(job, rules, findings):
+    lookup_only = _lookup_only(job)
     for name, conn in connections_of(job).items():
+        if name in lookup_only:
+            continue                     # read by a database lookup on the driver, not by the engine's adapters
         for code, message, is_warning in rules.check_connection(name, conn):
             findings.add(code, ("connections", name), message, is_warning)
+
+
+def _lookup_only(job):
+    """The connections only spec.lookups' database lookups use (no step, output or runtime.state does)."""
+    spec = job.get("spec") if isinstance(job.get("spec"), dict) else {}
+    lookups = spec.get("lookups") if isinstance(spec.get("lookups"), dict) else {}
+    named = {lookup.get("connection") for lookup in lookups.values()
+             if isinstance(lookup, dict) and lookup.get("type") == "database"}
+    used = {item.get("connection") for section in ("steps", "outputs") for item in job.get(section) or ()
+            if isinstance(item, dict)}
+    used.add(((job.get("runtime") or {}).get("state") or {}).get("connection"))
+    return named - used

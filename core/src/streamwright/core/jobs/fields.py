@@ -41,16 +41,18 @@ class Field:
       values       Field of every value of a mapping keyed by names (connections, spec.config)
       items        Field of every list item
       variants     {discriminator value: {key: Field}}: extra keys allowed when `discriminator` has that value
+      default      the value used when the key is absent: the JSON schema's `default` annotation (not checked)
     """
 
     def __init__(self, kind=None, *, required=False, enum=None, pattern=None, minimum=None, min_items=None,
                  fields=None, values=None, items=None, open=False, description="", discriminator=None,
-                 variants=None):
+                 variants=None, default=None):
         self.kind = kind if kind is None or isinstance(kind, tuple) else (kind,)
         self.required, self.enum, self.pattern, self.minimum, self.min_items = (
             required, enum, pattern, minimum, min_items)
         self.fields, self.values, self.items, self.open = fields, values, items, open
         self.description, self.discriminator, self.variants = description, discriminator, variants or {}
+        self.default = default
 
 
 def path_text(path):
@@ -125,6 +127,8 @@ def json_schema_of(field):
         schema["type"] = list(field.kind) if len(field.kind) > 1 else field.kind[0]
     if field.description:
         schema["description"] = field.description
+    if field.default is not None:
+        schema["default"] = field.default
     if field.enum is not None:
         schema["enum"] = list(field.enum)
     if field.pattern is not None:

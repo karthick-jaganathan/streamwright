@@ -2,9 +2,9 @@
 
 The SQS connector uses [connector contract v1.1](../../../docs/design/connector-contract.md). Its sole
 `streamwright.connectors` entry point exports `streamwright.connectors.sqs:CONNECTOR`.
-The source engine peeks with zero visibility timeout without deleting messages. SparkJob consumes messages,
-deletes only after output writes and the outbox commit, and publishes FIFO events with stable deduplication IDs.
-DuckDBJob call steps use the source adapter for read-only queue inspection.
+The source engine (and a DuckDBJob call step) peeks with zero visibility timeout without deleting messages.
+DuckDBJob and SparkJob consume messages, delete them only after output writes and the outbox commit, and publish
+FIFO events with stable deduplication IDs.
 
 ```yaml
 auth:

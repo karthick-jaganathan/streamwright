@@ -21,6 +21,7 @@ import re
 from types import MappingProxyType
 
 from streamwright.core.jobs.fields import Field
+from streamwright.core.jobs.lookups.rules import INPUT_LOOKUP_FIELD
 from streamwright.core.jobs.plan import item_dependencies
 from streamwright.core.validation import vocabulary as source_spec
 
@@ -40,6 +41,7 @@ def input_field():
         "required": Field("boolean"),
         "default": Field(),
         "description": Field("string"),
+        "lookup": INPUT_LOOKUP_FIELD,
     })
 
 
@@ -99,6 +101,12 @@ class JobRules:
     def write_target(self, connection):
         """The WriteTarget for outputs through `connection`, or None when it cannot be written to."""
         return
+
+    def check_publish(self, output, connection):
+        """
+        None when `output` writes; when it publishes events (a broker's publish call), its problems
+        [(code, message, is_warning)] (the write checks are skipped).
+        """
 
     def secret_keys(self, connection):
         """Connection keys whose values must be `{{ secrets.NAME }}` references."""

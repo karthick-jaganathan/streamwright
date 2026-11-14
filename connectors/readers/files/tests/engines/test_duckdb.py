@@ -1,3 +1,20 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """The files DuckDB adapter (kind: DuckDBJob): reads and writes inside the roots, relative to the job's folder."""
 
 import datetime
@@ -64,7 +81,7 @@ def job(tmp_path, **output):
                        "options": {"header": True, "delimiter": ";"}}],
             "outputs": [dict({"name": "o", "connection": "out", "step": "orders", "path": "export/orders.parquet",
                               "format": "parquet", "mode": "overwrite"}, **output)],
-            "runtime": {"state": {"sqlite": str(tmp_path / "state.db")}}}
+            "runtime": {"state": {"sqlite": str(tmp_path / "state.db"), "apply_migrations": True}}}
 
 
 def test_a_job_reads_with_the_shared_option_vocabulary_and_writes_creating_folders(tmp_path):

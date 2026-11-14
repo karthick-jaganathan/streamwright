@@ -1,5 +1,19 @@
-# Copyright 2025 Karthick Jaganathan
-# SPDX-License-Identifier: Apache-2.0
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2025 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
 
 """
 The deltalake connector on the `duckdb` engine (kind: DuckDBJob): reads through DuckDB's delta extension
@@ -30,7 +44,7 @@ from streamwright.core.sdk.engines.duckdb import (
 
 try:  # the optional extra `duckdb`: reads work without it
     from deltalake import CommitProperties, DeltaTable, Transaction, write_deltalake
-    from deltalake.exceptions import TableNotFoundError
+    from deltalake.exceptions import DeltaError, TableNotFoundError
 except ImportError:
     write_deltalake = None
 
@@ -126,13 +140,25 @@ class DeltaLakeDuckDBAdapter:
         spec = context.spec
         location = _locate(context.session, context.connection, spec.path)
         options = client.storage_options(context.connection)
-        app_id = "%s:%s:%s" % (context.batch.job_name, spec.name, context.batch.store_identity)
+        app_id = context.batch.transaction_app_id(spec.name)
         version = context.batch.batch_sequence
         table = _open_table(location, options)
         if table is not None and (table.transaction_version(app_id) or 0) >= version:
             return WriteReceipt(spec.name, location, None, version=table.version(), already_committed=True)
+        commit = CommitProperties(app_transactions=[Transaction(app_id, version)])
         predicate = _predicate(context, table)
-        rows = _write(context, location, table, options=options, predicate=predicate,
-                      commit=CommitProperties(app_transactions=[Transaction(app_id, version)]))
+        try:
+            rows = _write(context, location, table, options=options, predicate=predicate, commit=commit)
+        except DeltaError as exc:
+            # another writer created the table first: write into it, unless it committed this very batch
+            if table is not None or "already exists" not in str(exc):
+                raise
+            table = _open_table(location, options)
+            if table is None:
+                raise
+            if (table.transaction_version(app_id) or 0) >= version:
+                return WriteReceipt(spec.name, location, None, version=table.version(), already_committed=True)
+            predicate = _predicate(context, table)
+            rows = _write(context, location, table, options=options, predicate=predicate, commit=commit)
         return WriteReceipt(spec.name, location, rows, version=DeltaTable(location, storage_options=options).version(),
                             predicate=predicate)

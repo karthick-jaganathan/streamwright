@@ -1,8 +1,32 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 from types import MappingProxyType
 
 import pytest
 
-from streamwright.core.jobs.inputs import InputError, effective_config, job_inputs, parse_set, secret_values
+from streamwright.core.jobs.inputs import (
+    InputError,
+    effective_config,
+    job_inputs,
+    parse_set,
+    secret_values,
+    state_secrets,
+)
 from streamwright.core.jobs.validate import resolve_for_checks
 
 JOB = MappingProxyType({"spec": {
@@ -35,6 +59,8 @@ def test_secrets_come_from_values_then_the_environment_and_never_show_values():
     with pytest.raises(InputError) as caught:
         secret_values(JOB, {"token": "s3cr3t", "other": "s3cr3t"}, environ={})
     assert "s3cr3t" not in str(caught.value)
+    with pytest.raises(InputError, match="limit is a config input: give it with --set or --config"):
+        secret_values(JOB, {"token": "t", "limit": "5"}, environ={})
 
 
 def test_a_config_file_with_streams_is_rejected(tmp_path):
@@ -54,3 +80,20 @@ def test_validation_keeps_a_required_config_input_without_a_value_as_a_reference
     assert problems == [] and resolved["steps"][0]["sql"] == "SELECT '{{ config.day }}', 10"
     with pytest.raises(InputError, match="config 'limit'"):
         resolve_for_checks(job, {"limit": "many"})
+
+
+def test_a_state_command_needs_only_the_secrets_of_the_state_connection():
+    job = {"spec": {"secrets": {"api_token": {"type": "string"}, "db_password": {"type": "string"}}},
+           "connections": {"api": {"provider": "http", "token": "{{ secrets.api_token }}"},
+                           "state_db": {"provider": "postgres", "password": "{{ secrets.db_password }}"}},
+           "runtime": {"state": {"connection": "state_db"}}}
+    assert state_secrets(job, {"db_password": "pw"}, environ={}) == {"db_password": "pw",
+                                                                      "api_token": "{{ secrets.api_token }}"}
+    with pytest.raises(InputError, match="db_password"):
+        state_secrets(job, {}, environ={})
+    assert state_secrets(job, {}, environ={"STREAMWRIGHT_SECRET_DB_PASSWORD": "env"})["db_password"] == "env"
+    sqlite_job = dict(job, runtime={"state": {"sqlite": "state.db"}})
+    assert state_secrets(sqlite_job, {}, environ={}) == {"api_token": "{{ secrets.api_token }}",
+                                                         "db_password": "{{ secrets.db_password }}"}
+    assert state_secrets(job, {"db_password": "pw", "api_token": "unused"}, environ={})["api_token"] == \
+        "{{ secrets.api_token }}"

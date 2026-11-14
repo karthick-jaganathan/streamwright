@@ -2,9 +2,9 @@
 
 The Kafka connector uses [connector contract v1.1](../../../docs/design/connector-contract.md). Its sole
 `streamwright.connectors` entry point exports `streamwright.connectors.kafka:CONNECTOR`.
-The source engine peeks without joining a consumer group; SparkJob consumes with a group, commits offsets only
-after output writes and the outbox commit, and publishes events with stable deduplication headers.
-DuckDBJob call steps use the source adapter for read-only topic inspection.
+The source engine (and a DuckDBJob call step) peeks without joining a consumer group; DuckDBJob and SparkJob
+consume with a group, commit offsets only after output writes and the outbox commit, and publish events with stable
+deduplication headers.
 
 ```yaml
 auth:

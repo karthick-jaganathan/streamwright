@@ -22,7 +22,7 @@ import logging
 import sys
 from types import MappingProxyType
 
-from streamwright.core.runtime.logs.formatting import JsonFormatter
+from streamwright.core.runtime.logs.formatting import JsonFormatter, TextFormatter
 from streamwright.core.runtime.logs.handlers import (
     ScrubFilter,
     ToRootHandler,
@@ -33,7 +33,7 @@ from streamwright.core.runtime.logs.handlers import (
     logger_settings,
     restored_items,
 )
-from streamwright.core.runtime.logs.lines import DEFAULT_MAX_CHARS, NETWORK, TEXT_FORMAT, level_number
+from streamwright.core.runtime.logs.lines import DEFAULT_MAX_CHARS, NETWORK, level_number
 from streamwright.core.runtime.logs.record_factory import CONTEXT_SETUPS, RecordFactory, installed_factory
 from streamwright.core.runtime.logs.redaction import mask_text
 
@@ -94,7 +94,7 @@ class LogSetup:
             self._made = apply_dict_config(dict({"disable_existing_loggers": False}, **config))
         else:
             self.handler = logging.StreamHandler(sys.stderr if stream is None else stream)
-            self.handler.setFormatter(JsonFormatter(self) if log_format == "json" else logging.Formatter(TEXT_FORMAT))
+            self.handler.setFormatter(JsonFormatter(self) if log_format == "json" else TextFormatter())
             if not root.handlers:  # as logging.basicConfig: other libraries log their warnings and errors
                 root.setLevel(logging.WARNING)
             root.addHandler(self.handler)

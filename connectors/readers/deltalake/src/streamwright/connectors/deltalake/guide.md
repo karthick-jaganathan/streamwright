@@ -39,7 +39,8 @@ deltalake offers the shared table operations (`streamwright.core.sdk.operations.
   `overwrite` of what `replace_where` selects, or of the `whole_table` (one of them is required); `merge` with a
   `condition` (using `target.` and `source.`) and when_* clauses (`{action, set, predicate}`), its target pruned by a
   `target_predicate` derived from the source rows (e.g. `target.day IN ({{ step.day }})`). Every write carries an
-  application transaction (`<job>:<output>`, the batch sequence), so replaying a batch never writes twice. Schemas are
+  application transaction (app id `<job>:<output>:<store id>[:<scope>]`, version = the batch sequence), so replaying
+  a batch never writes twice and runtime.state scopes appending to one table never collide. Schemas are
   strict unless `schema_evolution: add_columns`.
 - **`table.query`** (source engine only) runs ONE read-only DuckDB SELECT: it may call `delta_scan` only on a literal
   path inside the roots, and read `delta_table`, the table at `path`; `$name` parameters take the values of `params`

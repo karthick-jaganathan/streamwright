@@ -42,6 +42,7 @@ from typing import Any
 
 from streamwright.core.config.inputs import parse_duration
 from streamwright.core.net.policies import DEFAULT_RETRY, TIMEOUT_SECONDS, RetryPolicy, retryable_error
+from streamwright.core.runtime.logs.context import bind
 
 __all__ = [
     "DEFAULTS",
@@ -165,7 +166,7 @@ def _with_timeout(work, seconds):
         except BaseException as exc:                       # re-raised on the calling thread
             failed.append(exc)
 
-    thread = threading.Thread(target=target, name="streamwright-policy-timeout", daemon=True)
+    thread = threading.Thread(target=bind(target), name="streamwright-policy-timeout", daemon=True)
     thread.start()
     thread.join(seconds)
     if thread.is_alive():

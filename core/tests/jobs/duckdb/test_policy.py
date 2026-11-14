@@ -1,3 +1,20 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """DuckDBJob execution policy (contract v1.2 §6a): retry of transient writes, on_error on steps/outputs, bad keys."""
 
 from streamwright.core.jobs import policy
@@ -13,7 +30,7 @@ def _job(tmp_path, *, name="policy", step_sql="SELECT 1 AS id", step_extra=None,
     return {"kind": "DuckDBJob", "name": name,
             "connections": {"wh": {"provider": "duckdb", "path": str(tmp_path / ("%s.duckdb" % name))}},
             "steps": [step], "outputs": [output],
-            "runtime": {"state": {"sqlite": str(tmp_path / ("%s-state.db" % name))}}}
+            "runtime": {"state": {"sqlite": str(tmp_path / ("%s-state.db" % name)), "apply_migrations": True}}}
 
 
 def test_an_output_write_retries_a_transient_error_through_the_shared_retry(tmp_path, monkeypatch):

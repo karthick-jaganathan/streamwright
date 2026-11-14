@@ -15,7 +15,6 @@
 # * limitations under the License.
 # **************************************************************************/
 
-
 """
 Loading a run into a dlt destination (https://dlthub.com/docs): `streamwright run SOURCE --output
 dlt:DESTINATION[:DATASET]`.

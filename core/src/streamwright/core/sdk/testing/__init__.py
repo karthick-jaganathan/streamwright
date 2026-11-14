@@ -14,6 +14,7 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # **************************************************************************/
+
 """
 Certification suites and test helpers for connectors: the first-party connectors pass them, and so can a third-party
 connector built on streamwright.core.sdk. Needs pytest.

@@ -1,3 +1,20 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """Job-kind and command plug-ins are discovered from metadata, not imported by the core CLI."""
 
 import argparse
@@ -167,10 +184,30 @@ def test_every_command_and_option_has_help(capsys):
                if item.split()[1] not in plugin_commands]  # (installed plug-ins check their own)
     assert missing == []
     assert _without_help(build_validate_parser(), "streamwright validate") == []
-    assert _without_help(duckdb_cli._build_parser("streamwright duckdb"), "streamwright duckdb") == []
+    assert _without_help(duckdb_cli.build_parser("streamwright duckdb"), "streamwright duckdb") == []
     assert cli.main(["plan", "-h"]) == 0
     with pytest.raises(SystemExit) as shown:
         cli.main(["duckdb", "-h"])  # forwarded to the engine's own parser
     assert shown.value.code == 0
     out = capsys.readouterr().out
     assert "usage: streamwright plan" in out and "usage: streamwright duckdb" in out
+
+
+def test_engine_option_values_are_not_manifest_paths(tmp_path, capsys):
+    job = tmp_path / "job.yaml"
+    job.write_text("kind: DuckDBJob\nname: routed\nconnections: {wh: {provider: duckdb, path: ':memory:'}}\n"
+                   "steps: [{name: s, sql: 'SELECT 1 AS n'}]\n"
+                   "outputs: [{name: o, connection: wh, step: s, table: t, mode: overwrite}]\n"
+                   "runtime: {state: {sqlite: %s}}\n" % (tmp_path / "state.db"))
+    assert cli.main(["run", str(job), "--state-lock-policy", "wait", "--state-lock-timeout", "5m", "--job-key",
+                     "k", "--dry-run"]) == 0
+    assert "Job: routed" in capsys.readouterr().out
+
+
+def test_source_options_given_to_a_job_are_named(tmp_path, capsys):
+    job = tmp_path / "job.yaml"
+    job.write_text("kind: DuckDBJob\nname: routed\n")
+    assert cli.main(["run", str(job), "--stream", "a", "--output=jsonl:out"]) == 2
+    assert "--output, --stream only apply to sources, not to a DuckDBJob" in capsys.readouterr().err
+    assert cli.main(["validate", str(job), "--format", "json"]) == 2
+    assert "--format only applies to sources" in capsys.readouterr().err

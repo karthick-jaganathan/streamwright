@@ -15,7 +15,6 @@
 # * limitations under the License.
 # **************************************************************************/
 
-
 """
 Connectors (docs/design/connector-contract.md) as the source engine and the validators reach them: the connector
 definitions registered by connector packages in the `streamwright.connectors` entry-point group, and the query

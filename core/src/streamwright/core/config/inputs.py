@@ -125,10 +125,11 @@ def _coerce(definition, value, today):
     return [_coerce_scalar(definition.get("items", "string"), item, today) for item in value]
 
 
-def resolve_inputs(definitions, provided, section, today=None, hide_values=False):
+def resolve_inputs(definitions, provided, section, today=None, hide_values=False, *, config_names=()):
     """
     Applies defaults, required checks and types; raises one InputError listing every problem.
-    With hide_values (secrets), the messages never include the values.
+    With hide_values (secrets), the messages never include the values. `config_names`: the declared config inputs, so
+    an unknown secret that is one of them is reported as given in the wrong place.
     """
     definitions = definitions or {}
     values, problems = {}, []
@@ -152,8 +153,11 @@ def resolve_inputs(definitions, provided, section, today=None, hide_values=False
                 problems.append("%s %r: %s" % (section, name, exc))
     unknown = sorted(set(provided) - set(definitions))
     if unknown:
-        problems.append("unknown %s: %s (declared: %s)" % (section, ", ".join(unknown),
-                                                         ", ".join(sorted(definitions)) or "none"))
+        misplaced = [name for name in unknown if name in config_names]
+        hint = ("; %s %s a config input: give it with --set or --config" % (
+            ", ".join(misplaced), "is" if len(misplaced) == 1 else "are")) if misplaced else ""
+        problems.append("unknown %s: %s (declared: %s%s)" % (section, ", ".join(unknown),
+                                                           ", ".join(sorted(definitions)) or "none", hint))
     if problems:
         raise InputError("; ".join(problems))
     return values

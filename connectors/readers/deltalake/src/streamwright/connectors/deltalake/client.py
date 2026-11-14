@@ -1,5 +1,19 @@
-# Copyright 2025 Karthick Jaganathan
-# SPDX-License-Identifier: Apache-2.0
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2025 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
 
 """
 What the deltalake connector knows about Delta Lake tables and the storage they live in, shared by every engine
@@ -65,6 +79,9 @@ def normalize_roots(roots: Iterable[str], base: str | None = None) -> tuple[str,
 
 
 def _inside(path: str, roots: Sequence[str]) -> bool:
+    if "://" not in path:
+        path = os.path.realpath(path)
+        roots = tuple(os.path.realpath(root) if "://" not in root else root for root in roots)
     separator = "/" if "://" in path else os.sep
     return any(path == root or path.startswith(root.rstrip(separator) + separator) for root in roots)
 
@@ -90,7 +107,7 @@ def _delta_scan_problem(roots: tuple[str, ...], name: str, call: Mapping[str, An
     literal = ((arguments[0].get("expression") or {}).get("literal") or {}) if arguments else {}
     if literal.get("kind") != "STRING":
         return "the query reads delta_scan only on a literal path inside the roots (no parameter or expression)"
-    if not _inside(_normalized(str(literal.get("text"))), roots):
+    if not _inside(_normalized(str(literal.get("text"))), roots):   # DuckDB reads it from the working folder
         return "the query reads path %r which is outside the roots (%s)" % (literal.get("text"), ", ".join(roots))
     return None
 

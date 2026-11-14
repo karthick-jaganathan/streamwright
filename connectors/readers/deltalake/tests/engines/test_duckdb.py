@@ -1,3 +1,20 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """The deltalake DuckDB adapter: delta_scan reads inside the roots, shared write rules, replay-safe writes."""
 
 import os
@@ -6,6 +23,8 @@ from types import MappingProxyType
 import pytest
 
 from streamwright.connectors.deltalake import CONNECTOR
+from streamwright.connectors.deltalake.engines import duckdb as duckdb_engine
+from streamwright.connectors.deltalake.engines.duckdb import DeltaLakeDuckDBAdapter
 from streamwright.core.sdk.testing import DuckDBAdapterContract, JobInvalidError, SqlStateStore, open_sqlite, run_job
 
 deltalake = pytest.importorskip("deltalake")
@@ -28,7 +47,7 @@ def _job(tmp_path, output, sql="SELECT * FROM (VALUES (1, DATE '2026-11-01', 'a'
             "connections": {"lake": {"provider": "deltalake", "roots": [str(tmp_path / "lake")]}},
             "steps": [{"name": "rows", "sql": sql}],
             "outputs": [dict({"name": "orders", "connection": "lake", "step": "rows", "path": "orders"}, **output)],
-            "runtime": {"state": {"sqlite": str(tmp_path / "state.db")}}}
+            "runtime": {"state": {"sqlite": str(tmp_path / "state.db"), "apply_migrations": True}}}
 
 
 def _table(tmp_path):
@@ -68,6 +87,76 @@ def test_an_append_whose_commit_already_happened_is_not_written_again(tmp_path, 
     assert run_job(job).exit_code == 0 and _table(tmp_path).to_pyarrow_table().num_rows == 4
 
 
+def test_a_retried_append_is_written_with_its_own_transaction_version(tmp_path, monkeypatch):
+    job = _job(tmp_path, {"mode": "append"})
+    assert run_job(job).exit_code == 0 and _table(tmp_path).to_pyarrow_table().num_rows == 2
+    adapter = DeltaLakeDuckDBAdapter
+    real = adapter.write
+
+    def down(self, *args, **kwargs):              # the table is unreachable: nothing is written
+        raise ConnectionError("storage unreachable")
+    monkeypatch.setattr(adapter, "write", down)
+    failed = run_job(job)
+    assert failed.exit_code == 1 and _table(tmp_path).to_pyarrow_table().num_rows == 2
+    monkeypatch.setattr(adapter, "write", real)
+    store = open_sqlite(str(tmp_path / "state.db"))
+    lease = store.acquire_lease("lake_job", "operator", 60)
+    store.retry_batch(lease, failed.batches[0])
+    store.release_lease(lease)
+    resumed = run_job(job, resume_only=True)
+    assert resumed.exit_code == 0 and resumed.skipped == set()        # not mistaken for the first batch's commit
+    assert _table(tmp_path).to_pyarrow_table().num_rows == 4
+    assert store.get_batch("lake_job", failed.batches[0])["batch_sequence"] == 2
+
+
+def test_scopes_commit_with_their_own_app_ids(tmp_path):
+    job = _job(tmp_path, {"mode": "append"})
+    job["spec"] = {"config": {"client": {"type": "string"}}}
+    job["runtime"]["state"]["scope"] = "client:{{ config.client }}"
+    for client in ("a", "b"):                     # both scopes' first batch: sequence 1, distinct app ids
+        assert run_job(job, config={"client": client}).exit_code == 0
+    assert _table(tmp_path).to_pyarrow_table().num_rows == 4
+
+
+def test_a_table_created_by_a_concurrent_writer_is_appended_to(tmp_path, monkeypatch):
+    job = _job(tmp_path, {"mode": "append"})
+    assert run_job(job).exit_code == 0
+    real, calls = duckdb_engine._open_table, []
+
+    def raced(location, options):                 # this run looked before the other created the table
+        calls.append(location)
+        return None if len(calls) == 1 else real(location, options)
+    monkeypatch.setattr(duckdb_engine, "_open_table", raced)
+    result = run_job(job)
+    assert result.exit_code == 0, result.error
+    assert len(calls) == 2 and _table(tmp_path).to_pyarrow_table().num_rows == 4
+
+
+def test_a_table_created_by_a_writer_of_the_same_batch_is_not_appended_to_again(tmp_path, monkeypatch):
+    job = _job(tmp_path, {"mode": "append"})
+    real_receipt = SqlStateStore.record_receipt
+
+    def lost(self, *args, **kwargs):              # the first worker created the table, then died
+        raise ConnectionError("state store unreachable")
+    monkeypatch.setattr(SqlStateStore, "record_receipt", lost)
+    failed = run_job(job)
+    assert failed.exit_code == 1 and _table(tmp_path).to_pyarrow_table().num_rows == 2
+    monkeypatch.setattr(SqlStateStore, "record_receipt", real_receipt)
+    real_open, calls = duckdb_engine._open_table, []
+
+    def raced(location, options):                 # the resuming worker looked before the table existed
+        calls.append(location)
+        return None if len(calls) == 1 else real_open(location, options)
+    monkeypatch.setattr(duckdb_engine, "_open_table", raced)
+    store = open_sqlite(str(tmp_path / "state.db"))
+    lease = store.acquire_lease("lake_job", "operator", 60)
+    store.retry_batch(lease, failed.batches[0])
+    store.release_lease(lease)
+    resumed = run_job(job, resume_only=True)
+    assert resumed.exit_code == 0 and "orders" in resumed.skipped
+    assert _table(tmp_path).to_pyarrow_table().num_rows == 2
+
+
 def _merge_job(tmp_path, v, *, durable=False):
     job = {"kind": "DuckDBJob", "name": "lake_job",
            "connections": {"lake": {"provider": "deltalake", "roots": [str(tmp_path / "lake")]}},
@@ -77,7 +166,7 @@ def _merge_job(tmp_path, v, *, durable=False):
                         "when_matched": [{"action": "update", "set": {"v": "source.v"}}],
                         "when_not_matched": [{"action": "insert"}]}]}
     if durable:
-        job["runtime"] = {"state": {"sqlite": str(tmp_path / "state.db")}}
+        job["runtime"] = {"state": {"sqlite": str(tmp_path / "state.db"), "apply_migrations": True}}
     return job
 
 

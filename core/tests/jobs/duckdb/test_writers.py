@@ -1,3 +1,20 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """Table and file writes of the built-in adapters."""
 
 import json
@@ -19,7 +36,7 @@ def _job(tmp_path, output, sql=ROWS):
                             "lake": {"provider": "files", "roots": [str(tmp_path / "lake")]}},
             "steps": [{"name": "data", "sql": sql}],
             "outputs": [dict({"name": "out", "step": "data"}, **output)],
-            "runtime": {"state": {"sqlite": str(tmp_path / "state.db")}}}
+            "runtime": {"state": {"sqlite": str(tmp_path / "state.db"), "apply_migrations": True}}}
 
 
 def _query(tmp_path, sql):
@@ -75,7 +92,7 @@ def test_the_run_reports_and_logs_the_files_it_wrote(tmp_path, caplog, capsys):
     job.write_text(yaml.safe_dump(_job(tmp_path, {"connection": "lake", "path": "one.csv", "format": "csv",
                                                   "mode": "overwrite"})))
     assert main(["run", str(job)]) == 0
-    assert "3 rows -> %s" % (tmp_path / "lake" / "one.csv") in capsys.readouterr().out
+    assert "3 rows -> %s" % (tmp_path / "lake" / "one.csv") in capsys.readouterr().err   # the run's recap line
 
 
 def test_the_run_summary_is_written_whatever_the_outcome(tmp_path, capsys):
@@ -85,7 +102,7 @@ def test_the_run_summary_is_written_whatever_the_outcome(tmp_path, capsys):
     summary = tmp_path / "summary.json"
     assert main(["run", str(job), "--summary", str(summary)]) == 0
     written = json.loads(summary.read_text())
-    assert written["status"] == "ok" and written["job"] == "writes" and len(written["batches"]) == 1
+    assert written["status"] == "ok" and written["job"] == "writes" and len(written["job_ids"]) == 1
     assert written["outputs"] == [{"name": "out", "rows": 3, "files": [str(tmp_path / "lake" / "one.csv")],
                                    "already_committed": False}]
     assert main(["run", str(job), "--summary", str(summary)]) == 1  # mode error: the file exists already
@@ -104,7 +121,9 @@ def test_a_bare_summary_is_logged(tmp_path, capsys, caplog):
     line = next(record for record in caplog.records if getattr(record, "event", None) == "run_summary")
     summary = json.loads(line.getMessage().partition("run summary: ")[2])  # one line of compact JSON
     assert summary["status"] == "ok" and summary["outputs"][0]["rows"] == 3
-    assert capsys.readouterr().out.startswith("Job: writes\n")  # stdout keeps the outputs' lines
+    end = next(record for record in caplog.records if getattr(record, "event", None) == "run_end")
+    assert end.status == "ok" and end.outputs == {"out": 3} and end.getMessage().startswith("job writes finished")
+    assert capsys.readouterr().out == ""                      # a run logs; stdout is for what is asked (--dry-run)
 
 
 def test_file_name_without_split_by_names_the_one_file_in_its_folder(tmp_path):

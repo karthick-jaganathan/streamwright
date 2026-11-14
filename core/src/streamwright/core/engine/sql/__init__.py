@@ -14,6 +14,7 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # **************************************************************************/
+
 """
 SQL in sources (docs/design/source-format.md): each stream shapes what its requests read with the SQL steps of its
 `transform`, DuckDB queries over the stream's own request tables and earlier steps; its `export` names the steps

@@ -22,9 +22,23 @@ from types import MappingProxyType
 
 from streamwright.core.jobs import ingest
 from streamwright.core.jobs.calls import partition_dependencies, partition_problems
+from streamwright.core.jobs.check.findings import connections_of
 from streamwright.core.jobs.check.rules import NAME_PATTERN, RESERVED_NAMES, JobRules, input_field
-from streamwright.core.jobs.duckdb.steps import CALL, READ, RECORDS_TABLE, SOURCE, SQL, STEP_KEYS, classify_step
+from streamwright.core.jobs.duckdb.steps import (
+    CALL,
+    CONSUME,
+    READ,
+    RECORDS_TABLE,
+    SOURCE,
+    SQL,
+    STEP_KEYS,
+    message_kind,
+    step_kind,
+)
 from streamwright.core.jobs.fields import Field
+from streamwright.core.jobs.locking import STATE_FIELDS
+from streamwright.core.jobs.log_labels import LOG_FIELD
+from streamwright.core.jobs.lookups.rules import FAN_OUT_FIELD, LOOKUPS_FIELD
 from streamwright.core.jobs.plan import item_dependencies
 from streamwright.core.jobs.policy import OUTPUT_POLICY_KEYS, STEP_POLICY_KEYS
 from streamwright.core.jobs.write_rules import MODES
@@ -90,7 +104,10 @@ _STEP_FIELDS = MappingProxyType({
 _OUTPUT_FIELDS = MappingProxyType({
     "name": Field("string", required=True, pattern=NAME_PATTERN), "description": _TEXT,
     "connection": Field("string", required=True), "step": _TEXT, "sql": _TEXT,
-    "mode": Field("string", required=True, enum=MODES),
+    "mode": Field("string", enum=MODES, description="writes: append | overwrite | merge (files: overwrite | error); "
+                                                   "required, except on a publish output"),
+    "service": _TEXT, "method": _TEXT,
+    "arguments": Field("object", description="publish outputs: the broker call's arguments (destination, key, ...)"),
     "table": _TEXT, "path": _TEXT, "format": _TEXT, "primary_key": Field("array", items=_TEXT),
     "condition": _TEXT, "target_predicate": _TEXT, "replace_where": _TEXT, "whole_table": Field("boolean"),
     "when_matched": Field("array", items=Field("object")), "when_not_matched": Field("array", items=Field("object")),
@@ -108,12 +125,20 @@ _OUTPUT_FIELDS = MappingProxyType({
 })
 _RUNTIME = _named(
     threads=Field("integer", minimum=1), memory_limit=_TEXT, temp_directory=_TEXT,
-    timeout_seconds=Field("number", minimum=1, description="the run is stopped (and the batch fails) after this"),
+    timeout_seconds=Field("number", minimum=1, description="a batch is stopped (and fails) after this many seconds"),
     state=_named(connection=_TEXT, sqlite=Field("string", description="a SQLite file for the bookkeeping state"),
                  schema=Field("string", pattern=NAME_PATTERN), ttl_seconds=Field("integer", minimum=1),
-                 run_key=Field("string", description="a batch with this key runs once")),
-    limits=_named(reference_values=Field("integer", minimum=1), read_groups=Field("integer", minimum=1)),
+                 **STATE_FIELDS),
+    fan_out=FAN_OUT_FIELD,
+    log=LOG_FIELD,
+    limits=_named(reference_values=Field("integer", minimum=1), read_groups=Field("integer", minimum=1),
+                  events=Field("integer", minimum=1,
+                               description="the most events one publish output may produce per batch (10000)")),
 )
+
+
+# the outbox relay publishes after the commit (at least once, a stable dedupe key): no write policy applies
+_PUBLISH_KEYS = frozenset(("name", "description", "connection", "service", "method", "arguments", "sql", "step"))
 
 
 class DuckDBRules(JobRules):
@@ -148,7 +173,7 @@ class DuckDBRules(JobRules):
             "version": Field(("integer", "string")),
             "name": Field("string", required=True, pattern=NAME_PATTERN),
             "description": _TEXT,
-            "spec": _named(config=inputs, secrets=inputs),
+            "spec": _named(config=inputs, secrets=inputs, lookups=LOOKUPS_FIELD),
             "connections": Field("object", required=True, min_items=1, values=connection),
             "steps": Field("array", required=True, min_items=1, items=Field("object", fields=step_fields)),
             "outputs": Field("array", required=True, min_items=1, items=Field("object", fields=_OUTPUT_FIELDS)),
@@ -162,7 +187,7 @@ class DuckDBRules(JobRules):
         return None if conn is None else self.adapters.get(conn["provider"])
 
     def classify_step(self, step, connections):
-        return classify_step(step, connections)
+        return step_kind(step, connections, self.adapters)
 
     def step_keys(self, kind, step, connections):
         keys = STEP_KEYS[kind]
@@ -179,6 +204,8 @@ class DuckDBRules(JobRules):
             return ("retry", "page_size", "on_error", "timeout")   # the source folder owns its own paging/throttle
         if kind == SQL:
             return ("on_error", "timeout")
+        if kind == CONSUME:
+            return ()                     # the runner polls before the batch; the step only shapes `input`
         return ("retry", "on_error", "timeout")                    # read: bulk I/O, no client-side paging or throttle
 
     def output_policy_keys(self):
@@ -195,6 +222,8 @@ class DuckDBRules(JobRules):
                               False))
             if "request" in step and ("service" in step or "method" in step):
                 found.append(("bad-value", "a call is `request` (HTTP) or `service`/`method` (SDK), not both", False))
+        elif kind == CONSUME:
+            found.extend(self._adapter(connections, step).check_message(step))
         elif kind == SOURCE and "stream" not in step:
             found.append(("missing-key", "a source step needs `stream`", False))
         found.extend(partition_problems(step))
@@ -236,6 +265,33 @@ class DuckDBRules(JobRules):
     def write_target(self, connection):
         adapter = self.adapters.get(connection["provider"])
         return adapter.write_target(connection) if adapter is not None else None
+
+    def check_publish(self, output, connection):
+        adapter = self.adapters.get(connection["provider"])
+        kind = message_kind(output, {output.get("connection"): connection}, self.adapters)
+        if kind is None:
+            if "mode" not in output:
+                return [("missing-key", "a write output needs `mode` (append, overwrite, merge; files: overwrite, "
+                                        "error)", False)]
+            return None if "service" not in output and "method" not in output else [(
+                "bad-value", "%s has no messaging call %s.%s (a write output takes no service/method)" % (
+                    connection["provider"], output.get("service"), output.get("method")), False)]
+        found = []
+        if kind != "publish":
+            found.append(("wrong-role", "%s.%s consumes messages: it is a step, not an output" % (
+                output.get("service"), output.get("method")), False))
+        if ("sql" in output) == ("step" in output):
+            found.append(("bad-value", "a publish output needs `sql` or `step` (its rows are the events)", False))
+        extra = sorted(set(output) - _PUBLISH_KEYS)
+        if extra:
+            found.append(("unsupported-key", "a publish output takes no %s" % ", ".join(extra), False))
+        return found + list(adapter.check_message(output))
+
+    def check_engine(self, job):
+        consumes = [index for index, step in enumerate(job.get("steps") or ())
+                    if message_kind(step, connections_of(job), self.adapters) == "consume"]
+        return [("bad-value", ("steps", index), "a job consumes from one broker step: %s already does" % (
+            job["steps"][consumes[0]]["name"]), False) for index in consumes[1:]]
 
     def secret_keys(self, connection):
         adapter = self.adapters.get(connection["provider"])

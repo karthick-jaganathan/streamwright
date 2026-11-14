@@ -18,6 +18,7 @@
 """Section: runtime (state store placement; the rest is in the rule tables)."""
 
 from streamwright.core.jobs.check.findings import connections_of
+from streamwright.core.jobs.locking import check_state_lock
 
 __all__ = ["check_engine_rules", "check_runtime"]
 
@@ -29,6 +30,9 @@ def check_runtime(job, rules, findings):
         return
     for code, message, is_warning in rules.check_state(state, connections_of(job)):
         findings.add(code, ("runtime", "state"), message, is_warning)
+
+    for path, message in check_state_lock(state):
+        findings.error("bad-value", ("runtime", "state", *path), message)
 
 
 def check_engine_rules(job, rules, findings):

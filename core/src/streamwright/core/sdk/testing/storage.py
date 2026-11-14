@@ -14,6 +14,7 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # **************************************************************************/
+
 """An offline stand-in for an object store (ObjectStorage) and a recorder of its calls (Listener)."""
 
 import fnmatch

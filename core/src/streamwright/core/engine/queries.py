@@ -15,7 +15,6 @@
 # * limitations under the License.
 # **************************************************************************/
 
-
 """
 Query builder calls in requests (docs/design/source-format.md).
 

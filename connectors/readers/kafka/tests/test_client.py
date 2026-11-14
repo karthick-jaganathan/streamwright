@@ -1,3 +1,20 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """Kafka wire protocol and offset handling with a fake consumer and producer."""
 
 from types import SimpleNamespace
@@ -45,7 +62,13 @@ class Consumer:
     def subscribe(self, destinations):
         self.destinations = destinations
 
+    def assignment(self):
+        return [] if getattr(self, "joining", 0) > 0 else ["assigned"]
+
     def consume(self, num_messages, timeout):
+        if getattr(self, "joining", 0) > 0:      # a rebalance in progress: nothing is fetched yet
+            self.joining -= 1
+            return []
         batch, self.events = self.events[:num_messages], self.events[num_messages:]
         return batch
 
@@ -97,6 +120,17 @@ def test_consume_and_ack_use_offsets_and_connector_poll_policy(monkeypatch):
     assert broker.poll_wait_seconds(arguments, 30) == 2
     assert broker.poll_limit(dict(arguments, max_messages=1000), 500) == 1000
     assert broker.poll_wait_seconds(dict(arguments, max_wait="1m"), 30) == 60
+
+
+def test_joining_the_group_does_not_use_up_the_wait(monkeypatch):
+    consumer = Consumer({})
+    consumer.joining = 3                          # three empty fetches while partitions are assigned
+    monkeypatch.setattr(client.confluent_kafka, "Consumer", lambda conf: consumer)
+    broker = client.KafkaClient({"bootstrap_servers": "broker"})
+    messages = broker.poll({"destination": "arrivals", "group_id": "workers"}, 5, 0.1)
+    assert [m.message_id for m in messages] == ["arrivals:2:8"]
+    broker.close()
+    assert consumer.closed
 
 
 def test_peek_is_context_guarded_and_never_commits(monkeypatch):

@@ -1,3 +1,20 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """
 Parity (TST-03): the generated JSON schema, the checker and the writers agree on every example and fixture.
 A manifest the schema rejects is rejected by the checker; every example passes all three.
@@ -40,7 +57,8 @@ FIXTURES = MappingProxyType({
     "unknown top key": lambda j: j.update(extra=1),
     "unknown output key": lambda j: j["outputs"][0].update(table_name="t"),
     "bad mode": lambda j: j["outputs"][0].update(mode="upsert"),
-    "missing mode": lambda j: j["outputs"][0].pop("mode"),
+    # a publish output (a broker's publish call) has no mode: only the checker knows which outputs write
+    "semantic only: missing mode": lambda j: j["outputs"][0].pop("mode"),
     "connection key of another provider": lambda j: j["connections"]["wh"].update(bucket="b"),
     "connection without its required key": lambda j: j["connections"]["wh"].pop("path"),
     "bad materialize": lambda j: j["steps"][0].update(materialize="disk"),
@@ -92,3 +110,10 @@ def test_the_checker_rejects_whatever_the_schema_rejects(name, schema):
         assert not checker_valid
     assert schema_valid == (name.startswith("semantic only") or name == "valid")
     assert checker_valid == (name == "valid")
+
+
+def test_the_state_keys_carry_their_defaults_and_allowed_values(schema):
+    state = schema.schema["properties"]["runtime"]["properties"]["state"]["properties"]
+    assert state["failed_job_policy"]["enum"] == ["abandon", "retry", "block"]
+    assert (state["failed_job_policy"]["default"], state["max_job_attempts"]["default"],
+            state["max_job_attempts"]["minimum"], state["apply_migrations"]["default"]) == ("abandon", 3, 1, False)

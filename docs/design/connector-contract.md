@@ -392,7 +392,8 @@ a removed argument, a new edge) and force a code change for something that is co
 | No global state: module level holds only immutable constants (`UPPER_CASE`, tuples / frozensets / `MappingProxyType`, `Final`). No `global` statements. Registries are injectable objects. | ruff `PLW0603`, `RUF012`; `scripts/check_code_standards.py` (mutable module-level containers) |
 | No mutable class attributes. Declarative data belongs in the spec, not in class tables. | ruff `RUF012` |
 | Functions are verbs and modules are named by feature. PEP 8 names. No cryptic abbreviations. | ruff `N`, review |
-| Complexity ≤ 15 per function; modules ≤ 400 lines (tests exempt). | ruff `C901` (`max-complexity = 15`); `scripts/check_code_standards.py` `module-too-long` (blocking via `make lint`) |
+| Complexity ≤ 15 per function; modules ≤ 400 lines after the license banner (tests exempt). | ruff `C901` (`max-complexity = 15`); `scripts/check_code_standards.py` `module-too-long` (blocking via `make lint`) |
+| Every Python file opens (after an optional `#!` line) with the Apache-2.0 banner of `core/src/streamwright/core/jobs/state/tables/leases.py`: `# * Copyright YYYY Karthick Jaganathan` and the license notice. Shell scripts, Makefiles, Dockerfiles and YAML (examples, compose, workflows) carry the same banner. | `scripts/check_code_standards.py` `license-header` (Python; blocking via `make lint`) |
 | Lint baseline: `E`, `W`, `F`, `I`, `B`, `UP`, `SIM`, `C4`, `PIE`, `RET`, `PL`, `RUF`, `N`, `C90` | `make lint` (ruff + `scripts/check_code_standards.py`, vendored identically in streamwright-spark and streamwright-mcp), blocking in `make test` and CI |
 | Typed public SDK | `mypy --strict streamwright.core.sdk streamwright.spark.sdk` |
 

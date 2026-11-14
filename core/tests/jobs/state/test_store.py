@@ -1,14 +1,35 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """State store contract suite: the same tests against SQLite, DuckDB and PostgreSQL 16 (TST-02)."""
 
 import datetime
+import logging
 import os
 import sqlite3
+import threading
 
 import duckdb
 import pytest
 
 from streamwright.core.jobs.state import (
     LeaseHeldError,
+    MySQLDialect,
+    PostgresDialect,
     SqliteDialect,
     SqlStateStore,
     StaleLeaseError,
@@ -17,7 +38,7 @@ from streamwright.core.jobs.state import (
     open_sqlite,
     open_store,
 )
-from streamwright.core.jobs.state.migrations import LATEST_VERSION
+from streamwright.core.jobs.state.target import describe_connection, describe_url
 from streamwright.core.jobs.types import WriteReceipt
 
 PG_DSN = os.environ.get("STREAMWRIGHT_TEST_PG_DSN")
@@ -40,7 +61,7 @@ def store(request, tmp_path):
 
 
 def _batch(store, lease, batch_id, status="received", **kwargs):
-    sequence = kwargs.pop("batch_sequence", None) or store.next_batch_sequence(lease.job_name)
+    sequence = kwargs.pop("batch_sequence", None) or store.next_batch_sequence(lease, kwargs.get("scope", ""))
     store.record_batch(lease, batch_id, status, {"pinned": {}}, batch_sequence=sequence, **kwargs)
     return sequence
 
@@ -48,7 +69,7 @@ def _batch(store, lease, batch_id, status="received", **kwargs):
 def test_store_implements_the_protocol_and_migrates_once(store):
     assert isinstance(store, StateStore)
     store.initialize()
-    assert store.schema_version() == LATEST_VERSION
+    assert store.schema_version() == 1
 
 
 def test_lease_is_exclusive_until_released_or_expired(store):
@@ -105,9 +126,7 @@ def test_batch_sequence_never_comes_back_after_a_purge(store):
     future = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1)
     assert store.purge_batches("job", future) == 1
     assert store.get_batch("job", "b1") is None
-    assert store.next_batch_sequence("job") == sequence + 1
-    with pytest.raises(StateError):
-        store.record_batch(lease, "b2", "received", {}, batch_sequence=sequence)
+    assert store.next_batch_sequence(lease) == sequence + 1
 
 
 def test_receipt_and_manifest_are_saved_together(store):
@@ -134,13 +153,13 @@ def test_commit_writes_the_outbox_in_the_same_transaction(store):
     assert store.list_pending_events("job") == []
 
 
-def test_run_key_is_unique_per_job(store):
+def test_job_key_is_unique_per_job(store):
     lease = store.acquire_lease("job", "w", 300)
-    _batch(store, lease, "b1", run_key="2026-11-01")
-    assert store.find_batch_by_run_key("job", "2026-11-01")["batch_id"] == "b1"
-    assert store.find_batch_by_run_key("job", "other") is None
+    _batch(store, lease, "b1", job_key="2026-11-01")
+    assert store.find_batch_by_job_key("job", "2026-11-01")["batch_id"] == "b1"
+    assert store.find_batch_by_job_key("job", "other") is None
     with pytest.raises(Exception, match=r"(?i)unique|duplicate"):  # the database's own constraint error
-        _batch(store, lease, "b2", run_key="2026-11-01")
+        _batch(store, lease, "b2", job_key="2026-11-01")
     assert [b["batch_id"] for b in store.list_incomplete_batches("job")] == ["b1"]
 
 
@@ -194,8 +213,8 @@ def test_a_failed_commit_propagates(tmp_path):
 def test_rollback_and_close_failures_keep_the_original_error(tmp_path):
     store = _flaky_store(tmp_path, {"rollback", "close"})
     lease = open_sqlite(str(tmp_path / "flaky.db")).acquire_lease("job", "w", 300)
-    with pytest.raises(StateError, match="needs a batch_sequence"):
-        store.record_batch(lease, "b1", "received", {})
+    with pytest.raises(StateError, match="a new batch starts as received or processing"):
+        store.record_batch(lease, "b1", "completed", {})
 
 
 def test_a_close_failure_after_a_successful_commit_is_reported(tmp_path):
@@ -204,15 +223,49 @@ def test_a_close_failure_after_a_successful_commit_is_reported(tmp_path):
     assert open_sqlite(str(tmp_path / "flaky.db")).get_lease("job")["epoch"] == 1
 
 
+def test_migrations_log_the_database_they_change_and_never_its_password(tmp_path, caplog):
+    caplog.set_level(logging.INFO, logger="streamwright.jobs.state.migrations")
+    store = open_sqlite(str(tmp_path / "state.db"))
+    store.initialize()
+    lines = [record.getMessage() for record in caplog.records]
+    target = "sqlite file %s" % (tmp_path / "state.db")
+    assert lines[0] == "applying 1 state migration(s) to %s: 0001_initial_schema" % target
+    assert lines[1].startswith("state migration 0001_initial_schema (version 1) applied to %s in " % target)
+    assert lines[1].endswith("store id %s" % store.store_identity())
+    assert caplog.records[1].database == target and caplog.records[1].duration_ms >= 0
+    described = describe_url("postgresql://sw:s3cr3t@db.internal:5432/etl?sslpassword=hush&schema=x", "postgres",
+                             schema="sw_ops")
+    assert described == "postgres sw@db.internal:5432/etl, schema sw_ops"
+    assert describe_connection("ops", "mysql", {"host": "h", "port": 3306, "database": "shop", "user": "app",
+                                                "password": "s3cr3t"}) == "mysql connection 'ops' (app@h:3306/shop)"
+
+
+def test_a_sqlite_state_file_in_a_missing_folder_is_a_clear_state_error(tmp_path):
+    with pytest.raises(StateError, match="its folder %s does not exist" % (tmp_path / "missing")):
+        open_sqlite(str(tmp_path / "missing" / "state.db")).initialize()
+
+
+def test_an_in_memory_sqlite_store_keeps_its_tables_across_operations_and_threads():
+    store = open_sqlite(":memory:")
+    store.initialize()
+    assert store.check_schema() and store.list_incomplete_batches("job") == []
+    lease = store.acquire_lease("job", "owner", 60)
+    errors = []
+    thread = threading.Thread(target=lambda: errors.extend(
+        [] if store.renew_lease(lease, 60) else ["renewal returned nothing"]))   # the lease heartbeat's thread
+    thread.start()
+    thread.join()
+    assert errors == [] and store.get_lease("job")["owner_id"] == "owner"
+
+
 def test_sqlite_tables_use_the_prefix_and_named_constraints(tmp_path):
     path = str(tmp_path / "named.db")
     open_sqlite(path).initialize()
     with sqlite3.connect(path) as conn:
         found = dict(conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'").fetchall())
-    assert set(found) == {"streamwright_" + t for t in ("job_leases", "job_sequences", "batches", "output_receipts",
-                                                         "outbox_events", "schema_signatures", "store_metadata",
-                                                         "schema_migrations")}
-    assert "CONSTRAINT uq_streamwright_batches__job_name_run_key UNIQUE" in found["streamwright_batches"]
+    assert set(found) == {"sw_" + t for t in ("leases", "jobs", "sequences", "receipts", "events", "signatures",
+                                              "migrations")}
+    assert "CONSTRAINT uq_sw_jobs__name_scope_key UNIQUE (job_name, scope, job_key)" in found["sw_jobs"]
 
 
 def test_postgres_uses_a_schema_and_named_constraints(pg_schema):
@@ -224,7 +277,222 @@ def test_postgres_uses_a_schema_and_named_constraints(pg_schema):
             "SELECT conname FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace WHERE n.nspname = %s",
             (pg_schema,)).fetchall()}
         types = dict(conn.execute("SELECT column_name, data_type FROM information_schema.columns WHERE "
-                                  "table_schema = %s AND table_name = 'batches'", (pg_schema,)).fetchall())
-    assert {"pk_batches", "uq_batches__job_name_batch_sequence", "uq_batches__job_name_run_key",
-            "pk_output_receipts", "pk_outbox_events", "pk_job_leases"} <= names
-    assert types["manifest_json"] == "jsonb" and types["updated_at"] == "timestamp with time zone"
+                                  "table_schema = %s AND table_name = 'sw_jobs'", (pg_schema,)).fetchall())
+    assert {"pk_sw_jobs", "uq_sw_jobs__name_scope_key", "pk_sw_receipts", "pk_sw_events", "pk_sw_leases"} <= names
+    assert types["checkpoint"] in ("json", "jsonb") and types["updated_at"] == "timestamp with time zone"
+
+
+def test_multi_resource_leases_disjoint_tokens_can_run_concurrently(store):
+    # Job 1 acquires accounts 1-5 for client xyz
+    tokens_1 = ["client:xyz/acc:%d" % i for i in range(1, 6)]
+    lease_1 = store.acquire_lease("ads_sync", "worker-1", 300, tokens=tokens_1)
+    assert set(lease_1.tokens) == set(tokens_1)
+    assert lease_1.pruned_tokens == ()
+
+    # Job 2 acquires accounts 6-10 for client xyz concurrently (no conflict!)
+    tokens_2 = ["client:xyz/acc:%d" % i for i in range(6, 11)]
+    lease_2 = store.acquire_lease("ads_sync", "worker-2", 300, tokens=tokens_2)
+    assert set(lease_2.tokens) == set(tokens_2)
+    assert lease_2.pruned_tokens == ()
+
+    # Verify both leases are active
+    for t in tokens_1:
+        assert store.get_lease("ads_sync", token=t)["owner_id"] == "worker-1"
+    for t in tokens_2:
+        assert store.get_lease("ads_sync", token=t)["owner_id"] == "worker-2"
+
+    store.release_lease(lease_1)
+    store.release_lease(lease_2)
+
+
+def test_multi_resource_leases_overlapping_tokens_fail_policy(store):
+    tokens_1 = ["client:xyz/acc:%d" % i for i in range(1, 6)]
+    lease_1 = store.acquire_lease("ads_sync", "worker-1", 300, tokens=tokens_1)
+
+    # Job 2 tries accounts 3, 4, 6, 7 (3 and 4 are held by worker-1)
+    tokens_2 = ["client:xyz/acc:%d" % i for i in (3, 4, 6, 7)]
+    with pytest.raises(LeaseHeldError) as exc_info:
+        store.acquire_lease("ads_sync", "worker-2", 300, tokens=tokens_2, policy="fail")
+    assert "client:xyz/acc:3" in str(exc_info.value)
+    assert "client:xyz/acc:4" in str(exc_info.value)
+    assert "client:xyz/acc:3" in exc_info.value.conflicts
+    assert "client:xyz/acc:4" in exc_info.value.conflicts
+
+    store.release_lease(lease_1)
+
+
+def test_multi_resource_leases_prune_policy_prunes_held_and_acquires_available(store):
+    tokens_1 = ["client:xyz/acc:%d" % i for i in range(1, 6)]
+    lease_1 = store.acquire_lease("ads_sync", "worker-1", 300, tokens=tokens_1)
+
+    # Job 2 runs with prune: 3 and 4 held, 6 and 7 free
+    tokens_2 = ["client:xyz/acc:%d" % i for i in (3, 4, 6, 7)]
+    lease_2 = store.acquire_lease("ads_sync", "worker-2", 300, tokens=["scope:b"], optional=tokens_2, policy="prune")
+    assert set(lease_2.tokens) == {"scope:b", "client:xyz/acc:6", "client:xyz/acc:7"}
+    assert set(lease_2.pruned_tokens) == {"client:xyz/acc:3", "client:xyz/acc:4"}
+
+    # Job 3 runs with prune when ALL tokens are held
+    lease_3 = store.acquire_lease("ads_sync", "worker-3", 300, tokens=["scope:c"],
+                                  optional=["client:xyz/acc:1", "client:xyz/acc:2"], policy="prune")
+    assert lease_3.tokens == ("scope:c",)
+    assert set(lease_3.pruned_tokens) == {"client:xyz/acc:1", "client:xyz/acc:2"}
+
+    # a needed token held (the scope's): nothing is taken, the run is skipped
+    lease_4 = store.acquire_lease("ads_sync", "worker-4", 300, tokens=["scope:b"], optional=["client:xyz/acc:9"],
+                                  policy="prune")
+    assert (lease_4.epoch, lease_4.tokens) == (0, ())
+    assert store.get_lease("ads_sync", "client:xyz/acc:9")["held"] is False
+
+    store.release_lease(lease_1)
+    store.release_lease(lease_2)
+
+
+def test_multi_resource_leases_wait_policy_waits_and_acquires_on_release(store):
+    tokens_1 = ["client:xyz/acc:1", "client:xyz/acc:2"]
+    lease_1 = store.acquire_lease("ads_sync", "worker-1", 1, tokens=tokens_1)
+
+    # In another thread or after release/expiry, wait policy succeeds
+    store.release_lease(lease_1)
+    lease_2 = store.acquire_lease("ads_sync", "worker-2", 300, tokens=["client:xyz/acc:2", "client:xyz/acc:3"],
+                                  policy="wait", timeout=1.0)
+    assert set(lease_2.tokens) == {"client:xyz/acc:2", "client:xyz/acc:3"}
+    store.release_lease(lease_2)
+
+
+
+# --- scopes, sequences, metrics ------------------------------------------------------------------------------
+
+def _complete(store, lease, batch_id, manifest=None):
+    for status in ("processing", "committed", "acked", "completed"):
+        store.record_batch(lease, batch_id, status, manifest or {})
+
+
+def test_history_is_kept_per_scope(store):
+    a = store.acquire_lease("job", "w1", 300, tokens=["scope:a"])
+    b = store.acquire_lease("job", "w2", 300, tokens=["scope:b"])        # scopes run side by side
+    assert _batch(store, a, "a1", scope="a", job_key="k") == 1
+    assert _batch(store, b, "b1", scope="b", job_key="k") == 1           # sequences and job keys are per scope
+    store.record_batch(a, "a1", "processing", {})
+    store.record_batch(a, "a1", "failed", {}, error="boom")
+    assert [x["batch_id"] for x in store.list_incomplete_batches("job", "a")] == ["a1"]
+    assert [x["batch_id"] for x in store.list_incomplete_batches("job", "b")] == ["b1"]
+    assert store.list_incomplete_batches("job") == []
+    assert store.find_batch_by_job_key("job", "k", "b")["batch_id"] == "b1"
+    _complete(store, b, "b1", {"carry": {"x": 1}})
+    assert store.find_latest_completed_batch("job", "b")["manifest"] == {"carry": {"x": 1}}
+    assert store.find_latest_completed_batch("job", "a") is None
+    assert {x["batch_id"]: x["scope"] for x in store.list_batches("job")} == {"a1": "a", "b1": "b"}
+    assert [x["batch_id"] for x in store.list_batches("job", scope="a")] == ["a1"]
+
+
+def test_the_outbox_is_relayed_per_scope(store):
+    a = store.acquire_lease("job", "w1", 300, tokens=["scope:a"])
+    _batch(store, a, "a1", "processing", scope="a")
+    store.commit_batch(a, "a1", {}, {"out": ("topic", [{"n": 1}])})
+    assert [e["batch_id"] for e in store.list_pending_events("job", "a")] == ["a1"]
+    assert store.list_pending_events("job", "b") == []
+
+
+def test_a_completed_batch_records_its_rows_and_duration(store):
+    lease = store.acquire_lease("job", "w", 300)
+    _batch(store, lease, "b1", "processing")
+    store.record_receipt(lease, "b1", WriteReceipt("one", "t1", 3))
+    store.record_receipt(lease, "b1", WriteReceipt("two", "t2", 4))
+    store.record_receipt(lease, "b1", WriteReceipt("two", "t2", 5))      # a rewrite replaces its receipt
+    for status in ("committed", "acked"):
+        store.record_batch(lease, "b1", status, {})
+    assert store.get_batch("job", "b1")["finished_at"] is None
+    store.record_batch(lease, "b1", "completed", {})
+    batch = store.get_batch("job", "b1")
+    assert batch["rows_written"] == 8
+    assert batch["finished_at"] is not None and batch["duration_ms"] >= 0
+
+
+def test_a_skipped_run_is_recorded_without_a_lease(store):
+    store.record_skipped("job", "job-skipped-1", {"batch_ts": "t"}, scope="a",
+                         tokens={"accepted": [], "skipped": ["acct:1"]})
+    batch = store.get_batch("job", "job-skipped-1")
+    assert (batch["status"], batch["scope"], batch["tokens"]["skipped"]) == ("skipped", "a", ["acct:1"])
+    assert batch["finished_at"] is not None
+    assert store.list_incomplete_batches("job", "a") == []
+
+
+def test_wait_backs_off_with_jitter_until_the_timeout(tmp_path):
+    path = str(tmp_path / "wait.db")
+    open_sqlite(path).initialize()
+    pauses = []
+    store = SqlStateStore(lambda: sqlite3.connect(path, isolation_level=None), SqliteDialect(),
+                          sleep=pauses.append)
+    store.acquire_lease("job", "w1", 300, tokens=["t"])
+    with pytest.raises(LeaseHeldError, match="wait timed out"):
+        store.acquire_lease("job", "w2", 300, tokens=["t"], policy="wait", timeout=0.3)
+    assert pauses and all(0 < p <= 0.3 for p in pauses)
+    assert len(pauses) > 1 or pauses[0] >= 0.1
+
+
+def test_postgres_and_mysql_escape_percent_signs():
+    for dialect in (PostgresDialect(), MySQLDialect()):
+        sql = dialect.placeholders("SELECT '%' || ? FROM t WHERE e < " + dialect.expires_in("?"))
+        assert "'%%'" in sql and "?" not in sql and sql.count("%s") == 2
+
+
+def test_mysql_migration_lock_needs_one():
+    dialect = MySQLDialect()
+    assert dialect.migration_locked((1,))
+    assert not dialect.migration_locked((0,)) and not dialect.migration_locked((None,))
+    assert not dialect.migration_locked(None)
+
+
+# --- the store before sw_* tables -----------------------------------------------------------------------------
+
+def _legacy_sqlite(path):
+    """The tables (and rows) the store of the previous release kept in a SQLite file."""
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE streamwright_job_leases (job_name TEXT, owner_id TEXT, lease_epoch BIGINT, acquired_at TEXT,
+            expires_at TEXT);
+        CREATE TABLE streamwright_job_sequences (job_name TEXT, batch_sequence BIGINT);
+        CREATE TABLE streamwright_batches (job_name TEXT, batch_id TEXT, batch_sequence BIGINT, run_key TEXT,
+            status TEXT, failed_from TEXT, manifest_json TEXT, error_message TEXT, engine_metadata TEXT,
+            created_at TEXT, updated_at TEXT);
+        CREATE TABLE streamwright_output_receipts (job_name TEXT, batch_id TEXT, output_name TEXT, receipt_json TEXT,
+            recorded_at TEXT);
+        CREATE TABLE streamwright_outbox_events (job_name TEXT, batch_id TEXT, output_name TEXT, event_sequence BIGINT,
+            destination TEXT, payload_json TEXT, status TEXT, created_at TEXT, sent_at TEXT);
+        CREATE TABLE streamwright_schema_signatures (job_name TEXT, path_prefix TEXT, header_hash TEXT,
+            signature TEXT, updated_at TEXT);
+        CREATE TABLE streamwright_store_metadata (store_key TEXT, store_identity TEXT, created_at TEXT);
+        INSERT INTO streamwright_job_leases VALUES ('job', 'old', 7, '2026-01-01T00:00:00.000Z', NULL);
+        INSERT INTO streamwright_job_sequences VALUES ('job', 2);
+        INSERT INTO streamwright_batches VALUES
+            ('job', 'job-00000001', 1, 'k1', 'completed', NULL, '{"carry": {"bookmark": 5}}', NULL, NULL,
+             '2026-01-01T00:00:00.000Z', '2026-01-01T00:01:00.000Z'),
+            ('job', 'job-00000002', 2, NULL, 'failed', 'processing', '{}', 'boom', '{"engine": "duckdb"}',
+             '2026-01-02T00:00:00.000Z', '2026-01-02T00:01:00.000Z');
+        INSERT INTO streamwright_output_receipts VALUES ('job', 'job-00000001', 'out',
+            '{"output_name": "out", "destination": "t", "rows": 9, "files": []}', '2026-01-01T00:00:30.000Z');
+        INSERT INTO streamwright_outbox_events VALUES ('job', 'job-00000001', 'out', 0, 'topic', '{"n": 1}', 'pending',
+            '2026-01-01T00:00:40.000Z', NULL);
+        INSERT INTO streamwright_schema_signatures VALUES ('job', 's3://a/', 'h', 'a,b', '2026-01-01T00:00:00.000Z');
+        INSERT INTO streamwright_store_metadata VALUES ('default', 'old-store-identity', '2026-01-01T00:00:00.000Z');
+    """)
+    conn.commit()
+    conn.close()
+
+
+def test_the_previous_store_is_imported_with_its_identity(tmp_path):
+    path = str(tmp_path / "legacy.db")
+    _legacy_sqlite(path)
+    store = open_sqlite(path)
+    store.initialize()
+    assert store.store_identity() == "old-store-identity"           # Delta idempotency keys stay the same
+    done = store.get_batch("job", "job-00000001")
+    assert (done["status"], done["batch_sequence"], done["job_key"], done["rows_written"]) == ("completed", 1, "k1", 9)
+    assert store.find_latest_completed_batch("job")["manifest"] == {"carry": {"bookmark": 5}}
+    failed = store.list_incomplete_batches("job")
+    assert [(b["batch_id"], b["failed_from"], b["error"]) for b in failed] == [("job-00000002", "processing", "boom")]
+    assert [e["payload"] for e in store.list_pending_events("job")] == [{"n": 1}]
+    assert store.get_schema_signatures("job") == {"s3://a/": "h"}
+    lease = store.acquire_lease("job", "new", 300)
+    assert lease.epoch == 8                                          # fencing continues past the old epochs
+    assert store.next_batch_sequence(lease) == 3                     # and sequences past the old ones

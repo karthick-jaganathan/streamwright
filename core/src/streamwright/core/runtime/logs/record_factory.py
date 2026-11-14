@@ -21,6 +21,8 @@
 import contextvars
 import logging
 
+from streamwright.core.runtime.logs.context import stamp
+
 CONTEXT_SETUPS = contextvars.ContextVar("streamwright_log_setups", default=())
 
 
@@ -38,6 +40,7 @@ class RecordFactory:
 
     def __call__(self, *args, **kwargs):
         record = self.original(*args, **kwargs)
+        stamp(record)                    # the log context (job, account, step, ...), scrubbed with the rest
         scrub_record(record, self)
         return record
 

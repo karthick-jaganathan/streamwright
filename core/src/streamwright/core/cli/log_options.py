@@ -85,6 +85,12 @@ def add_log_options(parser):
                              "`... [truncated N chars]` (default %d; 0: never)" % logs.DEFAULT_MAX_CHARS)
 
 
+def log_defaults():
+    """The values of the logging options, for a command that does not take them (it logs with the defaults)."""
+    return {"log_level": None, "log": [], "log_format": None, "log_config": None,
+            "log_max_chars": logs.DEFAULT_MAX_CHARS}
+
+
 def log_options():
     """The logging options `streamwright validate` takes, before or after its validation options."""
     parser = argparse.ArgumentParser(prog="streamwright validate", add_help=False, allow_abbrev=False)

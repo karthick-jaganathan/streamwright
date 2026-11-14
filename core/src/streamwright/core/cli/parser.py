@@ -19,8 +19,9 @@
 
 import argparse
 
-from streamwright.core.cli.commands import jobs
-from streamwright.core.cli.jobs import JOB_OPTION, add_job_arguments
+from streamwright.core.cli.commands import jobs, state
+from streamwright.core.cli.help_format import DescriptionFormatter
+from streamwright.core.cli.jobs import JOB_HELP, JOB_OPTION, add_job_arguments
 from streamwright.core.cli.log_options import add_log_options, key_value
 from streamwright.core.config.inputs import SECRET_ENV_PREFIX
 from streamwright.core.runtime import logs, plugins
@@ -36,6 +37,16 @@ def build_validate_parser():
     return parser
 
 
+_CONNECTORS_DESCRIPTION = """\
+Show the installed connectors, or list, find and install connectors from the hub's catalog.
+
+  streamwright connectors                     the installed connectors: version, libraries, DuckDB extensions, loggers
+  streamwright connectors google_ads          one or more installed connectors, in detail (like pip show)
+  streamwright connectors ls                  the catalog and what is installed (-ls, --list)
+  streamwright connectors find ads            search the catalog (-s, -f, --search, --find)
+  streamwright connectors -i google_ads --yes install from the hub (i KEY ...)"""
+
+
 def build_plan_parser():
     """`streamwright plan --help`: the command takes a job manifest; its engine's plan command takes the options."""
     parser = argparse.ArgumentParser(
@@ -43,8 +54,8 @@ def build_plan_parser():
         description="Show a job's execution plan - its steps, outputs and the order they run in - without running it "
                     "or needing secrets. The manifest's kind picks the engine, and its options are that engine's: "
                     "streamwright duckdb plan -h (kind: DuckDBJob), streamwright spark plan -h (kind: SparkJob).")
-    parser.add_argument("job", nargs="?", metavar="JOB", help="the job manifest (a YAML file or its folder)")
-    parser.add_argument("--job", "-j", dest=JOB_OPTION, metavar="JOB", help="the job manifest, as an option")
+    parser.add_argument("job", nargs="?", metavar="JOB", help=JOB_HELP["job"])
+    parser.add_argument("--job", "-j", dest=JOB_OPTION, metavar="JOB", help=JOB_HELP["job_option"])
     return parser
 
 
@@ -59,7 +70,12 @@ def build_parser():
                               description="Run a source. Records go to stdout as Singer messages unless --output "
                                           "names a folder for files or a warehouse; logs go to stderr. A job "
                                           "manifest (kind: DuckDBJob, SparkJob) runs on its engine, with that "
-                                          "engine's options: streamwright duckdb run -h, streamwright spark run -h.")
+                                          "engine's options (--secrets, --summary, --apply-state-migrations, the state "
+                                          "lock options, --failed-job-policy, --max-job-attempts, and "
+                                          "--once/--drain/--available-now/--follow, --interval, --max-messages for "
+                                          "jobs that consume a broker): streamwright duckdb run -h, streamwright "
+                                          "spark run -h. Options of sources only (--output, --stream, --state, ...) "
+                                          "are refused for a job.")
     run.add_argument("source", nargs="?", metavar="SOURCE",
                      help="a source folder (source.yaml and one file per stream in streams/) or a source file; or a "
                           "job manifest (kind: DuckDBJob, SparkJob), which runs on its engine")
@@ -109,22 +125,25 @@ def build_parser():
 
     conn = commands.add_parser("connectors",
                                help="show, list, find or install connectors (bare or NAME ...: the installed "
-                                    "connectors, their libraries, DuckDB extensions and loggers)")
-    conn.add_argument("-ls", "--list", action="store_true", dest="flag_list",
-                      help="list catalog and installed connectors")
-    conn.add_argument("-i", "--install", nargs="+", dest="flag_install", metavar="KEY",
-                      help="install one or more connector keys")
-    conn.add_argument("-s", "-f", "--search", "--find", nargs="+", dest="flag_search", metavar="TEXT",
-                      help="find/search connectors in the catalog by keyword")
+                                    "connectors, their libraries, DuckDB extensions and loggers)",
+                               formatter_class=DescriptionFormatter,
+                               description=_CONNECTORS_DESCRIPTION)
+    flags = conn.add_mutually_exclusive_group()
+    flags.add_argument("-ls", "--list", action="store_true", dest="flag_list",
+                       help="list catalog and installed connectors")
+    flags.add_argument("-i", "--install", nargs="+", dest="flag_install", metavar="KEY",
+                       help="install one or more connector keys")
+    flags.add_argument("-s", "-f", "--search", "--find", nargs="+", dest="flag_search", metavar="TEXT",
+                       help="find/search connectors in the catalog by keyword")
     conn.add_argument("action", nargs="?", metavar="{ls,i,find}",
                       help="ls (catalog + installed), -i KEY (install), find TEXT (search catalog), or installed "
                            "connector names (show them, like pip show)")
     conn.add_argument("query", nargs="*", metavar="KEY|TEXT",
                       help="connector keys (install, show: one or more) or search words")
-    conn.add_argument("--yes", action="store_true", help="skip the confirmation prompt when installing")
+    conn.add_argument("--yes", action="store_true", help="install: skip the confirmation prompt")
     conn.add_argument("--hub-url", metavar="URL",
-                      help="the connector hub (default: $STREAMWRIGHT_HUB_URL, else the live StreamWright hub; when "
-                           "it is unreachable, the cached catalog is used, with a warning)")
+                      help="list, find, install: the connector hub (default: $STREAMWRIGHT_HUB_URL, else the live "
+                           "StreamWright hub; when it is unreachable, the cached catalog is used, with a warning)")
 
     validate = commands.add_parser("validate", help="check sources (schema, references, SQL) with the checks of the "
                                                      "installed connectors and query builders, or a job manifest",
@@ -132,11 +151,14 @@ def build_parser():
     validate.add_argument("arguments", nargs=argparse.REMAINDER)
 
     plan_cmd = commands.add_parser("plan", help="show a job's execution plan: its steps, outputs and their order "
-                                                 "(no secrets needed)", add_help=False)
+                                                 "(no secrets needed)", add_help=False,
+                                   description=build_plan_parser().description)
     plan_cmd.add_argument("arguments", nargs=argparse.REMAINDER)
     installed_commands = {item["name"] for item in plugins.discover(plugins.COMMANDS)}
     if "duckdb" not in installed_commands:  # editable installs have stale entry-point metadata
         jobs.register(commands)
+    if "state" not in installed_commands:
+        state.register(commands)
     for name in sorted(installed_commands):
         plugin = plugins.load_plugin(plugins.COMMANDS, name)
         if not callable(plugin):
@@ -146,12 +168,24 @@ def build_parser():
 
 
 def command_parsers():
-    """Public map of built-in argument parsers, for clients that inspect option arity."""
+    """
+    Public map of the commands' argument parsers, for clients that inspect options (the MCP server's CLI reference).
+    A command that forwards its arguments (`duckdb`, `spark`) is given as its own full parser, with its subcommands;
+    `job` holds the options every job command (validate, plan, run, state) takes; --strict is validate, plan and
+    run's.
+    """
     root = build_parser()
     parsers = next(action.choices for action in root._actions if isinstance(action, argparse._SubParsersAction))
     parsers = dict(parsers)
+    for name, parser in list(parsers.items()):
+        full = parser.get_default("full_parser")
+        if full is not None:
+            try:
+                parsers[name] = full()
+            except Exception as exc:  # an engine that cannot load keeps its forwarding parser
+                parsers[name].epilog = "(its options are unavailable: %s)" % exc
     parsers["validate"] = build_validate_parser()
     job = argparse.ArgumentParser(add_help=False)
-    add_job_arguments(job)
+    add_job_arguments(job, strict=False)
     parsers["job"] = job
     return parsers

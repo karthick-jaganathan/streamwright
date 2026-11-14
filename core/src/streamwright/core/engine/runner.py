@@ -47,6 +47,7 @@ from streamwright.core.outputs.output import BaseOutput
 from streamwright.core.runtime import components, logs
 from streamwright.core.runtime.connector_types import ConnectorContext
 from streamwright.core.runtime.logs import RunMetrics
+from streamwright.core.runtime.logs.context import bind
 from streamwright.core.runtime.source_connectors import select_transport
 from streamwright.core.runtime.templates import json_numbers
 
@@ -110,7 +111,7 @@ class CollectedStream:
                 with contextlib.suppress(_CollectionStoppedError):
                     enqueue(done)
 
-        worker = threading.Thread(target=run, daemon=True)
+        worker = threading.Thread(target=bind(run), daemon=True)
         worker.start()
         completed = False
         try:

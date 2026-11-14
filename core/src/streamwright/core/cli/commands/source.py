@@ -1,3 +1,20 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """
 `streamwright run`: preparation, execution and reporting of a source run (RunCommand), and the run with its
 metrics, summary and output handling (run).
@@ -166,11 +183,13 @@ def _today_in_zone(started, timezone):
 def _resolve_config_and_secrets(spec, provided_config, provided_secrets, today):
     """(config, secrets) resolved from the spec's declared inputs, reporting every section's problems together."""
     problems, values = [], {}
+    config_names = tuple(spec.get("config") or ())
     for section, label, provided in (("config", "config", provided_config),
                                      ("secrets", "secret", provided_secrets)):
         try:
             values[section] = resolve_inputs(spec.get(section), provided, label, today=today,
-                                             hide_values=section == "secrets")
+                                             hide_values=section == "secrets",
+                                             config_names=config_names if section == "secrets" else ())
         except InputError as exc:
             problems.append(str(exc))
     if problems:

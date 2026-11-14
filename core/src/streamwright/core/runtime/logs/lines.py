@@ -33,11 +33,13 @@ DEFAULT_MAX_CHARS = 20000
 # a request that keeps paging logs its progress this often
 PROGRESS_SECONDS = 30.0
 PROGRESS_PAGES = 100
-TEXT_FORMAT = "[%(asctime)s] %(levelname)s %(name)s: %(message)s"
+TEXT_FORMAT = "[%(asctime)s] %(levelname)s %(name)s%(context_tag)s: %(message)s"   # context_tag: TextFormatter
 # the structured fields of streamwright's log lines, in the order JSON lines show them; each has one type
 FIELDS = ("event", "stream", "partition", "window", "request", "export", "exports", "connector", "call", "method",
           "url", "page", "records", "pages", "requests", "retries", "failed_partitions", "streams", "outputs",
-          "duration_ms", "status", "code", "attempt", "bytes", "path", "table", "outcome")
+          "duration_ms", "status", "code", "attempt", "bytes", "path", "table", "outcome", "database", "job_id")
+# the log context's keys (runtime/logs/context.py): JSON lines carry them for every logger, labels as one object
+CONTEXT_KEYS = ("job", "labels", "item", "scope", "job_id", "step", "output", "lookup")
 
 
 def level_number(level):

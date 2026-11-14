@@ -13,6 +13,7 @@ from the spec and the engines' capabilities (`streamwright.core.sdk.contract.gui
 ```bash
 make install-mysql        # from the repository root; or: pip install ./connectors/readers/mysql
 pip install "./connectors/readers/mysql[spark]"       # the SparkJob adapter's dependencies (pymysql)
+pip install "./connectors/readers/mysql[state]"       # MySQL runtime state via PyMySQL
 streamwright connectors
 streamwright validate examples/sources/readers/mysql_demo      # static checks: no network
 ```
@@ -32,6 +33,7 @@ streamwright validate examples/sources/readers/mysql_demo      # static checks: 
 - **Credentials** (`dsn`, `password`) come from secrets only and are redacted everywhere; DuckDB gets them only as parameters of a temporary `TYPE mysql` secret (a parameter it cannot take is refused by name).
 - **Read-only sources.** A query is one SELECT, checked by its text and DuckDB's parse tree (no `mysql`, `performance_schema`, `sys` or `information_schema`); values are bound. The database is attached `READ_ONLY` and the sandbox locked.
 - **Spark** checks the resolved host, port and database before building the JDBC URL; credentials travel only in JDBC properties.
+- **Runtime state** on DuckDBJob and SparkJob can use a MySQL connection with `runtime.state.connection`; install the `state` extra for DuckDBJob or the `spark` extra for SparkJob.
 
 ## Tests
 

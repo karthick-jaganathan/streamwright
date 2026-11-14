@@ -14,6 +14,7 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # **************************************************************************/
+
 """Sandbox: the locked-down embedded DuckDB a stream's SQL steps run in."""
 
 import json

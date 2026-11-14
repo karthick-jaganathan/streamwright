@@ -1,3 +1,20 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """Job-kind commands: a manifest's kind runs its installed JobEngine, and `duckdb` is the DuckDBJob shorthand."""
 
 import argparse
@@ -13,7 +30,13 @@ def register(subparsers):
                                    add_help=False)
     parser.add_argument("-h", "--help", action="store_true", help="show the streamwright duckdb help")
     parser.add_argument("arguments", nargs=argparse.REMAINDER)
-    parser.set_defaults(command_handler=lambda args: execute(["--help"] if args.help else args.arguments))
+    parser.set_defaults(command_handler=lambda args: execute(["--help"] if args.help else args.arguments),
+                        full_parser=lambda: engine_parser("DuckDBJob", "streamwright duckdb"))
+
+
+def engine_parser(kind, prog):
+    """The engine's own argument parser (its subcommands and options), for help and option inspection."""
+    return load_job_engine(kind).parser(prog)
 
 
 def execute(arguments):

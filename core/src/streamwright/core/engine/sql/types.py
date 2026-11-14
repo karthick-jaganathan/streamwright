@@ -14,6 +14,7 @@
 # * See the License for the specific language governing permissions and
 # * limitations under the License.
 # **************************************************************************/
+
 """DuckDB types as JSON Schema, and DuckDB values as plain (JSON) values."""
 
 import base64

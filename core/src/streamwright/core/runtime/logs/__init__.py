@@ -38,7 +38,8 @@ Modules: lines (loggers, levels, fields), redaction, network (network lines), fo
 record_factory, handlers and setup (LogSetup), metrics (RunMetrics) and summary (write_summary).
 """
 
-from streamwright.core.runtime.logs.formatting import JsonFormatter
+from streamwright.core.runtime.logs.context import CONTEXT_FIELDS, bind, current_context, log_context
+from streamwright.core.runtime.logs.formatting import JsonFormatter, TextFormatter
 from streamwright.core.runtime.logs.lines import (
     DEFAULT_MAX_CHARS,
     FIELDS,
@@ -60,6 +61,7 @@ from streamwright.core.runtime.logs.setup import LogSetup
 from streamwright.core.runtime.logs.summary import LOG_SUMMARY, log_summary, summary_problem, write_summary
 
 __all__ = [
+    "CONTEXT_FIELDS",
     "DEFAULT_MAX_CHARS",
     "FIELDS",
     "FORMATS",
@@ -74,11 +76,15 @@ __all__ = [
     "LogSetup",
     "RunMetrics",
     "StreamMetrics",
+    "TextFormatter",
+    "bind",
+    "current_context",
     "describe",
     "fields",
     "http_details",
     "http_summary",
     "level_number",
+    "log_context",
     "log_summary",
     "mask_form",
     "mask_headers",

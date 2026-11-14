@@ -25,10 +25,14 @@ import copy
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 
 from streamwright.core.config.inputs import InputError, resolve_inputs
 from streamwright.core.jobs.check import check_job
 from streamwright.core.jobs.inputs import declared_inputs
+from streamwright.core.jobs.locking import check_lock_source
+from streamwright.core.jobs.log_labels import check_log_labels
+from streamwright.core.jobs.lookups.rules import check_lookups
 from streamwright.core.jobs.manifest import JobError, load_job, load_job_text, merge_overlay
 from streamwright.core.jobs.plan import PlanError, build_plan
 from streamwright.core.jobs.refs import input_references, resolve
@@ -59,6 +63,13 @@ class JobReport:
                 "plan": self.plan}
 
 
+_STAND_INS = MappingProxyType({"integer": 0, "number": 0, "boolean": False, "list": []})
+
+
+def _config_missing(config, name):
+    return (config or {}).get(name) is None
+
+
 def resolve_for_checks(raw, config=None):
     """
     (job, problems): spec.config resolved with `config`. A required config input without a value stays a
@@ -70,6 +81,9 @@ def resolve_for_checks(raw, config=None):
                             dict(config or {}), "config")
     values.update({name: "{{ config.%s }}" % name for name, definition in declared.items()
                    if values[name] is None and (definition or {}).get("required", True)})
+    # a lookup fills these at run time: a stand-in of the type keeps SQL that renders them checkable
+    values.update({name: _STAND_INS.get((definition or {}).get("type"), "lookup") for name, definition
+                   in declared.items() if (definition or {}).get("lookup") and _config_missing(config, name)})
     kept = {name: "{{ secrets.%s }}" % name for name in input_references(raw, "secrets")}
     return resolve(raw, values, kept)
 
@@ -84,7 +98,14 @@ def _report(read, rules_for, config, strict, filename):
     except InputError as exc:
         return JobReport(False, [Issue(ERROR, "bad-input", str(exc), filename, "spec.config")], raw)
     rules = rules_for(job)
-    issues = [Issue(ERROR, "missing-input", text, filename) for text in missing] + check_job(job, rules, filename)
+    issues = ([Issue(ERROR, "missing-input", text, filename) for text in missing]
+              + [Issue(ERROR, "bad-value", text, filename, "runtime.state.lock.each")
+                 for text in check_lock_source(raw)]
+              + [Issue(ERROR, "bad-lookup", text, filename, ".".join(map(str, path)))
+                 for path, text in check_lookups(raw)]
+              + [Issue(ERROR, "bad-label", text, filename, ".".join(map(str, path)))
+                 for path, text in check_log_labels(raw)]
+              + check_job(job, rules, filename))
     if not strict:
         for issue in issues:
             if issue.severity == ERROR and issue.code in NON_STRICT_CODES:

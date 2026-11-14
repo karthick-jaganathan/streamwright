@@ -1,3 +1,20 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """Kafka client construction, peek reads and durable broker calls shared across engines."""
 
 import json
@@ -10,6 +27,8 @@ from streamwright.core.sdk import ConnectorError
 from streamwright.core.sdk.messaging import BrokerClient, Message, poll_limit, poll_wait_seconds
 
 __all__ = ["KafkaClient", "call_conf", "client_conf", "validate_connection"]
+
+JOIN_SECONDS = 30   # the longest a poll waits for the group to assign partitions (before max_wait)
 
 # arguments the connector handles itself; any other key in a call is a librdkafka conf (a vendor argument)
 _CALL_KEYS = frozenset({"destination", "group_id", "from", "key", "options", "max_messages", "max_wait"})
@@ -128,6 +147,12 @@ class KafkaClient(BrokerClient):
             self._consumer.subscribe([arguments["destination"]])
         return self._consumer
 
+    def close(self):
+        """Leaves the consumer group (its partitions are rebalanced at once, not after the session timeout)."""
+        if self._consumer is not None:
+            self._consumer.close()
+            self._consumer = None
+
     def watermarks(self, arguments):
         consumer = self._ensure_consumer(arguments)
         destination = arguments["destination"]
@@ -143,32 +168,40 @@ class KafkaClient(BrokerClient):
         return result
 
     def poll(self, arguments, limit, max_wait_seconds, watermarks=None):
+        """
+        Up to `limit` messages within `max_wait_seconds`, counted once the consumer has its partitions: joining the
+        group (a rebalance) does not use up the wait, so the first poll of a run does not come back empty.
+        """
         consumer = self._ensure_consumer(arguments)
-        messages, deadline = [], time.monotonic() + max_wait_seconds
+        messages, joined_by = [], time.monotonic() + JOIN_SECONDS
+        while not consumer.assignment() and len(messages) < limit and time.monotonic() < joined_by:
+            self._take(consumer, arguments, messages, limit=limit, timeout=0.5, watermarks=watermarks)
+        deadline = time.monotonic() + max_wait_seconds
         while len(messages) < limit and time.monotonic() < deadline:
-            batch = consumer.consume(num_messages=min(limit - len(messages), 500),
-                                     timeout=min(1.0, max(0.0, deadline - time.monotonic())))
-            for item in batch:
-                if item.error():
-                    raise ConnectorError(_describe_error(item.error(), arguments["destination"]), code="READ_ERROR")
-                partition_key = (item.topic(), item.partition())
-                if watermarks is not None and item.offset() >= watermarks.get(partition_key, float("inf")):
-                    high = watermarks[partition_key]
-                    target = confluent_kafka.TopicPartition(item.topic(), item.partition(), high)
-                    consumer.seek(target)
-                    consumer.pause([confluent_kafka.TopicPartition(item.topic(), item.partition())])
-                    continue
-                messages.append(Message(
-                    message_id="%s:%d:%d" % (item.topic(), item.partition(), item.offset()),
-                    key=_text(item.key()), body=_text(item.value()) or "",
-                    headers={key: _text(value) or "" for key, value in (item.headers() or ())},
-                    timestamp=str(item.timestamp()[1]),
-                    receipt={"topic": item.topic(), "partition": item.partition(), "offset": item.offset(),
-                             "group_id": arguments["group_id"]},
-                ))
-                if len(messages) >= limit:
-                    break
+            self._take(consumer, arguments, messages, limit=limit,
+                       timeout=min(1.0, max(0.0, deadline - time.monotonic())), watermarks=watermarks)
         return messages
+
+    def _take(self, consumer, arguments, messages, *, limit, timeout, watermarks):
+        for item in consumer.consume(num_messages=min(limit - len(messages), 500), timeout=timeout):
+            if item.error():
+                raise ConnectorError(_describe_error(item.error(), arguments["destination"]), code="READ_ERROR")
+            partition_key = (item.topic(), item.partition())
+            if watermarks is not None and item.offset() >= watermarks.get(partition_key, float("inf")):
+                high = watermarks[partition_key]
+                consumer.seek(confluent_kafka.TopicPartition(item.topic(), item.partition(), high))
+                consumer.pause([confluent_kafka.TopicPartition(item.topic(), item.partition())])
+                continue
+            messages.append(Message(
+                message_id="%s:%d:%d" % (item.topic(), item.partition(), item.offset()),
+                key=_text(item.key()), body=_text(item.value()) or "",
+                headers={key: _text(value) or "" for key, value in (item.headers() or ())},
+                timestamp=str(item.timestamp()[1]),
+                receipt={"topic": item.topic(), "partition": item.partition(), "offset": item.offset(),
+                         "group_id": arguments["group_id"]},
+            ))
+            if len(messages) >= limit:
+                return
 
     def ack(self, messages, arguments):
         highest = {}

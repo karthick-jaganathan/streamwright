@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright"
-version = "0.1.13"
+version = "0.1.14"
 description = "Declarative data connectors — pull from APIs, files and databases with YAML, shape with SQL, write anywhere."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -27,6 +27,7 @@ dependencies = [
     # `select`: the SQL that shapes each stream's records runs in an embedded DuckDB (which needs pytz for
     # timestamps with time zones)
     "duckdb>=2.0,<2.1",
+    "SQLAlchemy>=2.0,<3",
     "pytz",
 ]
 
@@ -47,6 +48,7 @@ sw = "streamwright.core.cli:main"
 
 [project.entry-points."streamwright.commands"]
 duckdb = "streamwright.core.cli.commands.jobs:register"
+state = "streamwright.core.cli.commands.state:register"
 
 [project.entry-points."streamwright.job_kinds"]
 DuckDBJob = "streamwright.core.jobs.duckdb.plugin:JOB_ENGINE"

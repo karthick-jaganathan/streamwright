@@ -1,3 +1,20 @@
+#!/usr/bin/env python
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
 """
 The DuckDB engine's adapter for a connector contract v1 definition (docs/design/connector-contract.md): what the
 engine asks of an adapter (fields, reads, write target, configure, compile_read, write) derived from the definition,
@@ -76,6 +93,9 @@ class DefinitionDuckDBAdapter(ProviderAdapter):
                       for kind, (operation, _) in self.read_kinds.items()}
         self.write_operation = next((operation for operation in definition.operations_for(CAPABILITIES)
                                      if operation.kind == OperationKind.WRITE), None)
+        self.messaging = MappingProxyType({
+            (operation.service, operation.method): operation for operation in definition.operations_for(CAPABILITIES)
+            if operation.kind in (OperationKind.CONSUME, OperationKind.PUBLISH)})
         self._adapter: Any = None
 
     def describe(self) -> dict[str, Any]:
@@ -156,6 +176,20 @@ class DefinitionDuckDBAdapter(ProviderAdapter):
         issues = check_arguments(self.definition, self.write_operation, self._output_arguments(spec), CAPABILITIES)
         return [WriteRuleProblem(issue.code, "%s: %s" % (issue.path, issue.message)) for issue in issues
                 if issue.code not in ("unknown-key", "missing-key")]   # check_output reports keys
+
+    def check_message(self, item: Mapping[str, Any]) -> list[tuple[str, str, bool]]:
+        operation = self.operation(item.get("service"), item.get("method"))
+        arguments = item.get("arguments") or {}
+        if operation is None or not isinstance(arguments, Mapping):
+            return []
+        return [(issue.code, "arguments: %s: %s" % (issue.path, issue.message) if issue.path else issue.message,
+                 False) for issue in check_arguments(self.definition, operation, dict(arguments), CAPABILITIES)]
+
+    def open_broker(self, connection: Mapping[str, Any]) -> Any:
+        opener = getattr(self.adapter(), "open_broker", None)
+        if not callable(opener):
+            raise AdapterError("%s has no DuckDB broker (its duckdb adapter has no open_broker)" % self.provider)
+        return opener(self.resolve(connection))
 
     def write(self, context: WriteContext) -> WriteReceipt:
         context.connection = self.resolve(context.connection)

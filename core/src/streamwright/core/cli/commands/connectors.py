@@ -122,6 +122,10 @@ def _connector_lines(names=None):
     return lines
 
 
+_CATALOG_ACTIONS = ("ls", "list", "-ls", "--list", "i", "install", "-i", "--install", "find", "search", "s", "-s",
+                    "-f", "--find", "--search")
+
+
 def run_connectors_command(args):
     """`streamwright connectors`: bare or installed names = installed connectors; ls/i/find use the catalog (hub)."""
     if getattr(args, "flag_list", False):
@@ -137,6 +141,16 @@ def run_connectors_command(args):
         action = getattr(args, "action", None)
         query = getattr(args, "query", [])
 
+    install = (action or "").lower() in ("i", "install", "-i", "--install")
+    if args.yes and not install:
+        sys.stderr.write("streamwright: --yes only applies to installing (connectors -i KEY --yes)\n")
+        return 2
+    installed_only = action is None or (not install and (action or "").lower() not in _CATALOG_ACTIONS
+                                        and {action, *query} <= set(components.available()))
+    if args.hub_url and installed_only:
+        sys.stderr.write("streamwright: --hub-url applies to the catalog (list, find, install), not to the installed "
+                         "connectors\n")
+        return 2
     if action is None:
         lines = _connector_lines()
         print("\n".join(lines) if lines else "no connectors installed (use streamwright connectors list to find one)")

@@ -15,7 +15,6 @@
 # * limitations under the License.
 # **************************************************************************/
 
-
 """
 Helpers for testing sources and connectors without network access, used by this repository's tests and available to
 third-party connectors:

@@ -92,6 +92,7 @@ class ProviderAdapter:
     secret_keys = ()
     reads = MappingProxyType({})
     holds_state = False
+    messaging = MappingProxyType({})    # {(service, method): Operation} of its consume and publish operations
 
     def describe(self):
         """The adapter's declared contract (no connection is opened): fields, credentials, reads, state."""
@@ -124,11 +125,24 @@ class ProviderAdapter:
     def open_state(self, session, name, connection, schema):
         raise AdapterError("%s connections cannot hold bookkeeping state" % self.provider)
 
+    def operation(self, service, method):
+        """The consume or publish operation `service`/`method` (None: not a messaging call of this provider)."""
+        return self.messaging.get((service, method))
+
+    def check_message(self, item):
+        """[(code, message, is_warning)] of a consume step's or publish output's arguments."""
+        return []
+
+    def open_broker(self, connection):
+        """A streamwright.core.jobs.types.Broker for the connection (consume steps and publish outputs)."""
+        raise AdapterError("%s connections are not a message broker" % self.provider)
+
 
 def check_location(path, roots, what="path"):
     """
     `path` (a URL, an absolute path, or relative to the first root) as a location inside one of `roots`; raises
-    AdapterError for `..` or a location outside every root. Local locations are normalized.
+    AdapterError for `..` or a location outside every root. Local locations are normalized, and must stay inside a
+    root with symlinks resolved.
     """
     if not isinstance(path, str) or not path or "\x00" in path:
         raise AdapterError("%s must be non-empty text" % what)
@@ -136,12 +150,19 @@ def check_location(path, roots, what="path"):
         raise AdapterError("%s %r may not contain '..'" % (what, path))
     remote = "://" in path
     location = path if remote or os.path.isabs(path) else roots[0].rstrip("/") + "/" + path
-    if "://" not in location:
+    if remote:
+        for root in roots:
+            base = root.rstrip("/")
+            if "://" in root and (location == base or location.startswith(base + "/")):
+                return location
+    else:
         location = os.path.normpath(location)
-    for root in roots:
-        base = root.rstrip("/") if "://" in root else os.path.normpath(root)
-        if location == base or location.startswith(base + "/"):
-            return location
+        real = os.path.realpath(location)       # symlinks resolved: a link inside a root cannot lead out of it
+        for root in roots:
+            if "://" not in root:
+                base = os.path.realpath(root)
+                if real == base or real.startswith(base.rstrip(os.sep) + os.sep):
+                    return location
     raise AdapterError("%s %r is outside the connection's roots (%s)" % (what, path, ", ".join(roots)))
 
 

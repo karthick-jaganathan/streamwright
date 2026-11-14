@@ -30,4 +30,5 @@ field. Argument and connection tables are generated from the definition.
 |---|---|
 | source (`streamwright run`) | `engines/source.py` |
 | DuckDBJob calls (via the source adapter) | `engines/source.py` |
+| DuckDBJob consume steps and publish outputs | `engines/duckdb.py` |
 | SparkJob | `engines/spark.py` |

@@ -51,6 +51,8 @@ class Lease:
     owner_id: str
     epoch: int
     expires_at: str                                  # ISO-8601 UTC, computed by the database clock
+    tokens: tuple[str, ...] = ("",)                 # The explicitly held resource tokens
+    pruned_tokens: tuple[str, ...] = ()             # Tokens pruned due to conflict under prune policy
 
 
 @dataclass(frozen=True)
@@ -114,12 +116,18 @@ class Message:
 class BatchContext:
     """Run constants fixed when a batch is first received; a replay reuses them."""
     batch_id: str
-    batch_sequence: int                              # increases per batch of a job and is never reused
+    batch_sequence: int                              # increases per batch of a job and scope; never reused
     batch_ts: str                                    # ISO-8601 UTC, pinned in the manifest
     job_name: str
     lease_epoch: int
     store_identity: str                              # stable id of the state store that issued the sequence
     engine_metadata: Mapping[str, Any] = field(default_factory=dict)
+    scope: str = ""                                  # runtime.state.scope; batches and sequences are per scope
+
+    def transaction_app_id(self, output_name):
+        """The idempotency key of an output's table commits (Delta txn appId): job, output, store and scope."""
+        app_id = "%s:%s:%s" % (self.job_name, output_name, self.store_identity)
+        return app_id + ":" + self.scope if self.scope else app_id
 
 
 @dataclass(frozen=True)

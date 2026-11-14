@@ -126,7 +126,16 @@ def resolve(job, config=None, secrets=None):
             return {substitute_inputs(k) if isinstance(k, str) else k: walk(v) for k, v in node.items()}
         return node
 
-    return walk(job), sorted(set(problems))
+    # rendered elsewhere, at run time: spec.lookups by the lookups, runtime.log (labels) per run or pass
+    kept = [(section, key) for section, key in (("spec", "lookups"), ("runtime", "log"))
+            if isinstance(job, dict) and isinstance(job.get(section), dict) and key in job[section]]
+    if not kept:
+        return walk(job), sorted(set(problems))
+    resolved = walk({**job, **{section: {k: v for k, v in job[section].items() if (section, k) not in kept}
+                               for section, _ in kept}})
+    for section, key in kept:
+        resolved[section][key] = job[section][key]
+    return resolved, sorted(set(problems))
 
 
 def sql_literal(value, quote_text=quote_literal):

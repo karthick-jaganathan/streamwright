@@ -23,7 +23,8 @@ import datetime
 import json
 import logging
 
-from streamwright.core.runtime.logs.lines import FIELDS, iso_time
+from streamwright.core.runtime.logs.context import context_value, stamp
+from streamwright.core.runtime.logs.lines import CONTEXT_KEYS, FIELDS, TEXT_FORMAT, iso_time
 from streamwright.core.runtime.logs.record_factory import top_setup
 
 
@@ -39,6 +40,18 @@ def _plain(value, redact):
     if isinstance(value, (datetime.date, datetime.datetime)):
         return value.isoformat()
     return redact(str(value))
+
+
+class TextFormatter(logging.Formatter):
+    """TEXT_FORMAT, with the record's log context as a tag after the logger name: ` [job account=1 step=s]`."""
+
+    def __init__(self, fmt=TEXT_FORMAT, datefmt=None):
+        super().__init__(fmt, datefmt)
+
+    def format(self, record):
+        if not hasattr(record, "context_tag"):       # made while no LogSetup's record factory was in effect
+            stamp(record)
+        return super().format(record)
 
 
 class JsonFormatter(logging.Formatter):
@@ -70,6 +83,10 @@ class JsonFormatter(logging.Formatter):
                 value = getattr(record, name, None)
                 if value is not None:
                     entry[name] = _plain(value, self.redact)
+        for name in CONTEXT_KEYS:                    # the log context, on every logger's lines (record_factory)
+            value = context_value(record, name)
+            if value is not None and name not in entry:
+                entry[name] = _plain(value, self.redact)
         if record.exc_info and not record.exc_text:
             record.exc_text = self.formatException(record.exc_info)
         if record.exc_text:

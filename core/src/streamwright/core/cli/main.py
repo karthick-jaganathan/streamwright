@@ -17,6 +17,7 @@
 
 """The `streamwright`/`sw` CLI: source commands plus installed command and job-kind plug-ins."""
 
+import argparse
 import os
 import sys
 
@@ -28,18 +29,35 @@ from streamwright.core.cli.commands.source import run
 from streamwright.core.cli.jobs import JOB_OPTION
 from streamwright.core.cli.log_options import log_options, log_setup
 from streamwright.core.cli.parser import build_parser, build_plan_parser, build_validate_parser, command_parsers
+from streamwright.core.jobs.engine import engine_name
 from streamwright.core.validation import engine
 from streamwright.core.validation.engine import NON_STRICT_CODES, check_components
 
 __all__ = ["main"]
 
 
+def _subcommand(parser, name):
+    for action in parser._actions if parser is not None else ():
+        if isinstance(action, argparse._SubParsersAction):
+            return action.choices.get(name)
+    return None
+
+
+def _options(parser):
+    return {option: action for action in (parser._actions if parser is not None else ())
+            for option in action.option_strings}
+
+
 def _extract_all_paths(args, command="run"):
-    """Extract positional paths by querying argparse actions, not a second hand-maintained option list."""
+    """
+    The positional paths of a job command's arguments, read with the options of the command, of every job command
+    and of every engine's command of that name (so `--interval 10s` or `--state-lock-timeout 5m` is not a path).
+    """
     parsers = command_parsers()
-    parser = parsers.get(command)
-    actions = (parser._actions if parser else []) + parsers["job"]._actions
-    options = {option: action for action in actions for option in action.option_strings}
+    options = {}
+    for parser in (*(_subcommand(engine_parser, command) for engine_parser in parsers.values()), parsers["job"],
+                   parsers.get(command)):
+        options.update(_options(parser))
     paths = []
     index = 0
     while index < len(args):
@@ -123,6 +141,18 @@ def _validate_command(argv):
         setup.close()
 
 
+def _foreign_options(kind, argv):
+    """The options of `argv` that the root command has (for a source) but the job engine's command does not."""
+    parsers = command_parsers()
+    engine = _subcommand(parsers.get(engine_name(kind)), argv[0])
+    if engine is None:
+        return []
+    known = set(_options(engine))
+    root = set(_options(build_validate_parser() if argv[0] == "validate" else parsers.get(argv[0])))
+    return sorted({item.partition("=")[0] for item in argv[1:]
+                   if item.partition("=")[0] in root - known and item.startswith("-")})
+
+
 def _job_kind(argv):
     """The manifest kind of a job command's path (None: a source, or not a job command); raises ValueError."""
     if argv[0] not in ("run", "validate", "plan"):
@@ -134,6 +164,17 @@ def _job_kind(argv):
     return kinds.pop() if kinds else None
 
 
+def _run_job(kind, argv):
+    """A job command on its engine, after refusing the options only a source takes."""
+    foreign = _foreign_options(kind, argv)
+    if foreign:
+        sys.stderr.write("streamwright %s: %s only %s to sources, not to a %s (its options: streamwright %s %s "
+                         "--help)\n" % (argv[0], ", ".join(foreign), "applies" if len(foreign) == 1 else "apply",
+                                         kind, engine_name(kind), argv[0]))
+        return 2
+    return jobs.run_job_kind(kind, argv)
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     command = argv[0] if argv else None
@@ -143,7 +184,7 @@ def main(argv=None):
         sys.stderr.write("streamwright: %s\n" % exc)
         return 2
     if kind is not None:
-        return jobs.run_job_kind(kind, argv)
+        return _run_job(kind, argv)
     if command == "validate":
         return _validate_command(argv)
     if command == "plan":

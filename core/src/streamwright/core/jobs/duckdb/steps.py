@@ -22,6 +22,8 @@ DuckDBJob steps: one classification shared by the checker, the plan and the exec
   read     a connection and `read:`: the adapter compiles the read                 a TEMP VIEW or TABLE
   call     a connection and a connector call (`service`/`method`, or `request`)    a TEMP TABLE of the records
   source   `source:` a StreamWright source folder and its `stream`                 a TEMP TABLE of the records
+  consume  a connection and its broker's consume call (`service: message`, `method: consume`)
+           the batch's messages (the table `input`), or `sql` over them            a TEMP VIEW
 
 Call and source steps run through the source engine (`SourceRunner.collect`), keep their bookmarks in the batch
 manifest's `carry` (so incremental streams resume) and fail on a partial load. Their records land in DuckDB in
@@ -29,6 +31,10 @@ batches as JSON. With `sql`, the step is that query over the table `records` (on
 gives an empty result its columns; without it, the records' top-level keys become columns. A message read
 (`service: message`) carries its discovered column structure in `carry`, so a batch that polls no messages keeps the
 same columns (zero rows) instead of collapsing to the lone `record` column.
+
+A consume step does not call anything: the runner polls the broker before the batch, pins the messages in its
+manifest (a replay sees the same ones) and acknowledges them only once the batch's outputs and outbox are committed.
+`input` has the columns message_id, key, body, headers (a MAP of text) and timestamp.
 """
 
 import itertools
@@ -45,6 +51,8 @@ from streamwright.core.sql.quote import quote_ident, quote_literal
 
 __all__ = [
     "CALL",
+    "CONSUME",
+    "MESSAGES_TABLE",
     "READ",
     "RECORDS_TABLE",
     "SOURCE",
@@ -53,9 +61,12 @@ __all__ = [
     "StepError",
     "build_step",
     "classify_step",
+    "message_kind",
+    "step_kind",
 ]
 
-SQL, READ, CALL, SOURCE = "sql", "read", "call", "source"
+SQL, READ, CALL, SOURCE, CONSUME = "sql", "read", "call", "source", "consume"
+MESSAGES_TABLE = "input"
 _COMMON = ("name", "description")
 STEP_KEYS = MappingProxyType({
     SQL: (*_COMMON, "sql", "materialize"),
@@ -63,6 +74,7 @@ STEP_KEYS = MappingProxyType({
     CALL: (*_COMMON, "connection", "service", "method", "arguments", "request", "paginator", "retry", "rate_limit",
            "partitions", "sql"),
     SOURCE: (*_COMMON, "source", "stream", "config", "partitions", "sql"),
+    CONSUME: (*_COMMON, "connection", "service", "method", "arguments", "sql", "materialize"),
 })
 RECORDS_TABLE = "records"
 _INSERT_BATCH = 5000
@@ -87,6 +99,30 @@ def classify_step(step, connections):
     return None, "a step with a connection needs `read:`, or a connector call (`service`/`method`, or `request`)"
 
 
+def message_kind(item, connections, adapters):
+    """"consume" or "publish" when a step or output is its connection's broker call (service/method), else None."""
+    if not isinstance(item, dict) or "request" in item:
+        return None
+    connection = connections.get(item.get("connection")) or {}
+    adapter = adapters.get(connection.get("provider")) if isinstance(connection, dict) else None
+    operation = adapter.operation(item.get("service"), item.get("method")) if adapter is not None else None
+    return None if operation is None else str(operation.kind)
+
+
+def step_kind(step, connections, adapters):
+    """
+    classify_step, then a connector call that is its broker's consume operation is a consume step; a publish call
+    belongs in outputs.
+    """
+    kind, problem = classify_step(step, connections)
+    message = message_kind(step, connections, adapters) if kind == CALL else None
+    if message is None:
+        return kind, problem
+    if message == "consume":
+        return CONSUME, None
+    return None, "%s.%s publishes events: it is an output, not a step" % (step.get("service"), step.get("method"))
+
+
 def _create(con, name, sql, materialize):
     kind = "TABLE" if materialize == "table" else "VIEW"
     con.execute("CREATE OR REPLACE TEMP %s %s AS %s" % (kind, quote_ident(name), sql))
@@ -104,7 +140,13 @@ def _build_records(run, step, kind):
     _load_records(run, step, _collect(run, step, kind), _load_batch(step))
 
 
-_HANDLERS = MappingProxyType({SQL: _build_sql, READ: _build_read, CALL: _build_records, SOURCE: _build_records})
+def _build_consume(run, step, kind):
+    _create(run.session.con, step["name"], step.get("sql") or "SELECT * FROM %s" % MESSAGES_TABLE,
+            step.get("materialize", "view"))
+
+
+_HANDLERS = MappingProxyType({SQL: _build_sql, READ: _build_read, CALL: _build_records, SOURCE: _build_records,
+                              CONSUME: _build_consume})
 
 
 def _load_batch(step):
@@ -115,7 +157,7 @@ def _load_batch(step):
 
 def build_step(run, step):
     """Builds one step in the run's session (`run`: the executor's per-batch state)."""
-    kind, problem = classify_step(step, run.connections)
+    kind, problem = step_kind(step, run.connections, run.adapters)
     if kind is None:
         raise StepError("step %s: %s" % (step["name"], problem))
     _HANDLERS[kind](run, step, kind)

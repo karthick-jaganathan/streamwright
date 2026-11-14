@@ -25,13 +25,17 @@ from streamwright.core.jobs.types import Lease, WriteReceipt
 __all__ = ["STATUSES", "TERMINAL_STATUSES", "LeaseHeldError", "StaleLeaseError", "StateError", "StateStore"]
 
 # received -> processing -> committed -> acked -> completed; any other -> failed | abandoned;
-# failed -> the status it failed from (retry) | abandoned
-STATUSES = ("received", "processing", "committed", "acked", "completed", "failed", "abandoned")
-TERMINAL_STATUSES = ("completed", "abandoned")
+# failed -> the status it failed from (retry) | abandoned; skipped: a run the lock policy pruned entirely
+STATUSES = ("received", "processing", "committed", "acked", "completed", "failed", "abandoned", "skipped")
+TERMINAL_STATUSES = ("completed", "abandoned", "skipped")
 
 
 class StateError(Exception):
     """A bookkeeping operation that is not allowed (unknown status, impossible transition, bad sequence)."""
+
+
+class MigrationsPendingError(StateError):
+    """The state tables need migrations, and the run may not apply them (--apply-state-migrations, apply_migrations)."""
 
 
 class StaleLeaseError(StateError):
@@ -39,31 +43,51 @@ class StaleLeaseError(StateError):
 
 
 class LeaseHeldError(StateError):
-    """Another worker holds the job's lease."""
+    """Another worker holds the job's lease or one of its requested tokens."""
+
+    def __init__(self, message, conflicts=None):
+        super().__init__(message)
+        self.conflicts = dict(conflicts or {})
 
 
 @runtime_checkable
 class StateStore(Protocol):
+    """
+    Batches belong to a job and a scope (runtime.state.scope, "" for none): recovery, job keys, carried values,
+    sequences and the outbox are per scope; leases are per token, so scopes and lock items exclude each other.
+    """
+
     def initialize(self) -> None:
         """Creates or migrates the bookkeeping tables (ordered, idempotent migrations)."""
+
+    def prepare(self, migrate: bool = True) -> None:
+        """initialize() (`migrate`), or MigrationsPendingError when a migration is not applied."""
 
     def store_identity(self) -> str:
         """A stable identity of this state store, used to make per-run idempotency keys unique across stores."""
 
-    def acquire_lease(self, job_name: str, owner_id: str, ttl_seconds: int) -> Lease: ...
+    def acquire_lease(self, job_name: str, owner_id: str, ttl_seconds: int, *, tokens: Sequence[str] = ("",),
+                      optional: Sequence[str] = (), policy: str = "fail", timeout: float = 0.0) -> Lease:
+        """Takes the needed `tokens` and the `optional` ones (prunable) under one epoch; see SqlStateStore."""
     def renew_lease(self, lease: Lease, ttl_seconds: int) -> Lease: ...
     def check_lease(self, lease: Lease) -> None:
         """Raises StaleLeaseError unless `lease` is still the current, unexpired lease."""
     def release_lease(self, lease: Lease) -> None: ...
-    def get_lease(self, job_name: str) -> dict[str, Any] | None: ...
+    def get_lease(self, job_name: str, token: str = "") -> dict[str, Any] | None: ...
+    def list_leases(self, job_name: str) -> list[dict[str, Any]]: ...
 
-    def next_batch_sequence(self, job_name: str) -> int:
-        """One more than the highest sequence the job ever used; purging batches never lowers it."""
+    def next_batch_sequence(self, lease: Lease, scope: str = "") -> int:
+        """One more than the highest sequence the job and scope ever used; purging batches never lowers it."""
 
     def record_batch(self, lease: Lease, batch_id: str, status: str, manifest: Mapping[str, Any], *,
-                     batch_sequence: int | None = None, run_key: str | None = None,
-                     error: str | None = None, engine_metadata: Mapping[str, Any] | None = None) -> None:
+                     batch_sequence: int | None = None, scope: str = "", job_key: str | None = None,
+                     tokens: Mapping[str, Any] | None = None, error: str | None = None,
+                     engine_metadata: Mapping[str, Any] | None = None) -> None:
         """Creates a batch (needs batch_sequence) or moves it along the status machine; fenced by the lease."""
+
+    def record_skipped(self, job_name: str, batch_id: str, manifest: Mapping[str, Any], *, scope: str = "",
+                       tokens: Mapping[str, Any] | None = None) -> int:
+        """Records a run the lock policy pruned entirely (status skipped); returns its sequence."""
 
     def record_receipt(self, lease: Lease, batch_id: str, receipt: WriteReceipt,
                        manifest: Mapping[str, Any] | None = None) -> None:
@@ -78,18 +102,18 @@ class StateStore(Protocol):
         """
 
     def retry_batch(self, lease: Lease, batch_id: str) -> str:
-        """Moves a failed batch back to the status it failed from; returns that status."""
+        """Moves a failed batch back to the status it failed from, counting one more attempt; returns that status."""
 
     def get_receipts(self, job_name: str, batch_id: str) -> dict[str, dict[str, Any]]: ...
     def get_batch(self, job_name: str, batch_id: str) -> dict[str, Any] | None: ...
-    def find_batch_by_run_key(self, job_name: str, run_key: str) -> dict[str, Any] | None: ...
-    def find_latest_completed_batch(self, job_name: str) -> dict[str, Any] | None: ...
-    def list_incomplete_batches(self, job_name: str) -> list[dict[str, Any]]: ...
-    def list_batches(self, job_name: str, limit: int = 20) -> list[dict[str, Any]]: ...
-    def list_pending_events(self, job_name: str) -> list[dict[str, Any]]: ...
+    def find_batch_by_job_key(self, job_name: str, job_key: str, scope: str = "") -> dict[str, Any] | None: ...
+    def find_latest_completed_batch(self, job_name: str, scope: str = "") -> dict[str, Any] | None: ...
+    def list_incomplete_batches(self, job_name: str, scope: str = "") -> list[dict[str, Any]]: ...
+    def list_batches(self, job_name: str, limit: int = 20, scope: str | None = None) -> list[dict[str, Any]]: ...
+    def list_pending_events(self, job_name: str, scope: str = "") -> list[dict[str, Any]]: ...
     def mark_events_sent(self, lease: Lease, batch_id: str, output_name: str,
                          event_sequences: Sequence[int]) -> None: ...
-    def purge_batches(self, job_name: str, older_than: Any) -> int:
-        """Deletes completed/abandoned batches last updated before `older_than` (an aware datetime)."""
+    def purge_batches(self, job_name: str, older_than: Any, scope: str | None = None) -> int:
+        """Deletes terminal batches last updated before `older_than` (an aware datetime)."""
 
     def get_schema_signatures(self, job_name: str) -> dict[str, str]: ...
