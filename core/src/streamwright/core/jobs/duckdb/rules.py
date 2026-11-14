@@ -23,7 +23,7 @@ from types import MappingProxyType
 from streamwright.core.jobs import ingest
 from streamwright.core.jobs.calls import partition_dependencies, partition_problems
 from streamwright.core.jobs.check.findings import connections_of
-from streamwright.core.jobs.check.rules import NAME_PATTERN, RESERVED_NAMES, JobRules, input_field
+from streamwright.core.jobs.check.rules import NAME_PATTERN, RESERVED_NAMES, JobRules, input_field, install_hint
 from streamwright.core.jobs.duckdb.steps import (
     CALL,
     CONSUME,
@@ -233,8 +233,7 @@ class DuckDBRules(JobRules):
         adapter = self._adapter(connections, step)
         if adapter is None:
             provider = connections[step["connection"]]["provider"]
-            return [("no-adapter", "provider %r has no DuckDB adapter (pip install streamwright-%s)" % (
-                provider, provider), False)]
+            return [("no-adapter", "provider %r has no DuckDB adapter: %s" % (provider, install_hint(provider)), False)]
         if step["read"] not in adapter.reads:
             return [("bad-value", "%s connections read %s, not %r" % (
                 adapter.provider, ", ".join(sorted(adapter.reads)) or "nothing", step["read"]), False)]
@@ -258,8 +257,7 @@ class DuckDBRules(JobRules):
             return adapter.validate(name, connection)
         if connection["provider"] not in self.connectors:
             return [("connector-not-installed", "provider %r has neither a DuckDB adapter nor a connector "
-                     "installed (pip install streamwright-%s)" % (connection["provider"], connection["provider"]),
-                     False)]
+                     "installed: %s" % (connection["provider"], install_hint(connection["provider"])), False)]
         return []
 
     def write_target(self, connection):

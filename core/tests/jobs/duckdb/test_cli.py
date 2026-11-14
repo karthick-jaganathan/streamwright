@@ -308,3 +308,17 @@ def test_a_job_key_from_the_command_line_runs_once_per_scope(tmp_path, capsys):
     with pytest.raises(SystemExit) as usage:
         main(["run", job, "--run-key", "k"])
     assert usage.value.code == 2 and "--run-key was renamed --job-key" in capsys.readouterr().err
+
+
+def test_a_connector_that_is_not_installed_is_named_once_with_how_to_install_it(tmp_path, capsys):
+    job = _job(tmp_path, spec={}, connections={"raw": {"provider": "nosuch", "roots": ["data"]},
+                                      "wh": {"provider": "duckdb", "path": str(tmp_path / "wh.duckdb")}},
+               steps=[{"name": "s", "connection": "raw", "read": "parquet", "path": "a.parquet"},
+                      {"name": "t", "connection": "raw", "read": "csv", "path": "b.csv"}])
+    assert main(["run", job]) == 1
+    err = capsys.readouterr().err
+    assert ("provider 'nosuch' of connection 'raw' (used by steps[0], steps[1]) is not installed: install it with "
+            "`streamwright connectors install nosuch`") in err
+    assert "is not one of" not in err and "does not use `path`" not in err
+    assert main(["validate", job]) == 0                    # offline it is a warning: the connector may come later
+    assert "warning [connector-not-installed]" in capsys.readouterr().err

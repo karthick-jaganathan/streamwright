@@ -243,8 +243,8 @@ def _run_lookups(raw, config, secrets, environ, options, *, allow_exec, fan_out)
         return _run(raw, config=config, secret_map=secret_values(raw, secrets, environ), **options)
     report = job_validation.validate_job(raw, lambda found: duckdb_rules(
         found, options["allowed_connectors"]), config=config, strict=options["strict"])
-    if not report.valid:
-        raise JobInvalidError(report.problems)
+    if report.run_problems:
+        raise JobInvalidError(report.run_problems)
     explicit = {**secrets_from_env(list(declared), environ), **(secrets or {})}
     lookups = Lookups(raw, config, explicit, allow_exec=allow_exec, enrol=lambda value: _mask(options["redact"], value),
                       base_dir=options["base_dir"])
@@ -297,8 +297,8 @@ def _run(raw, *, config, secret_map, allowed_connectors, dry_run, base_dir, reda
          max_job_attempts=None):
     report = job_validation.validate_job(raw, lambda found: duckdb_rules(found, allowed_connectors), config=config,
                                          strict=strict)
-    if not report.valid:
-        raise JobInvalidError(report.problems)
+    if report.run_problems:
+        raise JobInvalidError(report.run_problems)
     values = effective_config(raw, config)
     job, missing = resolve(raw, values, secret_map)
     if missing:

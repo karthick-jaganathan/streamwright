@@ -24,6 +24,7 @@ they are imported.
 from collections.abc import Callable, Collection, Iterable
 from typing import Any
 
+from streamwright.core.jobs.check.rules import install_hint
 from streamwright.core.jobs.duckdb.adapter import BUILT_IN_ADAPTERS, ProviderAdapter
 from streamwright.core.jobs.duckdb.definition_adapter import CAPABILITIES, DefinitionDuckDBAdapter
 from streamwright.core.runtime.definitions import definition_names, definitions_for
@@ -47,6 +48,6 @@ def load_adapters(providers: Iterable[str], allowed: Collection[str] | None = No
     definitions, missing = definitions_for(CAPABILITIES.engine, [name for name in wanted if name not in found],
                                            allowed=allowed, entry_points=entry_points)
     found.update((name, DefinitionDuckDBAdapter(definition)) for name, definition in definitions.items())
-    missing.update((name, "no DuckDB adapter is installed for provider %r (pip install streamwright-%s)" % (
-        name, name.replace("_", "-"))) for name in wanted if name not in found and name not in missing)
+    missing.update((name, "no DuckDB adapter is installed for provider %r: %s" % (name, install_hint(name)))
+                   for name in wanted if name not in found and name not in missing)
     return found, missing

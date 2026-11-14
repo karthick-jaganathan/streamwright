@@ -24,10 +24,13 @@ what each connection's adapter accepts. Every section is defensive: a malformed 
 structure section) and skipped by the others.
 """
 
-from streamwright.core.jobs.check.rules import JobRules
+from streamwright.core.jobs.check.findings import connections_of, named_items
+from streamwright.core.jobs.check.rules import JobRules, install_hint
 from streamwright.core.jobs.check.sections import SECTIONS, Findings
+from streamwright.core.validation.checker import ERROR
+from streamwright.core.validation.issues import Issue
 
-__all__ = ["SECTIONS", "JobRules", "check_job"]
+__all__ = ["SECTIONS", "JobRules", "check_job", "install_hint"]
 
 
 def check_job(job, rules, filename=None):
@@ -38,4 +41,30 @@ def check_job(job, rules, filename=None):
         return findings.issues
     for section in SECTIONS:
         section(job, rules, findings)
-    return findings.issues
+    return _not_installed(job, rules, findings.issues)
+
+
+def _not_installed(job, rules, issues):
+    """
+    A step or output whose connection's provider has no adapter or connector installed: its checks of what that
+    adapter would accept (read formats, keys) are noise, so they give way to one issue that says what to install.
+    """
+    connections = connections_of(job)
+    users = {}                                       # connection -> the steps and outputs that use it
+    for section in ("steps", "outputs"):
+        for index, item in named_items(job, section):
+            connection = connections.get(item.get("connection"))
+            if connection is not None and not rules.provider_installed(connection["provider"]):
+                users.setdefault(item["connection"], []).append("%s[%d]" % (section, index))
+    if not users:
+        return issues
+    noise = [path for paths in users.values() for path in paths] + ["connections.%s" % name for name in users]
+    kept = [issue for issue in issues if not any(issue.path == path or issue.path.startswith(path + ".")
+                                                 for path in noise)]
+    filename = issues[0].file if issues else None
+    for name, paths in users.items():
+        provider = connections[name]["provider"]
+        kept.append(Issue(ERROR, "connector-not-installed", "provider %r of connection %r (used by %s) is not "
+                          "installed: %s" % (provider, name, ", ".join(paths), install_hint(provider)), filename,
+                          paths[0]))
+    return kept

@@ -33,6 +33,11 @@ RESERVED_NAMES = frozenset(["input", "batch", "config", "secrets", "runtime", "d
                             "_schema_report", "_streamwright_state"])
 
 
+def install_hint(provider):
+    """How to get a provider's connector: the hub's install command."""
+    return "install it with `streamwright connectors install %s`" % provider
+
+
 def input_field():
     """The rule of one spec.config / spec.secrets definition: core's source input rules."""
     return Field("object", fields={
@@ -93,6 +98,11 @@ class JobRules:
     def output_policy_keys(self):
         """Execution-policy keys honoured on an output; others are an `unsupported-argument` error."""
         return ()
+
+    def provider_installed(self, provider):
+        """Whether a connection's provider can be used: an engine adapter or a connector is installed for it."""
+        adapters, connectors = getattr(self, "adapters", None) or {}, getattr(self, "connectors", None) or ()
+        return provider in adapters or provider in connectors
 
     def check_connection(self, name, connection):
         """Problems of one connection, asked of its adapter: [(code, message, is_warning)]."""

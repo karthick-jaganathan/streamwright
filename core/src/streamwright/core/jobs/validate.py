@@ -55,6 +55,12 @@ class JobReport:
         return [issue for issue in self.issues if issue.severity == ERROR]
 
     @property
+    def run_problems(self):
+        """What stops a run: the problems, and a step or output whose connector is not installed (a warning offline)."""
+        return [issue for issue in self.issues if issue.severity == ERROR or (
+            issue.code == "connector-not-installed" and issue.path.startswith(("steps", "outputs")))]
+
+    @property
     def warnings(self):
         return [issue for issue in self.issues if issue.severity == WARNING]
 
