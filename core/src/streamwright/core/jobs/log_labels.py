@@ -16,7 +16,7 @@
 # **************************************************************************/
 
 """
-runtime.log.labels: a job's own names on its log lines (`[job client=c42 network=3 account=1 step=s]`), next to the
+runtime.log.labels: a job's own names on its log lines (`[job tenant=t1 region=eu account=a1 step=s]`), next to the
 log context's fixed keys. A label's value may use only `{{ config.* }}` inputs (never secrets), and is rendered when a
 run (or a runtime.fan_out pass) starts, from that run's config.
 """

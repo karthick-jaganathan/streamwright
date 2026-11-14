@@ -77,7 +77,7 @@ def _lookups(tmp_path, **overrides):
                               "ORDER BY account_id",
                      "params": {"client_id": "{{ config.client_id }}", "account_ids": "{{ config.account_ids }}"},
                      "transforms": {"token": {"type": "builtin", "apply": "base64", "value": "{{ row.token_b64 }}"}}},
-        "app": {"type": "command", "command": [sys.executable, str(tmp_path / "get_secret.py"), "-s",
+        "app": {"type": "command", "command": [sys.executable, str(tmp_path / "secrets_cli.py"), "-s",
                                                "{{ config.client_id }}"]},
     }
     lookups.update(overrides)
@@ -85,7 +85,7 @@ def _lookups(tmp_path, **overrides):
 
 
 def _job(tmp_path, **extra):
-    (tmp_path / "get_secret.py").write_text(_SECRET_SCRIPT)
+    (tmp_path / "secrets_cli.py").write_text(_SECRET_SCRIPT)
     job = {"kind": "DuckDBJob", "name": "per_account",
            "spec": {"config": {"client_id": {"type": "string", "required": False},
                                "account_ids": {"type": "list", "items": "string", "required": False},
@@ -186,10 +186,10 @@ def test_validate_names_what_a_binding_or_fan_out_gets_wrong(tmp_path, capsys):
 def test_the_log_context_takes_only_its_keys_cleans_values_nests_and_follows_bound_threads():
     with pytest.raises(ValueError, match="unknown log context key"), log_context(client="x"):
         pass
-    with log_context(job="j", labels={"client": "c42"}), log_context(item="account=a1", step="line\nbreak"):
-        assert dict(current_context()) == {"job": "j", "labels": {"client": "c42"}, "item": "account=a1",
+    with log_context(job="j", labels={"tenant": "t1"}), log_context(item="account=a1", step="line\nbreak"):
+        assert dict(current_context()) == {"job": "j", "labels": {"tenant": "t1"}, "item": "account=a1",
                                            "step": "line break"}
-        assert context_tag(current_context()) == " [j client=c42 account=a1 step=line break]"
+        assert context_tag(current_context()) == " [j tenant=t1 account=a1 step=line break]"
         seen = []
         thread = threading.Thread(target=bind(lambda: seen.append(current_context().get("item"))))
         thread.start()

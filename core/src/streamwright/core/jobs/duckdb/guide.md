@@ -269,43 +269,43 @@ Inputs can be fetched at run time instead of given up front: `spec.lookups` decl
 input binds one with `lookup: {from: NAME, field: PATH}` (in `spec.config` or `spec.secrets`). An explicit value
 (`--set`, `--config`, `--secrets`, `STREAMWRIGHT_SECRET_*`) wins, and a lookup nothing needs never runs.
 `runtime.fan_out` runs the whole job once per item (an account): one manifest serves one account, several, or every
-account of a client.
+account of a tenant.
 
 ```yaml
 spec:
   config:
-    client_id:   {type: string, required: false}
+    tenant_id:   {type: string, required: false}
     account_ids: {type: list, items: string, required: false}
     account_id:         {type: string, lookup: {from: account, field: account_id}}   # the pass's row
     login_customer_id:  {type: string, lookup: {from: account, field: manager_id}}
   secrets:
-    client_secret: {type: string, lookup: {from: app_creds, field: credentials.clientSecret}}   # once per run
+    client_secret: {type: string, lookup: {from: app_secrets, field: credentials.clientSecret}}   # once per run
     refresh_token: {type: string, lookup: {from: account, field: refresh_token}}             # per account
   lookups:
     accounts:
       type: database                       # database | command | function | aws_secretsmanager
       connection: creds_db                 # a postgres, mysql, duckdb or sqlite connection of the job
       query: |
-        SELECT account_id, manager_id, refresh_token_enc FROM ads_accounts
-        WHERE status = 'active' AND (CAST(:client_id AS text) IS NULL OR client_id = :client_id)
+        SELECT account_id, manager_id, refresh_token_enc FROM accounts
+        WHERE status = 'active' AND (CAST(:tenant_id AS text) IS NULL OR tenant_id = :tenant_id)
           AND (CAST(:account_ids AS text) IS NULL OR account_id IN :account_ids)
-      params: {client_id: "{{ config.client_id }}", account_ids: "{{ config.account_ids }}"}
+      params: {tenant_id: "{{ config.tenant_id }}", account_ids: "{{ config.account_ids }}"}
       rows: many                           # one (default: exactly one row) | many (for fan_out)
       secret_fields: [refresh_token_enc]
       transforms:                          # per row, when its pass starts: function | command (stdin) | builtin
         refresh_token: {type: function, function: "acme.crypto:decrypt",
                         arguments: {ciphertext: "{{ row.refresh_token_enc }}"}}
-    app_creds:
+    app_secrets:
       type: command                        # an argument list, never a shell
-      command: [get_secret, -s, google-ads/app]
+      command: [secrets-cli, read, ads/app]
       format: auto                         # auto | text | json | json_string
 runtime:
   fan_out: {over: accounts, as: account, concurrency: 4, on_failure: continue, on_empty: fail}
   state:
     scope: "account:{{ config.account_id }}"     # required with fan_out: each account keeps its own state
 ```
-- Run it with `--set account_ids=acc_101` (one), `--set account_ids=acc_101,acc_102` (several) or `--set
-  client_id=c42` (the client's accounts). Command and function lookups and transforms need `--allow-lookup-exec`
+- Run it with `--set account_ids=a1` (one), `--set account_ids=a1,a2` (several) or `--set tenant_id=t1`
+  (the tenant's accounts). Command and function lookups and transforms need `--allow-lookup-exec`
   (exit 2 without it). `--fan-out-concurrency N` and `--fan-out-on-failure continue|stop` override the manifest.
 - Templates in a lookup read `{{ config.* }}`, `{{ secrets.* }}`, the item's `{{ <as>.COLUMN }}`, and in transforms
   `{{ row.COLUMN }}`. In a query, `:name` parameters are bound: after IN a list expands to (?, ?, ...) and a missing
@@ -329,16 +329,16 @@ step, output or lookup at work. JSON lines carry each key (`job`, `labels`, `ite
 `output`, `lookup`), for every logger, SDK lines included:
 
 ```
-[...] INFO streamwright.source [ads_campaigns client=c42 network=3 account=acc_101 step=campaigns]: ...
-[...] INFO streamwright.duckdb [ads_campaigns client=c42 network=3 account=acc_101 output=save]: ...
+[...] INFO streamwright.source [ads_campaigns tenant=t1 region=eu account=a1 step=campaigns]: ...
+[...] INFO streamwright.duckdb [ads_campaigns tenant=t1 region=eu account=a1 output=save]: ...
 ```
 
 ```yaml
 runtime:
   log:
     labels:                           # shown in this order; values use {{ config.* }} only (never secrets)
-      client:  "{{ config.client_id }}"
-      network: "{{ config.network_id }}"
+      tenant: "{{ config.tenant_id }}"
+      region: "{{ config.region }}"
 ```
 Labels are rendered when a run (or a fan-out pass, after its lookups) starts; one whose input has no value is left
 out. At most 8; names are lowercase letters, digits and `_`, and not one of the built-in keys. Outside a job run
