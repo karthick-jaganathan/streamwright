@@ -24,25 +24,17 @@ from streamwright.core.config.inputs import as_date
 
 
 class BookmarkStore:
-    def __init__(self, state, output, metrics, today, *, key, legacy_key):
+    def __init__(self, state, output, metrics, today, *, key):
         self.state = copy.deepcopy(state) if state else {}
         self.state.setdefault("bookmarks", {})
         self.output = output
         self.metrics = metrics
         self.today = today
         self.key = key
-        self.legacy_key = legacy_key
 
     def get(self, name, partition):
-        """Return the saved cursor, migrating a legacy decimal key when present."""
-        bookmarks = self.state["bookmarks"].get(name) or {}
-        key = self.key(partition)
-        if key not in bookmarks:
-            legacy = self.legacy_key(partition)
-            if legacy != key and legacy in bookmarks:
-                self.unwritten_change()
-                bookmarks[key] = bookmarks.pop(legacy)
-        return bookmarks.get(key)
+        """Return the saved cursor."""
+        return (self.state["bookmarks"].get(name) or {}).get(self.key(partition))
 
     def advance(self, stream, partition, window, write=True):
         """Save the last complete day, never moving a cursor backwards."""

@@ -28,7 +28,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
 
-from streamwright.core.validation.issues import Issue
+from streamwright.core.runtime.issues import Issue
 
 ENGINES: Final = ("source", "duckdb", "spark")
 ALL_ENGINES: Final = frozenset(ENGINES)
@@ -70,6 +70,7 @@ class OperationKind(StrEnum):
     WRITE = "write"
     CONSUME = "consume"
     PUBLISH = "publish"
+    APPLY = "apply"          # per-row operations on a vendor's objects (create, update, upload), with per-row results
 
 
 def is_secret_reference(value: object) -> bool:

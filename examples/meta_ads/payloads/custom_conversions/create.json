@@ -1,0 +1,4 @@
+[
+  {"name": "Purchase thank-you page", "event_type": "PURCHASE", "url_contains": "/checkout/thank-you", "default_value": 25},
+  {"name": "Lead form sent", "event_type": "LEAD", "url_contains": "/contact/sent"}
+]

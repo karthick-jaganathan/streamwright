@@ -25,6 +25,10 @@ statement_timeout: 5min                 # interrupts a source statement running 
 - DuckDB takes the connection only as the parameters of a temporary `TYPE mysql` secret (never in the ATTACH text); a
   parameter that secret cannot take is refused by name, never silently dropped. `options` may set `socket` and the
   `ssl_*` files.
+- PyMySQL (the DuckDBJob and SparkJob state stores, Spark's merges and deletes) connects with the same `socket`,
+  `sslmode` and `ssl_*` files: `required` encrypts without verifying, `verify_ca` checks the certificate against
+  `ssl_ca`, `verify_identity` the host name too; `preferred` (the default) is opportunistic TLS unless `ssl_*` files
+  are given, which require it.
 - Spark builds its JDBC URL from the resolved host, port and database - each checked first - and passes user and
   password only as JDBC properties, never in Spark's configuration. Any undeclared connection key, and any undeclared
   `database.*` operation argument, is a JDBC driver property forwarded verbatim (e.g. `fetchsize`, `connectTimeout`,

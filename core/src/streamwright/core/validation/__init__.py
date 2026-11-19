@@ -15,6 +15,6 @@
 # * limitations under the License.
 # **************************************************************************/
 
-from streamwright.core.validation.issues import Issue
+from streamwright.core.runtime.issues import Issue
 
 __all__ = ["Issue"]

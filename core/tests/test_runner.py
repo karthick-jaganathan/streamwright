@@ -46,7 +46,7 @@ from streamwright.core.engine.runner import CollectedStream, SourceError, Source
 from streamwright.core.net.http import RateLimiter, Redactor
 from streamwright.core.outputs.output import FileOutput, export_files
 from streamwright.core.runtime.templates import render
-from streamwright.core.runtime.testing import MemoryOutput, page_stream
+from streamwright.core.sdk.testing import MemoryOutput, page_stream
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TODAY = datetime.date(2026, 10, 3)
@@ -59,15 +59,15 @@ ID = "SELECT (record->>'id')::BIGINT AS id FROM records"
 
 def items_stream(name="items", request=None, select=ID, paginator=None, records=None, **stream):
     """A page-mode stream (testing.page_stream): its request (default GET /items, records at `data`) is `records`."""
-    request = dict(request or {"http": {"path": "/items"}})
+    request = copy.deepcopy(request or {"operation": {"path": "/items"}})
     if paginator is not None:
-        request["paginator"] = paginator
+        request["operation"]["paginator"] = paginator
     return page_stream(name, request, select, records={"path": "data"} if records is None else records, **stream)
 
 
 def make_source(api, **stream):
     return {"kind": "source", "name": "demo", "auth": {"type": "bearer", "token": "{{ secrets.token }}"},
-            "http": {"base_url": api.url, "retry": {"codes": [429, 500], "max_attempts": 3}},
+            "http": {"base_url": api.url}, "policy": {"retry": {"codes": [429, 500], "max_attempts": 3}},
             "streams": [items_stream(**stream)]}
 
 
@@ -133,6 +133,14 @@ def test_inputs_are_typed():
     assert "whole number" in str(error.value) and "unknown config: extra" in str(error.value)
     with pytest.raises(InputError, match="missing required config 'ids'"):
         resolve_inputs(definitions, {}, "config")
+
+
+def test_unusable_input_constraints_raise_input_error():
+    definitions = {"a": {"type": "string", "pattern": "[a-"}, "b": {"type": "integer", "minimum": "5"}}
+    with pytest.raises(InputError) as error:
+        resolve_inputs(definitions, {"a": "x", "b": 7}, "config")
+    assert "config 'a': `pattern` must be a regular expression" in str(error.value)
+    assert "config 'b': `minimum` must be a number" in str(error.value)
 
 
 def test_dates_durations_files_and_environment(tmp_path):
@@ -310,7 +318,7 @@ def test_the_source_rate_limit_is_shared_by_streams(api):
 def test_incremental_windows_and_state(api):
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": request["params"]["since"]}]})
     stream = {"incremental": {"cursor_field": "id", "start": "2026-09-25", "window": "4d", "lookback": "2d"},
-              "request": {"http": {"path": "/items", "params": {"since": "{{ window.start }}",
+              "request": {"operation": {"path": "/items", "params": {"since": "{{ window.start }}",
                                                                "until": "{{ window.end }}"}}},
               "select": "SELECT record->>'id' AS id FROM records",
               "partitions": [{"name": "account", "values": "{{ config.accounts }}"}]}
@@ -329,7 +337,7 @@ def test_incremental_windows_and_state(api):
 def test_old_bookmarks_win_over_start_and_bookmarks_never_move_back(api):
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": request["params"]["since"]}]})
     stream = {"incremental": {"cursor_field": "id", "start": "-3d", "window": "1d", "lookback": "3d"},
-              "request": {"http": {"path": "/items", "params": {"since": "{{ window.start }}"}}},
+              "request": {"operation": {"path": "/items", "params": {"since": "{{ window.start }}"}}},
               "select": "SELECT record->>'id' AS id FROM records"}
     # the bookmark is older than `start` (-3d = 2026-09-30): resume from it so no days are skipped
     output = run(make_source(api, **stream), state={"bookmarks": {"items": {"{}": "2026-09-20"}}})
@@ -355,12 +363,12 @@ def test_windows_must_be_whole_days(api, window):
 def test_a_from_stream_parent_runs_with_its_own_state_and_writes_its_export(api):
     api.routes[("GET", "/accounts")] = lambda request: (200, {"data": [{"id": 1}]})
     api.routes[("GET", "/campaigns")] = lambda request: (200, {"data": [{"id": 5}]})
-    source = make_source(api, request={"http": {"path": "/accounts", "params": {"since": "{{ window.start }}"}}},
+    source = make_source(api, request={"operation": {"path": "/accounts", "params": {"since": "{{ window.start }}"}}},
                          incremental={"cursor_field": "id", "start": "2026-10-01"})
     source["streams"].append(items_stream(
         "campaigns", partitions=[{"name": "account", "from_stream": "items", "field": "id"}],
         incremental={"cursor_field": "id", "start": "2026-10-03"},
-        request={"http": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"}}}))
+        request={"operation": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"}}}))
     output = run(source, state={"bookmarks": {"items": {"{}": "2026-10-02"}}}, streams=["campaigns"])
     # The selected child runs with its parent, which writes its export and keeps its own bookmark; both write their
     # state after each window.
@@ -375,10 +383,10 @@ def test_partitions_from_a_parent_stream_and_explode(api):
     api.routes[("GET", "/accounts")] = lambda request: (200, {"data": [{"id": 1}, {"id": 2}, {"id": 1}]})
     api.routes[("GET", "/campaigns")] = lambda request: (200, {"data": [
         {"account": request["params"]["account"], "ads": [{"ad": "x"}, {"ad": "y"}]}]})
-    source = make_source(api, request={"http": {"path": "/accounts"}})
+    source = make_source(api, request={"operation": {"path": "/accounts"}})
     source["streams"].append(items_stream(
         "ads", partitions=[{"name": "account", "from_stream": "items", "field": "id"}],
-        request={"http": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"}}},
+        request={"operation": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"}}},
         records={"path": "data", "explode": "ads"},
         select="SELECT (record->>'account')::BIGINT AS account, record->>'ad' AS ad FROM records"))
     output = run(source, streams=["ads"])
@@ -395,19 +403,19 @@ def test_partitions_from_several_fields_of_a_parent(api):
     campaigns = {"a1": [{"id": "c1"}, {"id": "c2"}, {"id": "c1"}], "a2": [{"id": "c3"}, {"id": None}]}
     api.routes[("GET", "/campaigns")] = lambda request: (200, {"data": campaigns[request["params"]["account"]]})
     api.routes[("GET", "/ad_groups")] = lambda request: (200, {"data": [{"id": request["params"]["campaign"] + "g"}]})
-    source = make_source(api, name="accounts", request={"http": {"path": "/accounts"}},
+    source = make_source(api, name="accounts", request={"operation": {"path": "/accounts"}},
                          select="SELECT record->>'id' AS account_id FROM records")
     source["streams"] += [items_stream(
         "campaigns",
         partitions=[{"name": "account_id", "from_stream": "accounts", "field": "account_id"}],
-        request={"http": {"path": "/campaigns", "params": {"account": "{{ partition.account_id }}"}}},
+        request={"operation": {"path": "/campaigns", "params": {"account": "{{ partition.account_id }}"}}},
         select="SELECT partition->>'account_id' AS account_id, record->>'id' AS campaign_id FROM records",
     ), items_stream(
         "ad_groups",
         partitions=[{"from_stream": "campaigns", "fields": ["account_id", "campaign_id"]},
                     {"name": "device", "values": ["mobile", "desktop"]}],
         incremental={"cursor_field": "ad_group_id", "start": "today"},
-        request={"http": {"path": "/ad_groups", "params": {
+        request={"operation": {"path": "/ad_groups", "params": {
             "account": "{{ partition.account_id }}", "campaign": "{{ partition.campaign_id }}",
             "device": "{{ partition.device }}"}}},
         select="""SELECT partition->>'account_id' AS account_id, partition->>'campaign_id' AS campaign_id,
@@ -429,7 +437,7 @@ def test_error_policies(api):
     api.routes[("GET", "/items")] = lambda request: (
         (500, {}) if request["params"].get("p") == "bad" else (200, {"data": [{"id": "1"}, {"id": "x"}]}))
     stream = {"partitions": [{"name": "p", "values": ["good", "bad"]}],
-              "request": {"http": {"path": "/items", "params": {"p": "{{ partition.p }}"}}}}
+              "request": {"operation": {"path": "/items", "params": {"p": "{{ partition.p }}"}}}}
     # a value the step cannot convert fails its page, like a failed request; the error names the step
     with pytest.raises(SourceError, match=r"""partition \{"p": "good"\}: step 'items': .*Could not convert """
                                           r"""string 'x'"""):
@@ -445,12 +453,12 @@ def test_records_as_returned_and_connector_requests(api):
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1, "x": {"y": 2}}]})
     source = make_source(api, select="SELECT record FROM records")  # records as the API returned them
     assert [r for _, r in run(source).records] == [{"record": {"id": 1, "x": {"y": 2}}}]
-    source["streams"][0]["requests"][0] = {"name": "records", "sdk": "google_ads", "method": "search"}
-    with pytest.raises(SourceError, match=r"stream 'items': requests\[0\]: sdk requests need a connector "
-                                          r"`auth.provider`"):
+    source["streams"][0]["requests"][0] = {"name": "records", "operation": {"method": "search"}}
+    with pytest.raises(SourceError, match=r"stream 'items': requests\[0\]: an operation that is a call needs a "
+                                          r"connector `auth.provider`"):
         run(source)
     # a request's failure names it
-    source = make_source(api, request={"http": {"path": "/missing"}})
+    source = make_source(api, request={"operation": {"path": "/missing"}})
     with pytest.raises(SourceError, match=r"stream 'items', partition \{\}: request 'records': GET \S+/missing "
                                           r"failed: HTTP 404"):
         run(source)
@@ -532,7 +540,7 @@ def test_file_output_and_state(api, tmp_path):
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}, {"id": 2}]})
     source_path = tmp_path / "source.yaml"
     source_path.write_text(json.dumps(dict(make_source(api, incremental={"cursor_field": "id", "start": "today"},
-                                                       request={"http": {"path": "/items", "params": {
+                                                       request={"operation": {"path": "/items", "params": {
                                                            "since": "{{ window.start }}"}}}),
                                            spec={"secrets": {"token": {"type": "string"}}})))
     secrets = tmp_path / "secrets.yaml"
@@ -553,7 +561,7 @@ def test_timezone_sets_the_run_date_and_windows(api, tmp_path):
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}]})
     source_path = tmp_path / "source.yaml"
     source_path.write_text(json.dumps(dict(make_source(api, incremental={"cursor_field": "id", "start": "today"},
-                                                       request={"http": {"path": "/items", "params": {
+                                                       request={"operation": {"path": "/items", "params": {
                                                            "since": "{{ window.start }}"}}}),
                                            spec={"secrets": {"token": {"type": "string"}}})))
     secrets = tmp_path / "secrets.yaml"
@@ -594,7 +602,8 @@ def folder_source(api, tmp_path, monkeypatch):
                       "secrets": {"token": {"type": "string"}}}
     (folder / "source.yaml").write_text(json.dumps(source))
     for name in ("items", "others"):
-        body = items_stream(name, request={"http": {"path": "/" + name, "params": {"limit": "{{ config.limit }}"}}})
+        body = items_stream(name, request={"operation": {"path": "/" + name,
+                                                         "params": {"limit": "{{ config.limit }}"}}})
         del body["name"]  # a stream file is named after the file
         (folder / "streams" / ("%s.yaml" % name)).write_text(json.dumps(body))
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}]})
@@ -920,7 +929,7 @@ def counted_copies(monkeypatch):
 
 def windowed_items(name, mode, accounts):
     """An incremental stream over `accounts` partitions, one window each (yesterday to today)."""
-    request = {"name": "raw_%s" % name, "http": {"path": "/items", "params": {"account": "{{ partition.account }}",
+    request = {"name": "raw_%s" % name, "operation": {"path": "/items", "params": {"account": "{{ partition.account }}",
                                                                                "day": "{{ window.start }}"}},
                "records": {"path": "data"}}
     return {"name": name, "requests": [request],

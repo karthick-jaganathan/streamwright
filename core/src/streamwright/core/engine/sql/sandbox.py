@@ -313,16 +313,24 @@ class Sandbox:
         self._timed(lambda: self.connection.execute("DELETE FROM %s WHERE %s" % (_quoted(name), condition), params),
                     TRANSFORM_TIMEOUT)
 
+    def null_key_problem(self, name, keys, timeout=TRANSFORM_TIMEOUT):
+        """Why rows of table `name` have no key: a `keys` column is null, or None."""
+        return self._timed(lambda: self._null_keys(name, keys), timeout)
+
+    def _null_keys(self, name, keys):
+        nulls = self.connection.execute("SELECT %s FROM %s" % (", ".join(
+            "count(*) FILTER (WHERE %s IS NULL)" % _quoted(key) for key in keys), _quoted(name))).fetchone()
+        empty = ["%r in %d row(s)" % (key, count) for key, count in zip(keys, nulls, strict=True) if count]
+        return "primary_key column(s) are null: %s" % ", ".join(empty) if empty else None
+
     def key_problem(self, name, keys, timeout=TRANSFORM_TIMEOUT):
-        """Why the rows of table `name` are not unique on `keys`, or None."""
+        """Why the rows of table `name` are not unique on `keys` (or have a null key), or None."""
         table, columns = _quoted(name), ", ".join(_quoted(key) for key in keys)
 
         def work():
-            nulls = self.connection.execute("SELECT %s FROM %s" % (", ".join(
-                "count(*) FILTER (WHERE %s IS NULL)" % _quoted(key) for key in keys), table)).fetchone()
-            empty = ["%r in %d row(s)" % (key, count) for key, count in zip(keys, nulls, strict=True) if count]
+            empty = self._null_keys(name, keys)
             if empty:
-                return "primary_key column(s) are null: %s" % ", ".join(empty)
+                return empty
             repeated = self.connection.execute(
                 "SELECT count(*) OVER () AS keys, %s, count(*) AS n FROM %s GROUP BY ALL HAVING count(*) > 1 "
                 "ORDER BY n DESC, %s LIMIT 1" % (columns, table, columns)).fetchone()

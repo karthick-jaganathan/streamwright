@@ -24,6 +24,7 @@ No engine library is imported here.
 """
 
 from collections.abc import Mapping, Sequence
+from types import MappingProxyType
 from typing import Any, Final
 from urllib.parse import quote
 
@@ -33,16 +34,20 @@ from streamwright.core.io.database_connections import (
     connection_parameters,
     connection_problems,
 )
+from streamwright.core.io.queries import timeout_ms
 
-__all__ = ["DIALECT", "JDBC_DRIVER", "JDBC_PACKAGE", "JDBC_URL", "SPARK_DRIVER_SSLMODE",
+__all__ = ["DIALECT", "JDBC_DRIVER", "JDBC_PACKAGE", "JDBC_PROPERTIES", "JDBC_URL", "SPARK_DRIVER_SSLMODE",
            "SSLMODES", "delete_statement", "driver_url", "jdbc_values", "merge_statement", "parameters", "postgres_url",
-           "staging_statement", "validate_connection"]
+           "server_parameters", "staging_statement", "validate_connection"]
 
 SSLMODES: Final = ("disable", "allow", "prefer", "require", "verify-ca", "verify-full")
 JDBC_URL: Final = "jdbc:postgresql://{host}:{port}/{database}"
 JDBC_DRIVER: Final = "org.postgresql.Driver"
 JDBC_PACKAGE: Final = ("org.postgresql:postgresql", "ship", "42.7.4")
 SPARK_DRIVER_SSLMODE: Final = "require"  # the Spark driver's own connection, when the connection names none
+# libpq parameter -> the pgjdbc property of another name (the others - sslmode, sslrootcert, options, ... - match)
+JDBC_PROPERTIES: Final = MappingProxyType({
+    "connect_timeout": "connectTimeout", "application_name": "ApplicationName", "gssencmode": "gssEncMode"})
 
 
 def postgres_url(parameters: Parameters) -> str:
@@ -90,19 +95,34 @@ def parameters(connection: Mapping[str, Any]) -> Parameters:
     return connection_parameters(DIALECT, connection)
 
 
+def server_parameters(connection: Mapping[str, Any]) -> Parameters:
+    """The connection parameters with the server's own `statement_timeout`, when the connection sets one."""
+    pairs = parameters(connection)
+    if connection.get("statement_timeout") is None:
+        return pairs
+    return _server_timeout(pairs, timeout_ms(connection["statement_timeout"]))
+
+
 def jdbc_values(connection: Mapping[str, Any]) -> dict[str, Any]:
-    """host, port, database, user, password and the JDBC properties (sslmode, then the connection's vendor keys)."""
-    values = dict(parameters(connection))
-    properties = {"sslmode": str(values["sslmode"])} if values.get("sslmode") else {}
+    """
+    host, port, database, user, password and the JDBC properties: the other libpq parameters (sslmode, `options` and
+    a DSN's, the statement_timeout) under their pgjdbc names, then the connection's vendor keys verbatim.
+    """
+    vendor = dict(getattr(connection, "vendor", {}) or {})
+    pairs = server_parameters(connection)
+    values = dict(pairs)
+    properties = {JDBC_PROPERTIES.get(key, key): str(value) for key, value in pairs
+                  if key not in ("host", "port", "database", "user", "password") and key not in vendor
+                  and value not in (None, "")}
     # undeclared connection keys are JDBC driver properties (vendor arguments), e.g. ApplicationName, loginTimeout
-    properties.update({str(key): str(value) for key, value in (getattr(connection, "vendor", {}) or {}).items()})
+    properties.update({str(key): str(value) for key, value in vendor.items()})
     return {"host": values.get("host"), "port": values.get("port"), "database": values.get("database"),
             "user": values.get("user"), "password": values.get("password"), "properties": properties}
 
 
 def driver_url(connection: Mapping[str, Any], *, default_sslmode: str | None = None) -> str:
-    """The postgresql:// URL a driver-side client (psycopg) connects with; credentials included."""
-    pairs = parameters(connection)
+    """The postgresql:// URL a driver-side client (psycopg) connects with (its statement_timeout too); credentials."""
+    pairs = server_parameters(connection)
     if default_sslmode and not any(key == "sslmode" for key, _ in pairs):
         pairs.append(("sslmode", default_sslmode))
     return postgres_url(pairs)

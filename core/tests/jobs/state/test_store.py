@@ -129,6 +129,55 @@ def test_batch_sequence_never_comes_back_after_a_purge(store):
     assert store.next_batch_sequence(lease) == sequence + 1
 
 
+def test_a_purge_deletes_batches_a_chunk_per_transaction(store):
+    lease = store.acquire_lease("job", "w", 300)
+    for batch_id in ("b1", "b2", "b3"):
+        _batch(store, lease, batch_id, status="processing")
+        store.commit_batch(lease, batch_id, {}, {"push": ("dest", [{"a": 1}])})
+        for status in ("acked", "completed"):
+            store.record_batch(lease, batch_id, status, {})
+    future = datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1)
+    assert store.purge_batches("job", future, chunk=2) == 3
+    assert [store.get_batch("job", batch_id) for batch_id in ("b1", "b2", "b3")] == [None, None, None]
+    assert store.list_events("job", "b3") == []
+
+
+def test_a_purge_deletes_every_outbox_row_of_its_batches(store):
+    lease = store.acquire_lease("job", "w", 300)
+    _batch(store, lease, "b1", status="processing")
+    store.commit_batch(lease, "b1", {}, {"push": ("dest", [{"a": 1}, {"a": 2}])})
+    store.record_event_outcomes(lease, "b1", "push", [(0, "applied", {"id": 1}, None, None),
+                                                      (1, "failed", None, "REJECTED", "no")])
+    for status in ("acked", "completed"):
+        store.record_batch(lease, "b1", status, {})
+    assert store.purge_batches("job", datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1)) == 1
+    assert store.list_events("job", "b1") == []
+
+
+def test_retry_puts_only_the_failed_apply_rows_of_the_resent_outputs_back_to_pending(store):
+    lease = store.acquire_lease("job", "w", 300)
+    _batch(store, lease, "b1", status="processing")
+    store.commit_batch(lease, "b1", {}, {"push": ("dest", [{"a": n} for n in range(4)]), "log": ("dest", [{"a": 9}])})
+    store.mark_events_in_flight(lease, "b1", "push", [0, 1, 2])
+    store.record_event_outcomes(lease, "b1", "push", [(0, "applied", {"id": 1}, None, None),
+                                                      (1, "failed", None, "REJECTED", "no")])
+    store.settle_in_flight_events(lease, "b1", "push", resend=False)     # row 2: skipped, UNKNOWN_OUTCOME
+    store.mark_events_in_flight(lease, "b1", "push", [3])
+    store.mark_events_in_flight(lease, "b1", "log", [0])
+    store.record_event_outcomes(lease, "b1", "log", [(0, "failed", None, "REJECTED", "no")])
+    for status in ("acked", "failed"):
+        store.record_batch(lease, "b1", status, {}, error="rejected")
+    assert store.retry_batch(lease, "b1", resend=["push"]) == "acked"
+    assert [(row["output_name"], row["event_sequence"], row["status"], row["attempts"], row["error_code"])
+            for row in store.list_events("job", "b1")] == [
+        ("log", 0, "failed", 1, "REJECTED"), ("push", 0, "applied", 1, None), ("push", 1, "pending", 1, "REJECTED"),
+        ("push", 2, "failed", 1, "UNKNOWN_OUTCOME"), ("push", 3, "in_flight", 1, None)]
+    store.record_batch(lease, "b1", "failed", {}, error="rejected")
+    store.retry_batch(lease, "b1")                                       # no outputs named: every output's
+    assert [(row["output_name"], row["event_sequence"]) for row in store.list_pending_events("job")] == [
+        ("log", 0), ("push", 1), ("push", 3)]
+
+
 def test_receipt_and_manifest_are_saved_together(store):
     lease = store.acquire_lease("job", "w", 300)
     _batch(store, lease, "b1", "processing")
@@ -264,7 +313,7 @@ def test_sqlite_tables_use_the_prefix_and_named_constraints(tmp_path):
     with sqlite3.connect(path) as conn:
         found = dict(conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'table'").fetchall())
     assert set(found) == {"sw_" + t for t in ("leases", "jobs", "sequences", "receipts", "events", "signatures",
-                                              "migrations")}
+                                              "requests", "migrations")}
     assert "CONSTRAINT uq_sw_jobs__name_scope_key UNIQUE (job_name, scope, job_key)" in found["sw_jobs"]
 
 
@@ -445,54 +494,3 @@ def test_mysql_migration_lock_needs_one():
 
 # --- the store before sw_* tables -----------------------------------------------------------------------------
 
-def _legacy_sqlite(path):
-    """The tables (and rows) the store of the previous release kept in a SQLite file."""
-    conn = sqlite3.connect(path)
-    conn.executescript("""
-        CREATE TABLE streamwright_job_leases (job_name TEXT, owner_id TEXT, lease_epoch BIGINT, acquired_at TEXT,
-            expires_at TEXT);
-        CREATE TABLE streamwright_job_sequences (job_name TEXT, batch_sequence BIGINT);
-        CREATE TABLE streamwright_batches (job_name TEXT, batch_id TEXT, batch_sequence BIGINT, run_key TEXT,
-            status TEXT, failed_from TEXT, manifest_json TEXT, error_message TEXT, engine_metadata TEXT,
-            created_at TEXT, updated_at TEXT);
-        CREATE TABLE streamwright_output_receipts (job_name TEXT, batch_id TEXT, output_name TEXT, receipt_json TEXT,
-            recorded_at TEXT);
-        CREATE TABLE streamwright_outbox_events (job_name TEXT, batch_id TEXT, output_name TEXT, event_sequence BIGINT,
-            destination TEXT, payload_json TEXT, status TEXT, created_at TEXT, sent_at TEXT);
-        CREATE TABLE streamwright_schema_signatures (job_name TEXT, path_prefix TEXT, header_hash TEXT,
-            signature TEXT, updated_at TEXT);
-        CREATE TABLE streamwright_store_metadata (store_key TEXT, store_identity TEXT, created_at TEXT);
-        INSERT INTO streamwright_job_leases VALUES ('job', 'old', 7, '2026-01-01T00:00:00.000Z', NULL);
-        INSERT INTO streamwright_job_sequences VALUES ('job', 2);
-        INSERT INTO streamwright_batches VALUES
-            ('job', 'job-00000001', 1, 'k1', 'completed', NULL, '{"carry": {"bookmark": 5}}', NULL, NULL,
-             '2026-01-01T00:00:00.000Z', '2026-01-01T00:01:00.000Z'),
-            ('job', 'job-00000002', 2, NULL, 'failed', 'processing', '{}', 'boom', '{"engine": "duckdb"}',
-             '2026-01-02T00:00:00.000Z', '2026-01-02T00:01:00.000Z');
-        INSERT INTO streamwright_output_receipts VALUES ('job', 'job-00000001', 'out',
-            '{"output_name": "out", "destination": "t", "rows": 9, "files": []}', '2026-01-01T00:00:30.000Z');
-        INSERT INTO streamwright_outbox_events VALUES ('job', 'job-00000001', 'out', 0, 'topic', '{"n": 1}', 'pending',
-            '2026-01-01T00:00:40.000Z', NULL);
-        INSERT INTO streamwright_schema_signatures VALUES ('job', 's3://a/', 'h', 'a,b', '2026-01-01T00:00:00.000Z');
-        INSERT INTO streamwright_store_metadata VALUES ('default', 'old-store-identity', '2026-01-01T00:00:00.000Z');
-    """)
-    conn.commit()
-    conn.close()
-
-
-def test_the_previous_store_is_imported_with_its_identity(tmp_path):
-    path = str(tmp_path / "legacy.db")
-    _legacy_sqlite(path)
-    store = open_sqlite(path)
-    store.initialize()
-    assert store.store_identity() == "old-store-identity"           # Delta idempotency keys stay the same
-    done = store.get_batch("job", "job-00000001")
-    assert (done["status"], done["batch_sequence"], done["job_key"], done["rows_written"]) == ("completed", 1, "k1", 9)
-    assert store.find_latest_completed_batch("job")["manifest"] == {"carry": {"bookmark": 5}}
-    failed = store.list_incomplete_batches("job")
-    assert [(b["batch_id"], b["failed_from"], b["error"]) for b in failed] == [("job-00000002", "processing", "boom")]
-    assert [e["payload"] for e in store.list_pending_events("job")] == [{"n": 1}]
-    assert store.get_schema_signatures("job") == {"s3://a/": "h"}
-    lease = store.acquire_lease("job", "new", 300)
-    assert lease.epoch == 8                                          # fencing continues past the old epochs
-    assert store.next_batch_sequence(lease) == 3                     # and sequences past the old ones

@@ -145,15 +145,20 @@ def _sheet(properties: Mapping[str, Any]) -> dict[str, Any]:
             "row_count": grid.get("rowCount"), "column_count": grid.get("columnCount")}
 
 
+def _quoted(title: str) -> str:
+    """A sheet title as an A1 range: single-quoted, a quote inside doubled ("Bob's" -> 'Bob''s')."""
+    return "'%s'" % str(title).replace("'", "''")
+
+
 def _range(sheets: SheetsClient, spreadsheet_id: Any, sheet_name: str | None, call: Call) -> str:
     """The sheet to read as an A1 range: the named one, else the first."""
     if sheet_name:
-        return "'%s'" % sheet_name
+        return _quoted(sheet_name)
     meta = call(sheets.get_spreadsheet, spreadsheet_id, "sheets.properties.title")
     listed = meta.get("sheets", [])
     if not listed:
         return "Sheet1"
-    return "'%s'" % listed[0].get("properties", {}).get("title", "Sheet1")
+    return _quoted(listed[0].get("properties", {}).get("title", "Sheet1"))
 
 
 def _columns(values: list[list[Any]], header_row: int) -> tuple[list[str], list[list[Any]]]:

@@ -21,19 +21,20 @@
 # Partition across account IDs
 partitions:
   - {name: account_id, values: "{{ config.account_ids }}"}
-retry: {max_attempts: 3, max_delay: 2m}
+policy:
+  retry: {max_attempts: 3, max_delay: 2m}
 
 # HTTP request: list ad groups for the account
 requests:
   - name: raw_ad_groups
-    records:
-      path: data
-    http:
+    operation:
       path: /v1/ad_groups
       method: GET
       params:
         ad_account_id: "{{ partition.account_id }}"
         limit: 500
+      records:
+        path: data
 
 # Transform step: extract bidding config and timestamp fields
 transform:

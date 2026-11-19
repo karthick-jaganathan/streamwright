@@ -32,7 +32,8 @@ takes an argument.
 - **`collection.find`** reads the documents a `filter` matches, with a `projection`, a `sort` (`[field, direction]`
   pairs) and a `limit`. The source engine pages them by `batch_size`; Spark runs the find as an aggregation pipeline
   and takes the connector's `options`.
-- **`collection.aggregate`** reads the documents an aggregation `pipeline` returns.
+- **`collection.aggregate`** reads the documents an aggregation `pipeline` returns. Reads are read-only: a pipeline
+  with a `$out` or `$merge` stage, at any depth (inside `$facet` or a `$lookup` pipeline too), is refused.
 - **`collection.write`** (SparkJob outputs): `append` inserts a document per row; `merge` updates the documents
   matching on `primary_key` (default `_id`) and inserts the rest, in place on the executors (no staging).
 

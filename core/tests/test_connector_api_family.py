@@ -20,20 +20,19 @@ the error translation the sessions of SDK connectors share."""
 
 import pytest
 
-from streamwright.core.engine.queries import BuiltQuery
-from streamwright.core.io.api_calls import make_caller, translate_errors, translate_pages
-from streamwright.core.io.http import HttpSourceAdapter
 from streamwright.core.jobs.policy import ExecutionPolicy, TransientError, classify_transient
 from streamwright.core.runtime.connector_types import ConnectorContext, ConnectorError
 from streamwright.core.runtime.redact import Redactor
 from streamwright.core.runtime.source_connectors import select_transport
+from streamwright.core.sdk import BuiltQuery
 from streamwright.core.sdk.contract import ConnectorDefinition, Field, Operation, check_arguments, resolve_values
+from streamwright.core.sdk.engines.source import HttpSourceAdapter, make_caller, translate_errors, translate_pages
 from streamwright.core.sdk.operations import http
 from streamwright.core.validation import vocabulary
 
 
 def definition(name, *operations):
-    adapters = {"source": "streamwright.core.io.http:HttpSourceAdapter"}
+    adapters = {"source": "streamwright.core.sdk.engines.source:HttpSourceAdapter"}
     return ConnectorDefinition(name, name.title(), "test", connection=http.auth_fields(("bearer",)),
                                operations=operations, adapters=adapters)
 
@@ -66,7 +65,7 @@ def test_a_definition_offering_the_http_request_runs_on_the_http_transport():
 
 def test_the_http_adapter_says_requests_are_http_requests():
     connection = resolve_values(definition("rest", http.REQUEST), {"type": "bearer", "token": "t"})
-    with pytest.raises(ConnectorError, match="rest is a REST API connector: use an http request"):
+    with pytest.raises(ConnectorError, match="rest is a REST API connector: its operation is an HTTP request"):
         HttpSourceAdapter().open(connection, None)
 
 

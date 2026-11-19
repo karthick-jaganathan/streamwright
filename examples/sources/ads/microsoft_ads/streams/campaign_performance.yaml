@@ -22,23 +22,24 @@ requests:
   - name: raw_campaign_performance
     async_job:
       submit:
-        sdk: microsoft_ads
-        service: ReportingService
-        method: SubmitGenerateReport
-        arguments:
-          request:
-            ReportRequest:
-              "@type": CampaignPerformanceReportRequest   # SOAP type, built by the connector
-              Aggregation: Daily
-              Format: Csv
-              ExcludeReportHeader: true
-              ExcludeReportFooter: true
-              Columns: [TimePeriod, AccountId, CampaignId, CampaignName, Impressions, Clicks, Spend]
-              Scope: {AccountIds: ["{{ partition.account_id }}"]}
-              Time: {CustomDateRangeStart: "{{ window.start }}", CustomDateRangeEnd: "{{ window.end }}"}
+        operation:
+          service: ReportingService
+          method: SubmitGenerateReport
+          arguments:
+            request:
+              ReportRequest:
+                "@type": CampaignPerformanceReportRequest   # SOAP type, built by the connector
+                Aggregation: Daily
+                Format: Csv
+                ExcludeReportHeader: true
+                ExcludeReportFooter: true
+                Columns: [TimePeriod, AccountId, CampaignId, CampaignName, Impressions, Clicks, Spend]
+                Scope: {AccountIds: ["{{ partition.account_id }}"]}
+                Time: {CustomDateRangeStart: "{{ window.start }}", CustomDateRangeEnd: "{{ window.end }}"}
       poll:
-        method: PollGenerateReport
-        arguments: {request: {ReportRequestId: "{{ submit.result }}"}}
+        operation:
+          method: PollGenerateReport
+          arguments: {request: {ReportRequestId: "{{ submit.result }}"}}
         every: 15s
         timeout: 30m
         done_when: {path: Status, equals: Success}

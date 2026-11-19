@@ -2,8 +2,10 @@
 
 The `microsoft_ads` connector for [streamwright](../../../core/README.md), on the
 [bingads](https://pypi.org/project/bingads/) SDK (API v13): the `microsoft_ads` auth provider signs in with OAuth,
-and `sdk: microsoft_ads` requests call SOAP operations, including reports as async jobs. Example:
-the source folder [examples/sources/ads/microsoft_ads/](../../../examples/sources/ads/microsoft_ads/).
+and a source's request operations call SOAP operations, including reports as async jobs; a job's apply outputs
+create, update and remove items and upload offline conversions. Examples: the source folder
+[examples/sources/ads/microsoft_ads/](../../../examples/sources/ads/microsoft_ads/) and the job
+[examples/microsoft_ads/jobs/conversions/upload.yaml](../../../examples/microsoft_ads/jobs/conversions/upload.yaml).
 
 ## Install
 
@@ -28,9 +30,9 @@ The SDK refreshes the access token during a run. Refresh tokens it receives are 
 ## Requests
 
 - Services: `CampaignManagementService`, `ReportingService`, `CustomerManagementService`, `AdInsightService`.
-  Methods: the read-only operations the spec declares (`CONNECTOR.operations`; see the guide): campaign management
+  Methods: the read operations the spec declares (`CONNECTOR.operations`; see the guide): campaign management
   reads, `SubmitGenerateReport` / `PollGenerateReport`, customer and account reads and keyword insights. Another
-  read-only call is one more `Operation` in `spec.py`.
+  read call is one more `Operation` in `spec.py`. A stream's request never writes: writes are apply outputs (below).
 - `arguments.request` holds the operation's fields, built into SOAP objects from the service's WSDL: nested objects are
   mappings, abstract types name their concrete type with `"@type"` (e.g. `CampaignPerformanceReportRequest`), lists
   fill `ArrayOf*` types (and are joined with spaces for list values such as `CampaignType: [Search, Shopping]`), and
@@ -50,13 +52,13 @@ partitions:
   - {from_stream: campaigns, fields: [account_id, campaign_id]}
 requests:
   - name: raw_ad_groups
-    sdk: microsoft_ads
-    service: CampaignManagementService
-    method: GetAdGroupsByCampaignId
-    arguments:
-      account_id: "{{ partition.account_id }}"
-      request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
-    records: {path: AdGroup}
+    operation:
+      service: CampaignManagementService
+      method: GetAdGroupsByCampaignId
+      arguments:
+        account_id: "{{ partition.account_id }}"
+        request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
+      records: {path: AdGroup}
 transform:
   mode: page
   steps:
@@ -77,6 +79,31 @@ The example folder reads campaigns, ad groups, keywords, location targets (campa
 per campaign or ad group, which the Bulk API would do in one file for large accounts. Its `ad_group_tree` stream
 reads each account's campaigns and then their ad groups in one stream (`transform.mode: run`, the second request
 partitioned `from:` a step), and joins them.
+
+## Writes (apply outputs)
+
+A DuckDB or Spark job's apply output writes rows through these operations (`writes.py`), one SOAP call per chunk:
+
+| Operation | `op` | Idempotent | Rows per call |
+|---|---|---|---|
+| `*Service.Add*` (e.g. `CampaignManagementService.AddCampaigns`) | `create` | no | 100 |
+| `*Service.Update*` | `update` | yes | 100 |
+| `*Service.Delete*` | `remove` (needs `allow_remove: true`) | yes | 100 |
+| `CampaignManagementService.ApplyOfflineConversions`, `ApplyOfflineConversionAdjustments`, `ApplyOnlineConversionAdjustments` | `upload` | yes (Microsoft rejects duplicates) | 1000 |
+
+- The request must have exactly one list (`ArrayOf<Item>`); the rows fill it, one item per row. `arguments.request`
+  holds the request's other fields (`AccountId` for `AddCampaigns`, `CampaignId` for `AddAdGroups`);
+  `arguments.account_id` and `customer_id` set the SOAP headers as for reads.
+- A row's columns are the item's fields as the WSDL names them (`Name`, `Status`, `DailyBudget`); dotted columns fill
+  nested objects (`BiddingScheme.Type`) and an `@type` column names a concrete type (`@type: ResponsiveSearchAd`,
+  `BiddingScheme.@type: ManualCpcBiddingScheme`). For a list of plain values (`DeleteCampaigns`' `CampaignIds`) a row
+  is one column, the value. A NULL field is left out, and Microsoft keeps its value. A row that does not fit the item
+  fails alone (`INVALID_ROW`) and is not sent.
+- Results: a row in `PartialErrors` (or `NestedPartialErrors`) fails with its `ErrorCode` and message (and field
+  path); the others are applied, with the id at their index of the response's ids (`CampaignIds` gives
+  `{"Id": 123}`) when it returns ids. A SOAP fault fails the whole call: its rows fail, or stay in flight when the
+  fault is retried (`0`, `117`, `207`).
+- Values go as text: write a date-time as `2026-01-31T14:07:00Z` (Microsoft wants UTC), e.g. with `strftime` in SQL.
 
 ## Reports
 

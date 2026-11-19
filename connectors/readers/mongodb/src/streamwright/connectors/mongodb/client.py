@@ -27,7 +27,12 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import quote_plus, unquote, urlsplit
 
-__all__ = ["database_name", "find_pipeline", "masked_values", "serialize", "uri", "validate_connection"]
+__all__ = [
+    "WRITE_STAGES", "database_name", "find_pipeline", "masked_values", "serialize", "uri", "validate_connection",
+    "write_stage",
+]
+
+WRITE_STAGES = frozenset({"$out", "$merge"})
 
 
 def uri(connection: Mapping[str, Any]) -> str:
@@ -90,6 +95,18 @@ def find_pipeline(arguments: Mapping[str, Any]) -> list[dict[str, Any]]:
     if arguments.get("limit"):
         pipeline.append({"$limit": int(arguments["limit"])})
     return pipeline
+
+
+def write_stage(value: Any) -> str | None:
+    """The first write stage ($out, $merge) anywhere in a pipeline, nested ones ($facet, $lookup, ...) too."""
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            found = key if key in WRITE_STAGES else write_stage(item)
+            if found:
+                return found
+    elif isinstance(value, (list, tuple)):
+        return next((found for found in map(write_stage, value) if found), None)
+    return None
 
 
 def serialize(value: Any) -> Any:

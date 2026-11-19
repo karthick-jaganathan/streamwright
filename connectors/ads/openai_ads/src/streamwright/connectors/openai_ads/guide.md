@@ -27,6 +27,7 @@ http:
   base_url: https://api.ads.openai.com
   paginator: {type: cursor, token_path: last_id, param: after, has_more_path: has_more}
   records: {path: data}
+policy:
   retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
 ```
 
@@ -39,8 +40,9 @@ http:
 
 ## Operations
 
-The connector offers one operation, `http.request`: each `requests:` item of a stream is an `http:` request, run by the
-engine's HTTP reader with the source's `http:` defaults (base URL, headers, paginator, records, retry, rate limit).
+The connector offers one operation, `http.request`: the `operation:` of each `requests:` item of a stream is an HTTP
+request, run by the engine's HTTP reader with the source's `http:` defaults (base URL, headers, paginator, records,
+retry, rate limit).
 
 ### `streams/<stream>.yaml` contract
 
@@ -50,11 +52,11 @@ partitions:
   - {name: account_id, values: "{{ config.account_ids }}"}
 requests:
   - name: raw_campaigns
-    http:
+    operation:
       path: /v1/campaigns
       method: GET
       params:
-        account_id: "{{ partition.account_id }}"
+        ad_account_id: "{{ partition.account_id }}"
         limit: 100
 
 transform:
@@ -83,7 +85,7 @@ export:
 
 ### Vendor arguments
 
-Any key in an `http` request's `params` block is a query parameter forwarded verbatim to the API; the paths and
+Any key in an HTTP `operation:`'s `params` block is a query parameter forwarded verbatim to the API; the paths and
 parameters you call are whatever the API exposes, never a closed list in the connector (contract v1.3 §6b). For
 example `params: {statusFilter: ENABLED}` reaches the request URL unchanged; pagination cursors the paginator
 injects take precedence.
@@ -107,7 +109,8 @@ connections:
     provider: openai_ads
     type: bearer
     token: "{{ secrets.openai_ads_key }}"
-    base_url: https://api.ads.openai.com
+    http:
+      base_url: https://api.ads.openai.com
   out:
     provider: files
     roots: [output]
@@ -115,13 +118,14 @@ connections:
 steps:
   - name: campaigns
     connection: openai_ads_api
-    request:
+    operation:
       path: /v1/campaigns
       method: GET
-      params: {account_id: "{{ config.account_id }}", limit: 100}
+      params: {ad_account_id: "{{ config.account_id }}", limit: 100}
       records: {path: data}
-    paginator: {type: cursor, token_path: last_id, param: after, has_more_path: has_more}
-    retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
+      paginator: {type: cursor, token_path: last_id, param: after, has_more_path: has_more}
+    policy:
+      retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
     sql: |
       SELECT record->>'id' AS campaign_id,
              record->>'name' AS campaign_name,
@@ -138,12 +142,13 @@ outputs:
     format: parquet
 ```
 
-- **Connection**: the authentication keys and the HTTP defaults (`base_url`, `headers`, `params_encoding`,
-  `paginator`, `records`, `retry`, `rate_limit`) written directly on it. There is no `http:` block (that is a
-  source manifest's): `validate` rejects keys the connector would ignore.
-- **Step**: `request: {path, method, params, headers, json, records}`, plus `paginator`, `retry`, `rate_limit`.
-  `path` is relative to the connection's `base_url`, or an absolute `https://` URL. This is a REST API connector:
-  a step takes `request`, never `service`/`method` (those are SDK connectors' calls).
+- **Connection**: the authentication keys, the HTTP defaults in `http: {base_url, headers, params_encoding,
+  paginator, records}` and the default `policy: {retry, rate_limit}`. `validate` rejects keys the connector would
+  ignore.
+- **Step**: `operation: {path, method, params, headers, json, records, paginator}`, plus `policy: {retry,
+  rate_limit, timeout, on_error}`. `path` is relative to the connection's `http.base_url`, or an absolute `https://`
+  URL. This is a REST API connector: a step's operation is an HTTP request, never a call (`service`, `arguments`:
+  an SDK connector's).
 - **SQL**: the step's `sql` reads the table `records`, one JSON column `record`; extract with `->>`.
 
 ```bash
@@ -160,4 +165,4 @@ STREAMWRIGHT_SECRET_OPENAI_ADS_KEY=... streamwright duckdb run campaigns.yaml --
 
 | Engine | Adapter | Notes |
 |---|---|---|
-| source (`streamwright run`, DuckDBJob call steps) | `streamwright.core.io.http` | the engine's HTTP reader runs the source's `http:` requests: the connector declares the authentication it takes, the source declares the API |
+| source (`streamwright run`, DuckDBJob call steps) | `streamwright.core.sdk.engines.source` (HttpSourceAdapter) | the engine's HTTP reader runs each request's `operation:` with the source's `http:` defaults: the connector declares the authentication it takes, the source declares the API |

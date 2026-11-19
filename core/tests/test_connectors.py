@@ -29,12 +29,12 @@ import yaml
 
 from streamwright.core import cli
 from streamwright.core.engine.runner import SourceError, SourceRunner
-from streamwright.core.io.api_calls import make_caller
-from streamwright.core.net import downloads
+from streamwright.core.io import downloads
 from streamwright.core.runtime import components, plugins
 from streamwright.core.runtime.components import ComponentLoadError, ConnectorError, QueryBuilder
-from streamwright.core.runtime.testing import FakeClock, MemoryOutput, page_stream
 from streamwright.core.sdk.contract import ConnectorDefinition, Field, Operation
+from streamwright.core.sdk.engines.source import make_caller
+from streamwright.core.sdk.testing import FakeClock, MemoryOutput, page_stream
 from streamwright.core.validation import engine
 
 TODAY = datetime.date(2026, 10, 3)
@@ -144,11 +144,18 @@ SUPPORTED = "Reports.list, Reports.submit, Reports.status, Reports.rows"
 ROWS = "SELECT (record->>'id')::BIGINT AS id, partition->>'account' AS account FROM records"
 
 
-def fake_stream(name="rows", request=None, select=ROWS, records=("rows",), **stream):
-    """A page-mode stream: one sdk request `records` per account (records at `records[0]`, None: the responses)."""
-    request = request or {"sdk": "fake", "service": "Reports", "method": "list", "arguments": {
+def list_call():
+    return {"service": "Reports", "method": "list", "arguments": {
         "account": "{{ partition.account }}",
         "query": {"fake_query": {"select": ["clicks"], "where": {"name": "{{ config.name }}"}}}}}
+
+
+def fake_stream(name="rows", request=None, select=ROWS, records=("rows",), **stream):
+    """
+    A page-mode stream: one sdk request `records` per account (records at `records[0]`, None: the responses), in the
+    engine's internal shape (SourceRunner and the component checks read it as is).
+    """
+    request = request or dict(list_call(), sdk="fake")
     stream.setdefault("partitions", [{"name": "account", "values": ["a1", "a2"]}])
     return page_stream(name, request, select, records={"path": records[0]} if records else None, **stream)
 
@@ -156,6 +163,11 @@ def fake_stream(name="rows", request=None, select=ROWS, records=("rows",), **str
 def fake_source(**stream):
     return {"kind": "source", "name": "demo", "auth": {"provider": "fake", "token": "{{ secrets.token }}"},
             "streams": [fake_stream(**stream)]}
+
+
+def public_source(**stream):
+    """fake_source() as a source file writes it: its request's `operation:` is a call (the CLI reads the grammar)."""
+    return fake_source(request={"operation": list_call()}, **stream)
 
 
 def request_of(source, stream=0, position=0):
@@ -263,8 +275,9 @@ def test_connect_failures_stop_the_run(fake):
 
 
 def test_requests_and_auth_must_match(fake):
-    with pytest.raises(SourceError, match=r"http requests need a built-in `auth.type`"):
-        run(fake_source(request={"http": {"path": "/rows"}}))
+    with pytest.raises(SourceError, match=r"an HTTP request needs a built-in `auth.type`; auth provider 'fake' only "
+                                          r"takes calls \(service, method, arguments\)"):
+        run(fake_source(request={"operation": {"path": "/rows"}}))
     with pytest.raises(SourceError, match=r"auth.token: is required"):
         SourceRunner(dict(fake_source(), auth={"provider": "fake"}), {"name": "x"}, {}, output=MemoryOutput()).run()
 
@@ -296,8 +309,8 @@ def test_connectors_are_found_through_entry_points(tmp_path, monkeypatch):
             components.load("broken")
         with pytest.raises(ComponentLoadError, match="'wrong' defines the connector 'entry_test'"):
             components.load("wrong")
-        with pytest.raises(ComponentLoadError, match=r"old \(streamwright-test-connector\) targets the pre-contract "
-                                                     r"connector API; it needs an update to connector contract v1"):
+        with pytest.raises(ComponentLoadError, match=r"old \(streamwright-test-connector\) is not a "
+                                                     r"ConnectorDefinition"):
             components.load("old")
         with pytest.raises(ComponentLoadError, match="install it with: pip install streamwright-not-there"):
             components.load("not_there")
@@ -378,10 +391,10 @@ def test_sdk_requests_take_no_headers(fake):
     """Per-request values are an operation's arguments: `headers` on an sdk request stop the run before any call."""
     source = fake_source()
     request_of(source)["headers"] = {"Account": "a1"}
-    problem = ("stream 'rows': requests[0]: fake: Reports.list: sdk requests take no `headers`; per-request values "
+    problem = ("stream 'rows': requests[0]: fake: Reports.list: a call takes no `headers`; per-request values "
                "are the operation's `arguments`")
     assert components.check_source(source) == [problem]
-    with pytest.raises(SourceError, match="sdk requests take no `headers`"):
+    with pytest.raises(SourceError, match="a call takes no `headers`"):
         run(source)
     assert fake.calls == []
 
@@ -475,7 +488,7 @@ def write_source(tmp_path, monkeypatch, source):
 
 def test_cli_runs_connectors_and_checks_them_first(fake, tmp_path, monkeypatch, capsys, caplog):
     fake.handlers["list"] = lambda arguments: [{"rows": [{"id": 1}]}]
-    path = write_source(tmp_path, monkeypatch, fake_source())
+    path = write_source(tmp_path, monkeypatch, public_source())
     assert cli.main(["run", str(path)]) == 0
     records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert [m["record"] for m in records if m["type"] == "RECORD"] == [{"id": 1, "account": "a1"},
@@ -484,15 +497,13 @@ def test_cli_runs_connectors_and_checks_them_first(fake, tmp_path, monkeypatch, 
     assert cli.main(["run", str(path), "--allow-connector", "google_ads"]) == 2
     assert "connector 'fake' is not in the allowed list (google_ads)" in caplog.text
 
-    source = fake_source()
-    request_of(source)["service"] = "Admin"
+    source = public_source()
+    request_of(source)["operation"]["service"] = "Admin"
     caplog.clear()
     assert cli.main(["run", str(write_source(tmp_path, monkeypatch, source))]) == 2
     assert "stream 'rows': requests[0]: fake: Admin.list is not supported" in caplog.text and len(fake.calls) == 2
 
-    source["auth"]["provider"] = "not_installed"
-    for item in source["streams"]:
-        item["requests"][0]["sdk"] = "not_installed"
+    source["auth"]["provider"] = "not_installed"  # a `call:` runs on the connector of auth.provider
     caplog.clear()
     assert cli.main(["run", str(write_source(tmp_path, monkeypatch, source))]) == 2
     assert "pip install streamwright-not-installed" in caplog.text
@@ -550,7 +561,7 @@ def test_query_builders_in_http_requests(api, fake):
     api.routes[("GET", "/search")] = lambda request: (200, {"data": [{"id": 1}]})
     source = {"kind": "source", "name": "demo", "auth": {"type": "bearer", "token": "{{ secrets.token }}"},
               "http": {"base_url": api.url}, "streams": [page_stream(
-                  "items", {"http": {"path": "/search", "params": {
+                  "items", {"operation": {"path": "/search", "params": {
                       "q": {"fake_query": {"select": ["id"], "where": {"name": "{{ config.name }}"}}}}}},
                   "SELECT (record->>'id')::BIGINT AS id FROM records", records={"path": "data"})]}
     assert [r for _, r in run(source).records] == [{"id": 1}]
@@ -583,9 +594,9 @@ def test_query_builder_failures_fail_the_partition(fake):
 
 def test_streamwright_validate_runs_the_component_checks(fake, tmp_path, capsys):
     path = tmp_path / "source.yaml"
-    source = fake_source()
+    source = public_source()
     source["spec"] = {"config": {"name": {"type": "string"}}, "secrets": {"token": {"type": "string"}}}
-    request_of(source)["arguments"]["query"] = {"fake_query": {"where": {}}}
+    request_of(source)["operation"]["arguments"]["query"] = {"fake_query": {"where": {}}}
     path.write_text(yaml.safe_dump(source, sort_keys=False))
     line, column = next((number, text.index("fake_query") + 1)
                         for number, text in enumerate(path.read_text().splitlines(), 1) if "fake_query:" in text)
@@ -593,15 +604,15 @@ def test_streamwright_validate_runs_the_component_checks(fake, tmp_path, capsys)
     capsys.readouterr()
     assert cli.main(["validate", str(path)]) == 1
     out = capsys.readouterr().out
-    assert "%s:%d:%d: error [connector-check] streams[0].requests[0].arguments.query.fake_query.select: fake_query: " \
-        "`select` must be a list of fields" % (path, line, column) in out
+    assert "%s:%d:%d: error [connector-check] streams[0].requests[0].operation.arguments.query.fake_query.select: " \
+        "fake_query: `select` must be a list of fields" % (path, line, column) in out
 
-    source["auth"]["provider"] = request_of(source)["sdk"] = "not_installed"
+    source["auth"]["provider"] = "not_installed"
     path.write_text(yaml.safe_dump(source, sort_keys=False))
     assert cli.main(["validate", str(path)]) == 1  # the builder's own check still runs
     out = capsys.readouterr().out
     assert "warning [connector-not-installed] auth.provider: connector 'not_installed' is not installed" in out
-    request_of(source)["arguments"]["query"]["fake_query"]["select"] = ["clicks"]
+    request_of(source)["operation"]["arguments"]["query"]["fake_query"]["select"] = ["clicks"]
     path.write_text(yaml.safe_dump(source, sort_keys=False))
     assert cli.main(["validate", str(path)]) == 0 and cli.main(["validate", "--strict", str(path)]) == 1
 

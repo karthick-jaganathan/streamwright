@@ -22,7 +22,7 @@ partitions:
 # HTTP POST query for keywords filtered by campaignId partition
 requests:
   - name: raw_keywords
-    http:
+    operation:
       path: /v1/keywords/query
       method: POST
       json:

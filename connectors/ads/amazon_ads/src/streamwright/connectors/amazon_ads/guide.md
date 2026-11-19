@@ -50,15 +50,16 @@ http:
 
 ## Operations
 
-The connector offers one operation, `http.request`: each `requests:` item of a stream is an `http:` request, run by the
-engine's HTTP reader with the source's `http:` defaults (base URL, headers, paginator, records, retry, rate limit).
+The connector offers one operation, `http.request`: the `operation:` of each `requests:` item of a stream is an HTTP
+request, run by the engine's HTTP reader with the source's `http:` defaults (base URL, headers, paginator, records,
+retry, rate limit).
 
 ### `streams/<stream>.yaml` contract
 
 ```yaml
 requests:
   - name: raw_sp_campaigns
-    http:
+    operation:
       path: /v2/sp/campaigns
       method: GET
 
@@ -88,7 +89,7 @@ export:
 
 ### Vendor arguments
 
-Any key in an `http` request's `params` block is a query parameter forwarded verbatim to the API; the paths and
+Any key in an HTTP `operation:`'s `params` block is a query parameter forwarded verbatim to the API; the paths and
 parameters you call are whatever the API exposes, never a closed list in the connector (contract v1.3 §6b). For
 example `params: {statusFilter: ENABLED}` reaches the request URL unchanged; pagination cursors the paginator
 injects take precedence.
@@ -118,10 +119,11 @@ connections:
     client_id: "{{ secrets.amazon_client_id }}"
     client_secret: "{{ secrets.amazon_client_secret }}"
     refresh_token: "{{ secrets.amazon_refresh_token }}"
-    base_url: https://advertising-api.amazon.com
-    headers:
-      Amazon-Advertising-API-ClientId: "{{ config.client_id }}"    # headers take no secrets: the public id
-      Amazon-Advertising-API-Scope: "{{ config.profile_id }}"
+    http:
+      base_url: https://advertising-api.amazon.com
+      headers:
+        Amazon-Advertising-API-ClientId: "{{ config.client_id }}"    # headers take no secrets: the public id
+        Amazon-Advertising-API-Scope: "{{ config.profile_id }}"
   out:
     provider: files
     roots: [output]
@@ -129,11 +131,12 @@ connections:
 steps:
   - name: sp_campaigns
     connection: amazon_ads_api
-    request:
+    operation:
       path: /v2/sp/campaigns
       method: GET
-    paginator: {type: offset, offset_param: startIndex, limit_param: count, page_size: 100}
-    retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
+      paginator: {type: offset, offset_param: startIndex, limit_param: count, page_size: 100}
+    policy:
+      retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
     sql: |
       SELECT record->>'campaignId' AS campaign_id,
              record->>'name' AS campaign_name,
@@ -150,12 +153,13 @@ outputs:
     format: parquet
 ```
 
-- **Connection**: the authentication keys and the HTTP defaults (`base_url`, `headers`, `params_encoding`,
-  `paginator`, `records`, `retry`, `rate_limit`) written directly on it. There is no `http:` block (that is a
-  source manifest's): `validate` rejects keys the connector would ignore.
-- **Step**: `request: {path, method, params, headers, json, records}`, plus `paginator`, `retry`, `rate_limit`.
-  `path` is relative to the connection's `base_url`, or an absolute `https://` URL. This is a REST API connector:
-  a step takes `request`, never `service`/`method` (those are SDK connectors' calls).
+- **Connection**: the authentication keys, the HTTP defaults in `http: {base_url, headers, params_encoding,
+  paginator, records}` and the default `policy: {retry, rate_limit}`. `validate` rejects keys the connector would
+  ignore.
+- **Step**: `operation: {path, method, params, headers, json, records, paginator}`, plus `policy: {retry,
+  rate_limit, timeout, on_error}`. `path` is relative to the connection's `http.base_url`, or an absolute `https://`
+  URL. This is a REST API connector: a step's operation is an HTTP request, never a call (`service`, `arguments`:
+  an SDK connector's).
 - **SQL**: the step's `sql` reads the table `records`, one JSON column `record`; extract with `->>`.
 
 ```bash
@@ -174,4 +178,4 @@ STREAMWRIGHT_SECRET_AMAZON_CLIENT_ID=... STREAMWRIGHT_SECRET_AMAZON_CLIENT_SECRE
 
 | Engine | Adapter | Notes |
 |---|---|---|
-| source (`streamwright run`, DuckDBJob call steps) | `streamwright.core.io.http` | the engine's HTTP reader runs the source's `http:` requests: the connector declares the authentication it takes, the source declares the API |
+| source (`streamwright run`, DuckDBJob call steps) | `streamwright.core.sdk.engines.source` (HttpSourceAdapter) | the engine's HTTP reader runs each request's `operation:` with the source's `http:` defaults: the connector declares the authentication it takes, the source declares the API |

@@ -18,6 +18,7 @@
 """The `spec` section: inputs, authentication, connector and HTTP defaults."""
 
 
+from streamwright.core.config.inputs import input_definition_problems
 from streamwright.core.outputs.file_names import config_references, reference_problems
 from streamwright.core.validation import vocabulary as spec
 from streamwright.core.validation.auth import AuthChecker
@@ -80,6 +81,8 @@ class SpecSection(ReferenceSection):
                 self.warn("secret-default", (*path, "default"), "secrets should not have defaults in config "
                           "files; pass them at run time", definition, "default")
             self.check_default(input_type, definition["default"], (*path, "default"), definition)
+        for key, why in input_definition_problems(definition):
+            self.error("bad-value", (*path, key), why, definition, key)
 
     def check_default(self, input_type, value, path, container):
         checks = {

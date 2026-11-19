@@ -1,0 +1,65 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# streamwright serve: the Google Ads example jobs (../google_ads/jobs) as a REST API, for local use.
+#
+#   export SW_KEY_OPS_SHA256=$(echo -n "$API_KEY" | shasum -a 256 | cut -d' ' -f1)   # the key itself stays out
+#   export STREAMWRIGHT_SECRET_DEVELOPER_TOKEN=... STREAMWRIGHT_SECRET_CLIENT_ID=...   # the jobs' secrets (worker)
+#   streamwright serve examples/serve/serve.yaml          # http://127.0.0.1:8080/docs: Swagger UI
+#   streamwright worker examples/serve/serve.yaml --processes 4
+#
+#   curl -H "Authorization: Bearer $API_KEY" -H "Content-Type: application/json" -H "Idempotency-Key: upload-0001" \
+#        -d '{"set": {"customer_id": "1234567890"}, "input": [...]}' \
+#        http://127.0.0.1:8080/v1/jobs/google_ads.conversions.upload/runs
+#
+# A job's name is its URL segment: <network>.<resource>.<action>. Callers set only a job's own inputs (customer_id,
+# validate_only): the manager account the service goes through comes from the caller's API key claims, so a request
+# cannot pick another. On a loopback bind the run queue is queue.db beside this file; another address needs
+# `state: {url: ...}` (a network database such as Postgres) and keeps `auth`.
+
+bind: 127.0.0.1:8080
+docs: {enabled: true}
+metrics: {enabled: true}                  # Prometheus text at /metrics, for an authenticated caller
+
+auth:
+  api_keys:
+    - id: ops
+      sha256_env: SW_KEY_OPS_SHA256       # SHA-256 (hex) of the key, from the environment
+      claims: {manager_id: "1234567890"}  # the manager account this key acts through
+
+jobs:
+  # reads and creates that may queue behind each other
+  google_ads.conversion_actions.create: &write
+    manifest: ../google_ads/jobs/conversion_actions/create.yaml
+    principals: [ops]
+    set:
+      login_customer_id: {from_claim: manager_id}     # never from the request body
+    server_options: {apply_state_migrations: true}
+    limits: {concurrency: 2, rate: {requests: 60, per: 1m}, timeout: 10m, wait_seconds: 60}
+    on_busy: reject                                   # one run per account at once: 409 for another
+
+  google_ads.campaigns.create:
+    <<: *write
+    manifest: ../google_ads/jobs/campaigns/create.yaml
+
+  google_ads.campaigns.update:
+    <<: *write
+    manifest: ../google_ads/jobs/campaigns/update.yaml
+
+  google_ads.conversions.upload:
+    <<: *write
+    manifest: ../google_ads/jobs/conversions/upload.yaml
+    payload: {max_bytes: 5MB}                         # up to the job's spec.input max_rows per request

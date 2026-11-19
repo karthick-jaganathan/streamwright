@@ -21,6 +21,7 @@ import gc
 import importlib
 import sqlite3
 import sys
+import threading
 import types
 import urllib.parse
 
@@ -40,22 +41,20 @@ def test_sqlite_migration_lifecycle(tmp_path):
     # 1. Before apply
     assert runner.check() is False
     show = runner.show()
-    assert len(show) == 1
-    assert show[0]["version"] == 1
+    assert [migration["version"] for migration in show] == [1]
     assert show[0]["applied"] is False
     assert show[0]["store_id"] is None
 
     # 2. Dry run
     plan = runner.apply(dry_run=True)
-    assert len(plan) == 1
-    assert plan[0]["version"] == 1
+    assert [migration["version"] for migration in plan] == [1]
     assert len(plan[0]["statements"]) >= 6
     assert any("attempts INTEGER DEFAULT '1' NOT NULL" in statement for statement in plan[0]["statements"])
+    assert any(statement.startswith("CREATE TABLE IF NOT EXISTS sw_requests") for statement in plan[0]["statements"])
 
     # 3. Apply
     applied = runner.apply()
-    assert len(applied) == 1
-    assert applied[0]["version"] == 1
+    assert [migration["version"] for migration in applied] == [1]
     store_id = applied[0]["store_id"]
     assert store_id is not None
     assert runner.store_id() == store_id
@@ -79,13 +78,13 @@ def test_duckdb_migration_lifecycle():
 
     assert runner.check() is False
     applied = runner.apply()
-    assert len(applied) == 1
+    assert [migration["version"] for migration in applied] == [1]
     assert runner.check() is True
 
     # Verify tables in schema
     tables = [r[0] for r in con.execute("SHOW TABLES FROM test_sw").fetchall()]
     assert set(tables) == {"sw_leases", "sw_jobs", "sw_sequences", "sw_receipts", "sw_events", "sw_signatures",
-                           "sw_migrations"}
+                           "sw_requests", "sw_migrations"}
 
 
 def test_url_resolver_sqlite(tmp_path):
@@ -135,7 +134,7 @@ def test_table_and_column_comments():
     initial_schema = importlib.import_module("streamwright.core.jobs.state.migrations.0001_initial_schema")
 
     tables = get_tables()
-    assert len(tables) == 7
+    assert len(tables) == 8
 
     for name, table in tables.items():
         assert table.comment, f"Table {name} must have a comment"
@@ -148,7 +147,7 @@ def test_table_and_column_comments():
     statements = initial_schema.get_statements("postgres")
     table_comment_stmts = [s for s in statements if s.startswith("COMMENT ON TABLE")]
     column_comment_stmts = [s for s in statements if s.startswith("COMMENT ON COLUMN")]
-    assert len(table_comment_stmts) == 7
+    assert len(table_comment_stmts) == 8
     assert len(column_comment_stmts) > 30
 
 
@@ -176,14 +175,37 @@ def test_an_in_memory_url_keeps_its_database():
     assert other.check_schema() is False                              # every resolved URL is its own database
 
 
+def test_an_in_memory_url_store_serves_concurrent_threads():
+    store = open_url("sqlite:///:memory:")
+    store.initialize()
+    lease = store.acquire_lease("job", "owner", 60)
+    errors = []
+
+    def renew():                                                       # the lease heartbeat's thread
+        try:
+            for _ in range(200):
+                store.renew_lease(lease, 60)
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=renew)
+    thread.start()
+    for _ in range(200):
+        store.list_incomplete_batches("job")
+        store.check_lease(lease)
+    thread.join()
+    assert errors == []
+
+
 def test_postgres_urls_hand_the_driver_its_own_parameters(monkeypatch):
 
     seen = []
-    monkeypatch.setitem(sys.modules, "psycopg", types.SimpleNamespace(connect=seen.append))
+    monkeypatch.setitem(sys.modules, "psycopg", types.SimpleNamespace(connect=lambda url, **kw: seen.append((url, kw))))
     resolved = resolve_state_url("postgres://u:p@h:5432/db?schema=sw&sslmode=require&catalog=x")
     resolved.connect()
     assert resolved.schema == "sw"
-    assert seen == ["postgresql://u:p@h:5432/db?sslmode=require"]
+    # no server-side prepared statements: PgBouncer's transaction pooling breaks them
+    assert seen == [("postgresql://u:p@h:5432/db?sslmode=require", {"prepare_threshold": None})]
 
 
 def test_mysql_urls_decode_credentials_and_use_their_database(monkeypatch):

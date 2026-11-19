@@ -1,0 +1,105 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# Creates custom conversions (a pixel's events narrowed by a URL rule, counted as a conversion) in a Meta ad account
+# from --input rows; a custom conversion whose name the account already has is skipped (a warning each).
+#
+#   streamwright duckdb run examples/meta_ads/jobs/custom_conversions/create.yaml \
+#     --input examples/meta_ads/payloads/custom_conversions/create.json \
+#     --set account_id=ACCOUNT_ID --set pixel_id=PIXEL_ID \
+#     --secrets ~/.streamwright/meta-ads-secrets.yaml --apply-state-migrations
+kind: DuckDBJob
+version: 1
+name: meta_ads_custom_conversions_create
+description: Custom conversions created on a pixel of a Meta ad account; existing names skipped
+
+spec:
+  config:
+    account_id: {type: string, required: true, pattern: "^[0-9]+$", description: "the ad account id (no act_)"}
+    pixel_id: {type: string, required: true, pattern: "^[0-9]+$", description: "the pixel (dataset) the events come from"}
+  secrets:
+    access_token: {type: string, required: true}
+    app_secret: {type: string, description: "enables appsecret_proof"}
+  input:
+    columns:
+      name: {type: string, required: true, max_length: 100}
+      event_type:
+        type: string
+        required: true
+        enum: [PURCHASE, LEAD, COMPLETE_REGISTRATION, ADD_TO_CART, INITIATED_CHECKOUT, ADD_PAYMENT_INFO, CONTACT,
+               SUBSCRIBE, SUBMIT_APPLICATION, OTHER]
+      url_contains: {type: string, required: true, max_length: 200, description: "the page URL the event fires on"}
+      default_value: {type: number, minimum: 0}
+    max_rows: 100
+
+connections:
+  meta:
+    provider: meta_ads
+    access_token: "{{ secrets.access_token }}"
+    app_secret: "{{ secrets.app_secret }}"
+
+steps:
+  - name: existing
+    connection: meta
+    operation:
+      service: AdAccount
+      method: get_custom_conversions
+      arguments: {id: "act_{{ config.account_id }}", fields: [id, name]}
+    sql: SELECT record->>'$.name' AS name, record->>'$.id' AS id FROM records
+
+  - name: skipped
+    sql: SELECT i.name, e.id FROM input AS i JOIN existing AS e USING (name)
+    log:
+      message: "skipped custom conversion {name}: the account already has it (id {id})"
+      level: warning
+
+  # the new custom conversions; columns are the Graph API's parameters (`rule`: JSON text, sent as the object)
+  - name: conversions
+    sql: |
+      SELECT i.name,
+             '{{ config.pixel_id }}' AS event_source_id,
+             i.event_type AS custom_event_type,
+             json_object('url', json_object('i_contains', i.url_contains))::VARCHAR AS rule,
+             CAST(i.default_value AS DOUBLE) AS default_conversion_value
+      FROM input AS i
+      ANTI JOIN existing AS e USING (name)
+      ORDER BY i.name
+
+outputs:
+  - name: create
+    connection: meta
+    step: conversions
+    operation:
+      service: AdAccount
+      method: create_custom_conversion
+      arguments:
+        id: "act_{{ config.account_id }}"
+    apply:
+      nulls: skip_field           # no default value: the parameter is left out
+      on_row_error: continue
+    log:
+      sql: |
+        SELECT name,
+               CASE WHEN outcome.status = 'applied' THEN 'created, id ' || (outcome.result->>'id')
+                    ELSE 'rejected: ' || outcome.error_code || ': ' || outcome.error_message END AS what
+        FROM "create"
+        ORDER BY outcome.row
+      message: "custom conversion {name}: {what}"
+
+runtime:
+  state:
+    sqlite: ../../.streamwright/meta_ads_custom_conversions_create.state.db
+    scope: "account:{{ config.account_id }}"

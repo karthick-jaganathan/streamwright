@@ -22,29 +22,29 @@ incremental:
   window: 1d
 requests:
   - name: raw_orders
-    sdk: postgres
-    service: database
-    method: query
-    arguments:
-      query: |
-        SELECT id, updated_at FROM public.orders
-        WHERE updated_at >= $since AND updated_at < $until + INTERVAL 1 DAY
-      params:
-        since: "{{ window.start }}"
-        until: "{{ window.end }}"
+    operation:
+      service: database
+      method: query
+      arguments:
+        query: |
+          SELECT id, updated_at FROM public.orders
+          WHERE updated_at >= $since AND updated_at < $until + INTERVAL 1 DAY
+        params:
+          since: "{{ window.start }}"
+          until: "{{ window.end }}"
   - name: raw_lines
     partitions:
       - {name: ids, from: raw_orders, field: id, batch_size: 500}
-    sdk: postgres
-    service: database
-    method: query
-    arguments:
-      query: |
-        SELECT order_id, line_number, product_id, quantity, unit_price
-        FROM public.order_lines
-        WHERE order_id = ANY($ids::BIGINT[])
-      params:
-        ids: "{{ partition.ids }}"
+    operation:
+      service: database
+      method: query
+      arguments:
+        query: |
+          SELECT order_id, line_number, product_id, quantity, unit_price
+          FROM public.order_lines
+          WHERE order_id = ANY($ids::BIGINT[])
+        params:
+          ids: "{{ partition.ids }}"
 transform:
   mode: run                        # the line queries take their order ids from the order query
   steps:

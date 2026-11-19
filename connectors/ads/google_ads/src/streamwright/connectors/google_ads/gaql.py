@@ -35,11 +35,10 @@ BETWEEN bound) is missing. Grammar: https://developers.google.com/google-ads/api
 """
 
 import datetime
-import difflib
 import re
 from types import MappingProxyType
 
-from streamwright.core.sdk import InputError, QueryBuilder, QueryError, as_date
+from streamwright.core.sdk import InputError, QueryBuilder, QueryError, as_date, suggest
 
 __all__ = ["OPERATORS", "VALUE_TYPES", "GaqlBuilder", "gaql"]
 
@@ -80,17 +79,12 @@ def _reference(value):
     return isinstance(value, str) and "{{" in value
 
 
-def _suggest(word, choices):
-    match = difflib.get_close_matches(str(word), choices, n=1, cutoff=0.6)
-    return " (did you mean %r?)" % match[0] if match else ""
-
-
 # * --------------------------
 # * checks: before a run starts
 # * --------------------------
 
 def _check_keys(mapping, allowed, required, path, what):
-    problems = [((*path, key), "unknown key %r%s; %s does not support it" % (key, _suggest(key, allowed), what))
+    problems = [((*path, key), "unknown key %r%s; %s does not support it" % (key, suggest(str(key), allowed), what))
                 for key in mapping if key not in allowed]
     problems += [(path, "%s needs `%s`" % (what, key)) for key in required if key not in mapping]
     return problems
@@ -138,10 +132,10 @@ def _check_where(items):
         op = _operator(item)
         if "op" in item and op not in OPERATORS:
             problems.append(((*path, "op"), "unknown operator %r%s; one of: %s" % (
-                item["op"], _suggest(op, OPERATORS), ", ".join(OPERATORS))))
+                item["op"], suggest(str(op), OPERATORS), ", ".join(OPERATORS))))
         if "type" in item and item["type"] not in VALUE_TYPES:
             problems.append(((*path, "type"), "unknown value type %r%s; one of: %s" % (
-                item["type"], _suggest(item["type"], VALUE_TYPES), ", ".join(VALUE_TYPES))))
+                item["type"], suggest(str(item["type"]), VALUE_TYPES), ", ".join(VALUE_TYPES))))
         if "skip_if_empty" in item and not isinstance(item["skip_if_empty"], bool):
             problems.append(((*path, "skip_if_empty"), "`skip_if_empty` must be true or false"))
         value = item.get("value")

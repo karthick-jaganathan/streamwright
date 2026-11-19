@@ -20,11 +20,16 @@ Quoting for values assembled into SQL text (ANSI / DuckDB): identifiers in doubl
 the quote character doubled. NUL can't be represented in either, so it is rejected.
 """
 
-__all__ = ["quote_ident", "quote_literal", "quote_qualified", "sql_string"]
+import re
+
+__all__ = ["IDENTIFIER", "IDENTIFIER_PATTERN", "quote_ident", "quote_literal", "quote_qualified", "sql_string"]
+
+IDENTIFIER_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"     # a name that is an SQL identifier without quotes
+IDENTIFIER = re.compile(IDENTIFIER_PATTERN)
 
 
 def sql_string(value):
-    """Legacy SQL literal quoting; unlike quote_literal, accepts any str-convertible value."""
+    """str(value) as an SQL string literal; unlike quote_literal, it accepts any value (None and booleans too)."""
     return "'" + str(value).replace("'", "''") + "'"
 
 

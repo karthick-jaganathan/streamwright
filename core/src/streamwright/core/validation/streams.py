@@ -18,6 +18,7 @@
 """Stream-wide consistency checks using the shared issue sink."""
 
 from streamwright.core.engine import rules
+from streamwright.core.runtime.text import split_outside_quotes
 from streamwright.core.validation import vocabulary as spec
 from streamwright.core.validation.checker import DURATION, describe, is_date
 from streamwright.core.validation.sections import SectionChecker
@@ -62,7 +63,7 @@ class StreamChecker(SectionChecker):
         X is optional and has no default. A `default` filter supplies a value, so it is allowed.
         """
         for inner in TEMPLATE.findall(value):
-            parts = spec.split_outside_quotes(inner, "|")
+            parts = split_outside_quotes(inner, "|")
             if any(text.strip().split("(")[0].strip() == "default" for text in parts[1:]):
                 continue
             match = REFERENCE_HEAD.match(parts[0].strip())

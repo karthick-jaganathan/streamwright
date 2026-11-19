@@ -66,7 +66,7 @@ class QueryBuilder:
         return []
 
     def build(self, spec):
-        """The query text for a rendered spec; raises streamwright.core.engine.queries.QueryError for values it cannot
+        """The query text for a rendered spec; raises streamwright.core.runtime.queries.QueryError for values it cannot
         write."""
         raise NotImplementedError
 
@@ -77,7 +77,7 @@ class ConnectorContext:
     goes (access tokens, refreshed tokens, signatures) in every log line and error - and calls with the stream's rate
     limit and retry policy, counted in the run's metrics (`metrics`, logs.RunMetrics) for the stream and request in
     `where`, which the runner sets. `connector` is the connector's name; `attempt` is the attempts the last call took.
-    Sessions raise ConnectorError for the errors of their vendor (see streamwright.core.io.api_calls); call() retries
+    Sessions raise ConnectorError for the errors of their vendor (see runtime.api_calls); call() retries
     those its policy names and lets every other exception through.
     """
 

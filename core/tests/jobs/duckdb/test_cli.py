@@ -24,7 +24,8 @@ import yaml
 from streamwright.core.jobs.duckdb.cli import main
 from streamwright.core.jobs.state import open_sqlite
 
-EXAMPLE = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "examples", "jobs", "files", "orders.yaml")
+EXAMPLE = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "examples", "files", "jobs", "orders",
+                       "sync.yaml")
 
 
 def _job(tmp_path, **extra):
@@ -92,9 +93,6 @@ def test_run_then_list_state(tmp_path, capsys, monkeypatch):
     assert "cli_job-00000001" in out and "completed" in out
     assert main(["state", "retry", _job(tmp_path), "cli_job-00000001", "--log-level", "DEBUG"]) == 1
     assert "is not failed" in capsys.readouterr().err
-    with pytest.raises(SystemExit) as usage:
-        main(["state", "retry", _job(tmp_path), "--batch", "cli_job-00000001"])
-    assert usage.value.code == 2 and "--batch was renamed JOB_ID" in capsys.readouterr().err
     with pytest.raises(SystemExit) as usage:                       # only retry, which runs the job, takes logging
         main(["state", "list", _job(tmp_path), "--log-level", "DEBUG"])
     assert usage.value.code == 2
@@ -305,9 +303,6 @@ def test_a_job_key_from_the_command_line_runs_once_per_scope(tmp_path, capsys):
     no_state = _job(tmp_path, spec={"config": {"limit": {"type": "integer", "default": 1}}}, runtime={})
     assert main(["run", no_state, "--job-key", "k"]) == 2
     assert "--job-key needs a persistent runtime.state" in capsys.readouterr().err
-    with pytest.raises(SystemExit) as usage:
-        main(["run", job, "--run-key", "k"])
-    assert usage.value.code == 2 and "--run-key was renamed --job-key" in capsys.readouterr().err
 
 
 def test_a_connector_that_is_not_installed_is_named_once_with_how_to_install_it(tmp_path, capsys):

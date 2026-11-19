@@ -19,7 +19,7 @@
 
 from dataclasses import dataclass, field
 
-__all__ = ["RunResult", "combine_passes"]
+__all__ = ["RunResult", "apply_counts", "combine_passes"]
 
 
 @dataclass
@@ -34,8 +34,16 @@ class RunResult:
     # output -> where it wrote: its files (a file_name template's, split_by's), else its destination
     locations: dict[str, list[str]] = field(default_factory=dict)
     lock_skipped: bool = False                                        # the lock policy pruned all the run's work
+    lease_held: bool = False                                          # stopped: another run holds the job's lease
     passes: list[dict] = field(default_factory=list)                  # runtime.fan_out: one entry per item
     fan_out: dict | None = None                                       # runtime.fan_out's over and as
+    rejected: dict[str, int] = field(default_factory=dict)            # apply output -> rows the vendor rejected
+
+
+def apply_counts(counts):
+    """An applier's counts as (rows applied per apply output, rows rejected per apply output that had any)."""
+    return ({name: count["applied"] for name, count in counts.items()},
+            {name: count["failed"] for name, count in counts.items() if count["failed"]})
 
 
 def combine_passes(job_name, outcomes, fan_out, redact):
@@ -48,6 +56,8 @@ def combine_passes(job_name, outcomes, fan_out, redact):
             total.plan = total.plan or result.plan
             total.batches.extend(result.batches)
             total.skipped.update(result.skipped)
+            for name, rows in result.rejected.items():
+                total.rejected[name] = total.rejected.get(name, 0) + rows
             for name, rows in result.outputs.items():
                 total.outputs[name] = None if rows is None or total.outputs.get(name, 0) is None else \
                     total.outputs.get(name, 0) + rows
@@ -65,4 +75,8 @@ def combine_passes(job_name, outcomes, fan_out, redact):
         total.error = "%d of %d %s(s) failed or did not run: %s" % (len(failed), len(total.passes), fan_out["as"],
                                                                      ", ".join(failed))
     total.lock_skipped = bool(total.passes) and all(entry["status"] == "skipped" for entry in total.passes)
+    stopped = [outcome for outcome in outcomes if outcome.error is not None
+               or (outcome.result is not None and outcome.result.exit_code)]
+    total.lease_held = bool(stopped) and all(outcome.result is not None and outcome.result.lease_held
+                                             for outcome in stopped)
     return total

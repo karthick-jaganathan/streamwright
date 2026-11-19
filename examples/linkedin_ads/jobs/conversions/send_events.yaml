@@ -1,0 +1,100 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+
+# Sends offline conversions (a row per conversion, given with --input) to the LinkedIn Conversions API, a chunk of
+# rows per request (BATCH_CREATE).
+#
+#   mkdir -p examples/linkedin_ads/.streamwright                # once: the state folder (git-ignored)
+#   streamwright duckdb run examples/linkedin_ads/jobs/conversions/send_events.yaml \
+#     --input examples/linkedin_ads/payloads/conversions/events.json \
+#     --set conversion_rule_id=RULE_ID --secrets ~/.streamwright/linkedin-secrets.yaml --apply-state-migrations
+#
+# Shown here:
+#   - an apply output of a REST API connector: its operation is a request (path, method, headers, json);
+#   - `{{ rows }}` in the body sends a chunk of rows as one request; every row gets the call's outcome;
+#   - emails are normalized and hashed (SHA-256) in SQL, so plain emails never leave the job;
+#   - --job-key events-2026-01-16 makes one payload send once (a second run with that key sends nothing).
+# The conversion rule must exist in the ad account (Campaign Manager: Conversions) with the CAPI source; LinkedIn
+# deduplicates on eventId.
+kind: DuckDBJob
+version: 1
+name: linkedin_ads_conversions_send_events
+description: Offline conversions sent to the LinkedIn Conversions API, a batch of events per request
+
+spec:
+  config:
+    conversion_rule_id: {type: string, required: true, pattern: "^[0-9]+$", description: "the conversion rule"}
+    api_version: {type: string, default: "202401", pattern: "^[0-9]{6}$", description: "LinkedIn-Version (YYYYMM)"}
+  secrets:
+    linkedin_access_token: {type: string, required: true}
+  input:
+    columns:
+      event_id: {type: string, required: true, max_length: 100}               # LinkedIn deduplicates on it
+      email: {type: string, required: true, max_length: 320}
+      converted_at: {type: string, required: true, description: "ISO 8601 time with an offset"}
+      value: {type: number, minimum: 0}
+      currency: {type: string, pattern: "^[A-Z]{3}$"}
+    max_rows: 5000
+
+connections:
+  linkedin:
+    provider: linkedin_ads
+    type: bearer
+    token: "{{ secrets.linkedin_access_token }}"
+    http:
+      base_url: https://api.linkedin.com
+      headers:
+        LinkedIn-Version: "{{ config.api_version }}"
+        X-Restli-Protocol-Version: "2.0.0"
+    policy:
+      rate_limit: {requests: 5, per: 1s}
+
+steps:
+  # the Conversions API's event shape: a row per event, nested values as structs
+  - name: events
+    sql: |
+      SELECT 'urn:lla:llaPartnerConversion:{{ config.conversion_rule_id }}' AS conversion,
+             epoch_ms(CAST(converted_at AS TIMESTAMPTZ)) AS conversionHappenedAt,
+             {'currencyCode': coalesce(currency, 'USD'), 'amount': CAST(coalesce(value, 0) AS VARCHAR)}
+               AS conversionValue,
+             {'userIds': [{'idType': 'SHA256_EMAIL', 'idValue': sha256(lower(trim(email)))}]} AS "user",
+             event_id AS eventId
+      FROM input
+
+outputs:
+  - name: send
+    connection: linkedin
+    step: events
+    operation:
+      path: /rest/conversionEvents
+      method: POST
+      headers: {X-RestLi-Method: BATCH_CREATE}
+      json: {elements: "{{ rows }}"}                # the chunk's rows, one request
+    apply:
+      chunk_size: 500
+    log:
+      sql: |
+        SELECT eventId AS event_id, outcome.error_code AS code, outcome.error_message AS error
+        FROM send
+        WHERE outcome.status = 'failed'
+      message: "event {event_id} not sent: {code}: {error}"
+      level: warning
+      max_rows: 20
+
+runtime:
+  state:
+    sqlite: ../../.streamwright/linkedin_ads_conversions_send_events.state.db

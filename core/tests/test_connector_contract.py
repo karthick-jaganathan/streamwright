@@ -26,7 +26,7 @@ import pytest
 
 from streamwright.core.io.capabilities import DUCKDB_CAPABILITIES as DUCKDB_ENGINE
 from streamwright.core.io.capabilities import SOURCE_CAPABILITIES
-from streamwright.core.io.file_rules import DUCKDB_CAPABILITIES
+from streamwright.core.io.file_rules import FILE_DUCKDB_CAPABILITIES
 from streamwright.core.jobs.duckdb.definition_adapter import DefinitionDuckDBAdapter
 from streamwright.core.jobs.duckdb.loading import load_adapters
 from streamwright.core.runtime import components, plugins, source_connectors
@@ -113,11 +113,11 @@ def test_derived_views_come_from_the_declarations():
     assert set(SAMPLE.json_schema()["properties"]) == {"provider", "host", "token", "port", "tls"}
     operation = SAMPLE.operation("item", "read")
     assert operation.name == "item.read" and operation.kind == OperationKind.READ == "read"
-    assert SAMPLE.operations_for(SOURCE) == (operation,) and SAMPLE.operations_for(DUCKDB_CAPABILITIES) == ()
+    assert SAMPLE.operations_for(SOURCE) == (operation,) and SAMPLE.operations_for(FILE_DUCKDB_CAPABILITIES) == ()
     assert [argument.choices for argument in operation.arguments_for(SOURCE)] == [(), ("a",)]
     assert operation.json_schema(SOURCE)["properties"]["mode"]["anyOf"][0]["enum"] == ["a"]
     assert operation.json_schema()["properties"]["mode"]["anyOf"][0]["enum"] == ["a", "b"]
-    description = SAMPLE.describe(SOURCE, DUCKDB_CAPABILITIES)
+    description = SAMPLE.describe(SOURCE, FILE_DUCKDB_CAPABILITIES)
     assert description["secret_keys"] == ["token"] and description["operations"][0]["kind"] == "read"
     assert description["capabilities"] == {"source": {"item.read": {"limit": None, "mode": ["a"]}}}
 
@@ -128,9 +128,9 @@ def test_a_connector_extends_a_catalog_operation_with_arguments_of_its_own():
     assert read.argument("format").choices == ("csv",) and read.arguments[-1].name == "version_id"
     lake = ConnectorDefinition("lake", "Lake", "test", connection=(), operations=(read,),
                                adapters={"duckdb": "no_such_module_0042:Adapter"})
-    assert check_arguments(lake, read, {"path": "a.csv", "version_id": "3"}, DUCKDB_CAPABILITIES) == []
-    assert "version_id" in read.json_schema(DUCKDB_CAPABILITIES)["properties"]
-    assert codes(check_arguments(lake, read, {"path": "a.csv", "format": "tsv"}, DUCKDB_CAPABILITIES)) == [
+    assert check_arguments(lake, read, {"path": "a.csv", "version_id": "3"}, FILE_DUCKDB_CAPABILITIES) == []
+    assert "version_id" in read.json_schema(FILE_DUCKDB_CAPABILITIES)["properties"]
+    assert codes(check_arguments(lake, read, {"path": "a.csv", "format": "tsv"}, FILE_DUCKDB_CAPABILITIES)) == [
         ("bad-value", "arguments.format")]
 
 
@@ -210,7 +210,7 @@ def test_arguments_are_checked_against_an_engines_capabilities():
     assert [(issue.code, issue.path, issue.message) for issue in issues] == [
         ("unsupported-choice", "arguments.mode", "`mode: b` is not supported by the source engine (supported: a)")]
     assert check_arguments(SAMPLE, operation, {"mode": "b"}) == []  # as declared, for any engine
-    assert codes(check_arguments(SAMPLE, operation, {"mode": "a"}, DUCKDB_CAPABILITIES)) == [
+    assert codes(check_arguments(SAMPLE, operation, {"mode": "a"}, FILE_DUCKDB_CAPABILITIES)) == [
         ("unsupported-operation", "")]
     narrow = EngineCapabilities(engine="source", operation_kinds=frozenset({OperationKind.READ}),
                                 arguments={"item.read": {"limit": None}},
@@ -231,7 +231,7 @@ def test_load_adapter_reports_unsupported_and_unimportable_engines():
 
 def test_entry_points_naming_a_definition_bind_to_the_engines_without_importing_adapters():
     class OldConnector:
-        """A plug-in written for the pre-contract connector API."""
+        """A plug-in whose entry point is not a ConnectorDefinition."""
 
     def source():
         return {plugins.CONNECTORS: [entry("sample", "streamwright_sample:CONNECTOR", SAMPLE),
@@ -240,12 +240,12 @@ def test_entry_points_naming_a_definition_bind_to_the_engines_without_importing_
     assert load_definition("sample", entry_points=source) is SAMPLE
     with pytest.raises(plugins.PluginError, match="not in the allowed list"):
         load_definition("sample", allowed=("old",), entry_points=source)
-    with pytest.raises(plugins.PluginError, match=r"old \(.*\) targets the pre-contract connector API; it needs an "
-                                                  r"update to connector contract v1 \(docs/design/connector-contract"):
+    with pytest.raises(plugins.PluginError, match=r"old \(.*\) is not a ConnectorDefinition: a connector package's "
+                                                  r"entry point names its CONNECTOR \(docs/design/connector-contract"):
         load_definition("old", entry_points=source)
     adapters, missing = load_adapters(["sample", "old", "absent"], entry_points=source)
     assert adapters == {} and "does not support the duckdb engine" in missing["sample"]
-    assert "pre-contract connector API" in missing["old"]
+    assert "is not a ConnectorDefinition" in missing["old"]
     assert "streamwright connectors install absent" in missing["absent"]
     assert [item["name"] for item in engine_connectors("source", entry_points=source)] == ["sample"]
     # contract v1.2 §6a: a job engine reaches a source-only connector through a call step

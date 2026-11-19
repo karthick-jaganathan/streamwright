@@ -1,0 +1,16 @@
+# StreamWright: purge the run queue's ended runs (installed by `streamwright systemd install`)
+[Unit]
+Description=StreamWright: purge the run queue's ended runs
+Documentation=https://streamwright.web.app/docs/jobs/serve
+
+[Service]
+Type=oneshot
+User=streamwright
+Group=streamwright
+EnvironmentFile=@CONFIG_DIR@/common.env
+ExecStart=@STREAMWRIGHT@ queue purge @CONFIG_DIR@/serve.yaml --older-than 30d
+StateDirectory=streamwright
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true

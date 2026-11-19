@@ -37,7 +37,8 @@ TEXT_FORMAT = "[%(asctime)s] %(levelname)s %(name)s%(context_tag)s: %(message)s"
 # the structured fields of streamwright's log lines, in the order JSON lines show them; each has one type
 FIELDS = ("event", "stream", "partition", "window", "request", "export", "exports", "connector", "call", "method",
           "url", "page", "records", "pages", "requests", "retries", "failed_partitions", "streams", "outputs",
-          "duration_ms", "status", "code", "attempt", "bytes", "path", "table", "outcome", "database", "job_id")
+          "duration_ms", "status", "code", "attempt", "bytes", "path", "table", "outcome", "database", "job_id",
+          "run_id", "queue_wait_ms")
 # the log context's keys (runtime/logs/context.py): JSON lines carry them for every logger, labels as one object
 CONTEXT_KEYS = ("job", "labels", "item", "scope", "job_id", "step", "output", "lookup")
 

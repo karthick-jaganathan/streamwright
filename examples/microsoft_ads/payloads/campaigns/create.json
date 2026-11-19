@@ -1,0 +1,4 @@
+[
+  {"name": "Example search campaign 01", "daily_budget": 5.0},
+  {"name": "Example search campaign 02", "daily_budget": 10.0, "time_zone": "PacificTimeUSCanadaTijuana"}
+]

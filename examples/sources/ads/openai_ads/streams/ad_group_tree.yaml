@@ -18,12 +18,13 @@
 # Reads each campaign first, then queries the ad groups under that campaign_id.
 partitions:
   - {name: account_id, values: "{{ config.account_ids }}"}
-retry: {max_attempts: 3, max_delay: 2m}
+policy:
+  retry: {max_attempts: 3, max_delay: 2m}
 
 # HTTP requests: fetch campaigns first, then query child ad groups per campaign
 requests:
   - name: raw_campaigns
-    http:
+    operation:
       path: /v1/campaigns
       method: GET
       params:
@@ -32,7 +33,7 @@ requests:
   - name: raw_ad_groups
     partitions:
       - {from: campaign_rows, fields: [account_id, campaign_id]}
-    http:
+    operation:
       path: /v1/ad_groups
       method: GET
       params:

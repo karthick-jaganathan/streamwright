@@ -26,9 +26,9 @@ CONNECTOR = ConnectorDefinition(
     name="apple_ads",
     title="Apple Ads",
     family="advertising",
-    summary="Apple Ads campaigns, ad groups, keywords and reports, declared in the source's `http:` block",
+    summary="Apple Ads campaigns, ad groups, keywords and reports: HTTP reads and writes (`operation:` requests)",
     connection=http.auth_fields(("bearer",)),
-    operations=(http.REQUEST,),
-    adapters={"source": "streamwright.core.io.http:HttpSourceAdapter"},
+    operations=(http.REQUEST, http.SEND),
+    adapters={"source": "streamwright.core.sdk.engines.source:HttpSourceAdapter"},
     loggers=("streamwright.network", "urllib3"),
 )

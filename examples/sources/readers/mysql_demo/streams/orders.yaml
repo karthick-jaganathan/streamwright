@@ -18,16 +18,16 @@ description: MySQL orders query extract with window parameter binding.
 
 requests:
   - name: raw_orders
-    service: database
-    method: query
-    sdk: mysql
-    arguments:
-      query: |
-        SELECT id, customer_id, order_date, total_amount, status
-        FROM orders
-        WHERE order_date >= $start_date
-      params:
-        start_date: "{{ config.start_date }}"
+    operation:
+      service: database
+      method: query
+      arguments:
+        query: |
+          SELECT id, customer_id, order_date, total_amount, status
+          FROM orders
+          WHERE order_date >= $start_date
+        params:
+          start_date: "{{ config.start_date }}"
 
 transform:
   mode: page

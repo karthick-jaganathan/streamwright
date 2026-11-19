@@ -33,8 +33,8 @@ from streamwright.core.io.queries import WHOLE_REFERENCE, QueryPolicy, check_que
 from streamwright.core.jobs.write_rules import OutputSpec, check_merge_clauses, check_overwrite_scope
 from streamwright.core.runtime.contract import EngineCapabilities, OperationKind
 
-__all__ = ["DUCKDB_CAPABILITIES", "DUCKDB_TABLE_MODES", "DUCKDB_WRITE_MODES", "QUERY_NAME", "SOURCE_CAPABILITIES",
-           "TABLE_NAME", "TABLE_READ_NAME", "TABLE_WRITE_NAME", "WRITE_NAME", "check_database_write",
+__all__ = ["DATABASE_DUCKDB_CAPABILITIES", "DATABASE_SOURCE_CAPABILITIES", "DUCKDB_TABLE_MODES", "DUCKDB_WRITE_MODES",
+           "QUERY_NAME", "TABLE_NAME", "TABLE_READ_NAME", "TABLE_WRITE_NAME", "WRITE_NAME", "check_database_write",
            "check_query_call", "check_table_call", "check_table_read", "check_table_write"]
 
 QUERY_NAME: Final = "database.query"  # the catalog's names (streamwright.core.sdk.operations.databases, .tables)
@@ -118,7 +118,7 @@ def check_table_write(arguments: Mapping[str, Any]) -> list[str]:
     return [problem.message for problem in check_overwrite_scope(spec) + check_merge_clauses(spec)]
 
 
-SOURCE_CAPABILITIES: Final = EngineCapabilities(
+DATABASE_SOURCE_CAPABILITIES: Final = EngineCapabilities(
     engine="source",
     operation_kinds=frozenset({OperationKind.READ}),
     arguments=MappingProxyType({
@@ -130,7 +130,7 @@ SOURCE_CAPABILITIES: Final = EngineCapabilities(
                              TABLE_READ_NAME: check_table_read}),
 )
 
-DUCKDB_CAPABILITIES: Final = EngineCapabilities(
+DATABASE_DUCKDB_CAPABILITIES: Final = EngineCapabilities(
     engine="duckdb",
     operation_kinds=frozenset({OperationKind.READ, OperationKind.WRITE}),
     arguments=MappingProxyType({

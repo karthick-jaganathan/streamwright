@@ -20,12 +20,13 @@
 # campaign_id filtering. Use the flat `ads` stream for direct account-level inventory.
 partitions:
   - {name: account_id, values: "{{ config.account_ids }}"}
-retry: {max_attempts: 3, max_delay: 2m}
+policy:
+  retry: {max_attempts: 3, max_delay: 2m}
 
 # HTTP requests: fetch campaigns first, then query child ads per campaign
 requests:
   - name: raw_campaigns
-    http:
+    operation:
       path: /v1/campaigns
       method: GET
       params:
@@ -34,7 +35,7 @@ requests:
   - name: raw_ads
     partitions:
       - {from: campaign_rows, fields: [account_id, campaign_id]}
-    http:
+    operation:
       path: /v1/ads
       method: GET
       params:

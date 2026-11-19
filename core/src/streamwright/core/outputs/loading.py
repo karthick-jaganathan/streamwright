@@ -17,7 +17,7 @@
 
 """Shared lifecycle for outputs loading exports into destination tables."""
 
-from streamwright.core.engine import sql
+from streamwright.core.config.streams import incremental_exports
 from streamwright.core.outputs.base import BaseOutput
 
 
@@ -25,7 +25,7 @@ class LoadingOutput(BaseOutput):
     """Dispositions, partial-load protection, state and summaries for table outputs."""
 
     def __init__(self, source):
-        self.incremental = sql.incremental_exports(source)
+        self.incremental = incremental_exports(source)
         self.partial = set()
         self.state = None
         self.status = None

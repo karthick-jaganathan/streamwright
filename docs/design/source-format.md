@@ -9,7 +9,7 @@ permalink: /design/source-format/
 
 # Source configuration format
 
-**Status:** design accepted (see [Decisions](#decisions)). `streamwright validate` checks sources (`kind: source`), the JSON Schema is `docs/schemas/source.schema.json`, `streamwright run` (the `streamwright` package) runs them, and the connectors `streamwright-google-ads`, `streamwright-microsoft-ads` and `streamwright-meta-ads` add the SDK-backed APIs, the HTTP-transport connectors `streamwright-openai-ads`, `streamwright-linkedin-ads`, `streamwright-apple-ads` and `streamwright-amazon-ads` extract REST APIs declaratively via the unified HTTP engine, and the reader connectors `streamwright-files` (local files), `streamwright-s3` and `streamwright-gcs` (object storage) and `streamwright-postgres` (PostgreSQL databases) read files and databases. The examples below are the source folders in `examples/sources/`. The legacy kinds (`authorization`, `connector`, `serializer`, `pipeline`) have been removed (see [Rollout](#rollout)): this is the only format.
+**Status:** design accepted (see [Decisions](#decisions)). `streamwright validate` checks sources (`kind: source`), the JSON Schema is `docs/schemas/source.schema.json`, `streamwright run` (the `streamwright` package) runs them, and the connectors `streamwright-google-ads`, `streamwright-microsoft-ads` and `streamwright-meta-ads` add the SDK-backed APIs, the HTTP-transport connectors `streamwright-openai-ads`, `streamwright-linkedin-ads`, `streamwright-apple-ads` and `streamwright-amazon-ads` extract REST APIs declaratively via the unified HTTP engine, and the reader connectors read files, object storage, databases, spreadsheets and message brokers (`streamwright-files`, `-s3`, `-gcs`, `-azure-blob`, `-deltalake`, `-postgres`, `-mysql`, `-mongodb`, `-google-sheets`, `-kafka`, `-sqs`). The examples below are the source folders in `examples/sources/`. The legacy kinds (`authorization`, `connector`, `serializer`, `pipeline`) have been removed (see [Rollout](#rollout)): this is the only format.
 
 ## Summary
 
@@ -139,28 +139,28 @@ partitions:
   - {name: customer_id, values: "{{ config.customer_ids }}"}
 requests:
   - name: raw_campaigns
-    sdk: google_ads
-    service: GoogleAdsService
-    method: search_stream
-    arguments:
-      customer_id: "{{ partition.customer_id }}"
-      query:
-        gaql:
-          select: [customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone,
-                   customer.auto_tagging_enabled, customer.tracking_url_template,
-                   customer.conversion_tracking_setting.conversion_tracking_id,
-                   customer.remarketing_setting.google_global_site_tag, campaign.id, campaign.name,
-                   campaign.status, campaign.advertising_channel_type, campaign.bidding_strategy_type,
-                   campaign.start_date_time, campaign.end_date_time, campaign.target_cpa.target_cpa_micros,
-                   campaign.target_roas.target_roas, campaign_budget.id, campaign_budget.amount_micros,
-                   metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions,
-                   metrics.conversions_value]
-          from: campaign
-          where:
-            - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
-            - {field: campaign.id, op: IN, type: int, value: "{{ config.campaign_ids }}", skip_if_empty: true}
-            - {field: campaign.advertising_channel_type, op: IN, type: enum, value: "{{ config.channel_types }}",
-               skip_if_empty: true}
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ partition.customer_id }}"
+        query:
+          gaql:
+            select: [customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone,
+                     customer.auto_tagging_enabled, customer.tracking_url_template,
+                     customer.conversion_tracking_setting.conversion_tracking_id,
+                     customer.remarketing_setting.google_global_site_tag, campaign.id, campaign.name,
+                     campaign.status, campaign.advertising_channel_type, campaign.bidding_strategy_type,
+                     campaign.start_date_time, campaign.end_date_time, campaign.target_cpa.target_cpa_micros,
+                     campaign.target_roas.target_roas, campaign_budget.id, campaign_budget.amount_micros,
+                     metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions,
+                     metrics.conversions_value]
+            from: campaign
+            where:
+              - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
+              - {field: campaign.id, op: IN, type: int, value: "{{ config.campaign_ids }}", skip_if_empty: true}
+              - {field: campaign.advertising_channel_type, op: IN, type: enum, value: "{{ config.channel_types }}",
+                 skip_if_empty: true}
 transform:
   mode: page
   steps:
@@ -215,19 +215,19 @@ incremental:
   lookback: 30d                    # conversions are restated for weeks; re-read the last 30 days each run
 requests:
   - name: raw_campaign_performance
-    sdk: google_ads
-    service: GoogleAdsService
-    method: search_stream
-    arguments:
-      customer_id: "{{ partition.customer_id }}"
-      query:
-        gaql:                      # the gaql query builder (streamwright-google-ads) writes the escaped query
-          select: [customer.id, campaign.id, campaign.name, campaign.status, segments.date,
-                   metrics.impressions, metrics.clicks, metrics.cost_micros]
-          from: campaign
-          where:
-            - {field: segments.date, op: BETWEEN, type: date, value: ["{{ window.start }}", "{{ window.end }}"]}
-            - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ partition.customer_id }}"
+        query:
+          gaql:                      # the gaql query builder (streamwright-google-ads) writes the escaped query
+            select: [customer.id, campaign.id, campaign.name, campaign.status, segments.date,
+                     metrics.impressions, metrics.clicks, metrics.cost_micros]
+            from: campaign
+            where:
+              - {field: segments.date, op: BETWEEN, type: date, value: ["{{ window.start }}", "{{ window.end }}"]}
+              - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
 transform:
   mode: page
   steps:
@@ -266,31 +266,31 @@ partitions:
   - {name: customer_id, values: "{{ config.customer_ids }}"}
 requests:
   - name: raw_campaigns
-    sdk: google_ads
-    service: GoogleAdsService
-    method: search_stream
-    arguments:
-      customer_id: "{{ partition.customer_id }}"
-      query:
-        gaql:
-          select: [customer.id, campaign.id, campaign.name, campaign.status]
-          from: campaign
-          where:
-            - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ partition.customer_id }}"
+        query:
+          gaql:
+            select: [customer.id, campaign.id, campaign.name, campaign.status]
+            from: campaign
+            where:
+              - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
   - name: raw_ad_groups
     partitions:                    # campaign_ids: a list of up to 200 of this customer's campaign ids per query
       - {name: campaign_ids, from: raw_campaigns, field: campaign.id, batch_size: 200}
-    sdk: google_ads
-    service: GoogleAdsService
-    method: search_stream
-    arguments:
-      customer_id: "{{ partition.customer_id }}"
-      query:
-        gaql:
-          select: [customer.id, campaign.id, ad_group.id, ad_group.name, ad_group.status]
-          from: ad_group
-          where:
-            - {field: campaign.id, op: IN, type: int, value: "{{ partition.campaign_ids }}"}
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ partition.customer_id }}"
+        query:
+          gaql:
+            select: [customer.id, campaign.id, ad_group.id, ad_group.name, ad_group.status]
+            from: ad_group
+            where:
+              - {field: campaign.id, op: IN, type: int, value: "{{ partition.campaign_ids }}"}
 transform:
   mode: run                        # the ad group queries take their campaign ids from the campaign query
   steps:
@@ -352,6 +352,7 @@ auth:
 http:
   base_url: https://api.example.com/rest
   headers: {Api-Version: "202509"}
+policy:
   rate_limit: {requests: 1000, per: 1h}
   retry: {codes: [429, 500, 502, 503, 504], max_attempts: 3, backoff: exponential}
 ```
@@ -362,11 +363,11 @@ partitions:
   - {name: account_id, values: "{{ config.account_ids }}"}
 requests:
   - name: raw_campaigns
-    http:
+    operation:
       path: "/adAccounts/{{ partition.account_id }}/adCampaigns"
       params: {q: search}
-    paginator: {type: offset, offset_param: start, limit_param: count, page_size: 100}
-    records: {path: elements}
+      records: {path: elements}
+      paginator: {type: offset, offset_param: start, limit_param: count, page_size: 100}
 transform:
   mode: page
   steps:
@@ -435,23 +436,24 @@ requests:
   - name: raw_campaign_performance
     async_job:
       submit:
-        sdk: microsoft_ads
-        service: ReportingService
-        method: SubmitGenerateReport
-        arguments:
-          request:
-            ReportRequest:
-              "@type": CampaignPerformanceReportRequest   # SOAP type, built by the connector
-              Aggregation: Daily
-              Format: Csv
-              ExcludeReportHeader: true
-              ExcludeReportFooter: true
-              Columns: [TimePeriod, AccountId, CampaignId, CampaignName, Impressions, Clicks, Spend]
-              Scope: {AccountIds: ["{{ partition.account_id }}"]}
-              Time: {CustomDateRangeStart: "{{ window.start }}", CustomDateRangeEnd: "{{ window.end }}"}
+        operation:
+          service: ReportingService
+          method: SubmitGenerateReport
+          arguments:
+            request:
+              ReportRequest:
+                "@type": CampaignPerformanceReportRequest   # SOAP type, built by the connector
+                Aggregation: Daily
+                Format: Csv
+                ExcludeReportHeader: true
+                ExcludeReportFooter: true
+                Columns: [TimePeriod, AccountId, CampaignId, CampaignName, Impressions, Clicks, Spend]
+                Scope: {AccountIds: ["{{ partition.account_id }}"]}
+                Time: {CustomDateRangeStart: "{{ window.start }}", CustomDateRangeEnd: "{{ window.end }}"}
       poll:
-        method: PollGenerateReport
-        arguments: {request: {ReportRequestId: "{{ submit.result }}"}}
+        operation:
+          method: PollGenerateReport
+          arguments: {request: {ReportRequestId: "{{ submit.result }}"}}
         every: 15s
         timeout: 30m
         done_when: {path: Status, equals: Success}
@@ -485,13 +487,13 @@ partitions:
   - {from_stream: campaigns, fields: [account_id, campaign_id]}   # partition.account_id and partition.campaign_id
 requests:
   - name: raw_ad_groups
-    sdk: microsoft_ads
-    service: CampaignManagementService
-    method: GetAdGroupsByCampaignId
-    arguments:
-      account_id: "{{ partition.account_id }}"    # the request names only the campaign
-      request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
-    records: {path: AdGroup}
+    operation:
+      service: CampaignManagementService
+      method: GetAdGroupsByCampaignId
+      arguments:
+        account_id: "{{ partition.account_id }}"    # the request names only the campaign
+        request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
+      records: {path: AdGroup}
 transform:
   mode: page
   steps:
@@ -525,24 +527,24 @@ partitions:
   - {name: account_id, values: "{{ config.account_ids }}"}
 requests:
   - name: raw_campaigns
-    sdk: microsoft_ads
-    service: CampaignManagementService
-    method: GetCampaignsByAccountId
-    arguments:
-      request:
-        AccountId: "{{ partition.account_id }}"
-        CampaignType: [Search, Shopping, DynamicSearchAds, Audience, PerformanceMax]
-    records: {path: Campaign}
+    operation:
+      service: CampaignManagementService
+      method: GetCampaignsByAccountId
+      arguments:
+        request:
+          AccountId: "{{ partition.account_id }}"
+          CampaignType: [Search, Shopping, DynamicSearchAds, Audience, PerformanceMax]
+      records: {path: Campaign}
   - name: raw_ad_groups
     partitions:
       - {from: campaign_rows, fields: [account_id, campaign_id]}   # account_id: this account's campaigns only
-    sdk: microsoft_ads
-    service: CampaignManagementService
-    method: GetAdGroupsByCampaignId
-    arguments:
-      account_id: "{{ partition.account_id }}"
-      request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
-    records: {path: AdGroup}
+    operation:
+      service: CampaignManagementService
+      method: GetAdGroupsByCampaignId
+      arguments:
+        account_id: "{{ partition.account_id }}"
+        request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
+      records: {path: AdGroup}
 transform:
   mode: run                        # two requests, the second partitioned by a step: in dependency order
   steps:
@@ -616,21 +618,22 @@ incremental:
   start: "{{ config.start_date }}"
   window: 7d
   lookback: 28d                    # attribution windows restate results for up to 28 days
-retry: {max_attempts: 5, max_delay: 5m}   # throttling can last minutes
+policy:
+  retry: {max_attempts: 5, max_delay: 5m}   # throttling can last minutes
 requests:
   - name: raw_campaign_insights
-    sdk: meta_ads
-    service: AdAccount
-    method: get_insights           # an edge: paged by the connector
-    arguments:
-      id: "act_{{ partition.account_id }}"
-      fields: [account_id, campaign_id, campaign_name, date_start, impressions, clicks, spend]
-      action_report_time: conversion   # an undeclared (vendor) Graph API argument, forwarded verbatim (contract §6a)
-      params:
-        level: campaign
-        time_increment: 1
-        time_range: {since: "{{ window.start }}", until: "{{ window.end }}"}
-        limit: 500
+    operation:
+      service: AdAccount
+      method: get_insights           # an edge: paged by the connector
+      arguments:
+        id: "act_{{ partition.account_id }}"
+        fields: [account_id, campaign_id, campaign_name, date_start, impressions, clicks, spend]
+        action_report_time: conversion   # an undeclared (vendor) Graph API argument, forwarded verbatim (contract §6a)
+        params:
+          level: campaign
+          time_increment: 1
+          time_range: {since: "{{ window.start }}", until: "{{ window.end }}"}
+          limit: 500
 transform:
   mode: page
   steps:
@@ -659,7 +662,7 @@ connectors: `files` reads local files, `s3` and `gcs` read object storage, and `
 sandbox), and gives each row as one record.
 
 Local files: `auth: {provider: files, roots: [...]}` names the local folders files can be read from, and each request
-is `sdk: files`, `method: read`. The roots are the boundary: every path is checked to be inside one before any file
+is a call, `operation: {service: object, method: read}`. The roots are the boundary: every path is checked to be inside one before any file
 is read, and the connector has no URLs, no `httpfs` and no credentials (its DuckDB connection never has external
 access). This example reads the small files committed in its `data/` folder, so it runs offline:
 
@@ -699,13 +702,13 @@ A glob reads every file it matches, in name order; `filename` adds each file's p
 # files_demo/streams/orders.yaml
 requests:
   - name: raw_orders
-    sdk: files
-    service: object
-    method: read
-    arguments:
-      path: "orders/*.csv"
-      format: csv
-      options: {header: true, filename: true}
+    operation:
+      service: object
+      method: read
+      arguments:
+        path: "orders/*.csv"
+        format: csv
+        options: {header: true, filename: true}
 transform:
   mode: page
   steps:
@@ -736,13 +739,13 @@ incremental:
   window: 1d
 requests:
   - name: raw_customers
-    sdk: files
-    service: object
-    method: read
-    arguments:
-      path: "customers/{{ window.start }}.jsonl"
-      format: jsonl
-      on_missing: skip
+    operation:
+      service: object
+      method: read
+      arguments:
+        path: "customers/{{ window.start }}.jsonl"
+        format: jsonl
+        on_missing: skip
 transform:
   mode: page
   steps:
@@ -777,13 +780,13 @@ export:
 ```yaml
 requests:
   - name: raw_orders
-    sdk: files
-    method: read
-    arguments:
-      path: orders                                 # a folder inside a root, not a glob
-      match: '\d{4}/orders_\d{4}-\d{2}-\d{2}\.csv' # fully matched against each file's path relative to it
-      recursive: true                              # sub-folders too (default false): orders/2026/orders_...csv
-      format: csv
+    operation:
+      method: read
+      arguments:
+        path: orders                                 # a folder inside a root, not a glob
+        match: '\d{4}/orders_\d{4}-\d{2}-\d{2}\.csv' # fully matched against each file's path relative to it
+        recursive: true                              # sub-folders too (default false): orders/2026/orders_...csv
+        format: csv
 ```
 
 See `connectors/readers/files/README.md` for every option and the errors.
@@ -792,8 +795,8 @@ See `connectors/readers/files/README.md` for every option and the errors.
 
 Objects are read by two more reader connectors, through DuckDB's `httpfs` extension: `s3` (Amazon S3, or an
 S3-compatible store such as MinIO) and `gcs` (Google Cloud Storage, through its S3-compatible access with an HMAC
-key). Their requests are those of `files`, on `service: object`: `sdk: s3` or `sdk: gcs`, `method: read`,
-`arguments: {path, format, options, on_missing, match, recursive}`. `auth` names the URL prefixes that can be read
+key). Their requests are those of `files`: `operation: {service: object, method: read, arguments: {path, format, options,
+on_missing, match, recursive}}`. `auth` names the URL prefixes that can be read
 (`roots`) and the credentials, which are `{{ secrets.* }}` references only:
 
 ```bash
@@ -849,15 +852,15 @@ objects there (e.g. `_SUCCESS` markers) are not read:
 # s3_demo/streams/events.yaml
 requests:
   - name: raw_events
-    sdk: s3
-    service: object
-    method: read
-    arguments:
-      path: events/
-      match: 'day=\d{4}-\d{2}-\d{2}/part-\d+\.parquet'
-      recursive: true
-      format: parquet
-      options: {filename: true}
+    operation:
+      service: object
+      method: read
+      arguments:
+        path: events/
+        match: 'day=\d{4}-\d{2}-\d{2}/part-\d+\.parquet'
+        recursive: true
+        format: parquet
+        options: {filename: true}
 transform:
   mode: page
   steps:
@@ -875,7 +878,7 @@ export:
 ```
 
 Google Cloud Storage is the same with `provider: gcs`, `gs://` roots and an HMAC key, and no other settings; the
-streams of `gcs_demo` are those of `s3_demo` with `sdk: gcs` (`events`, `orders`):
+streams of `gcs_demo` are those of `s3_demo`, on `auth.provider: gcs` (`events`, `orders`):
 
 ```yaml
 # gcs_demo/source.yaml
@@ -920,7 +923,7 @@ See `connectors/readers/s3/README.md` and `connectors/readers/gcs/README.md` for
 
 A database is read through a connector too: `auth: {provider: postgres, dsn: "{{ secrets.* }}"}` attaches a PostgreSQL
 database `READ_ONLY` with DuckDB's postgres scanner, through a temporary DuckDB secret that holds the DSN (so DuckDB's
-system views show no path), and each request is `sdk: postgres` with `method: query` (a SELECT) or `method: table`
+system views show no path), and each request's operation is a call with `method: query` (a SELECT) or `method: table`
 (the connector writes the SELECT). The DSN is a secret only, redacted with its password:
 
 ```bash
@@ -978,17 +981,17 @@ incremental:
   window: 1d
 requests:
   - name: raw_orders
-    sdk: postgres
-    service: database
-    method: query
-    arguments:
-      query: |
-        SELECT id, customer_id, status, total::VARCHAR AS total, currency, updated_at
-        FROM public.orders
-        WHERE updated_at >= $since AND updated_at < $until + INTERVAL 1 DAY
-      params:
-        since: "{{ window.start }}"
-        until: "{{ window.end }}"
+    operation:
+      service: database
+      method: query
+      arguments:
+        query: |
+          SELECT id, customer_id, status, total::VARCHAR AS total, currency, updated_at
+          FROM public.orders
+          WHERE updated_at >= $since AND updated_at < $until + INTERVAL 1 DAY
+        params:
+          since: "{{ window.start }}"
+          until: "{{ window.end }}"
 transform:
   mode: page
   steps:
@@ -1018,29 +1021,29 @@ incremental:
   window: 1d
 requests:
   - name: raw_orders
-    sdk: postgres
-    service: database
-    method: query
-    arguments:
-      query: |
-        SELECT id, updated_at FROM public.orders
-        WHERE updated_at >= $since AND updated_at < $until + INTERVAL 1 DAY
-      params:
-        since: "{{ window.start }}"
-        until: "{{ window.end }}"
+    operation:
+      service: database
+      method: query
+      arguments:
+        query: |
+          SELECT id, updated_at FROM public.orders
+          WHERE updated_at >= $since AND updated_at < $until + INTERVAL 1 DAY
+        params:
+          since: "{{ window.start }}"
+          until: "{{ window.end }}"
   - name: raw_lines
     partitions:
       - {name: ids, from: raw_orders, field: id, batch_size: 500}
-    sdk: postgres
-    service: database
-    method: query
-    arguments:
-      query: |
-        SELECT order_id, line_number, product_id, quantity, unit_price
-        FROM public.order_lines
-        WHERE order_id = ANY($ids::BIGINT[])
-      params:
-        ids: "{{ partition.ids }}"
+    operation:
+      service: database
+      method: query
+      arguments:
+        query: |
+          SELECT order_id, line_number, product_id, quantity, unit_price
+          FROM public.order_lines
+          WHERE order_id = ANY($ids::BIGINT[])
+        params:
+          ids: "{{ partition.ids }}"
 transform:
   mode: run                        # the line queries take their order ids from the order query
   steps:
@@ -1109,8 +1112,8 @@ campaign's settings or totals per account, are made in the warehouse after loadi
 - A source folder has a `source.yaml` (or `source.yml`) and a `streams/` folder. Each `.yaml` / `.yml` file in
   `streams/` is one stream, named after the file (`streams/ad_groups.yaml` is the stream `ad_groups`), so stream
   files have no `name`; `source.yaml` has everything except `streams`. Other files (a README) are ignored, and
-  folders inside `streams/` are an error, so no stream is silently skipped. A `models/` folder is an error (models
-  were removed): a stream's `transform` steps shape its own requests, and joins across streams run in the warehouse.
+  folders inside `streams/` are an error, so no stream is silently skipped. A stream's `transform` steps shape its
+  own requests; joins across streams run in the warehouse.
 - The folder is read as one document: streams run in file name order (`from_stream` parents first), share `spec`,
   `auth` (one sign-in per run), the `http` rate limit and the state, and can be each other's `from_stream` parents.
 - `streamwright run` and `streamwright validate` take the folder, its `source.yaml` or its `streams/` folder; streamwright validate also
@@ -1145,7 +1148,7 @@ and platform UI forms; secrets are redacted everywhere. SQL steps read config va
 ### `auth`
 
 Built-in: `oauth2_refresh_token`, `api_key` (header or query), `bearer`, `basic`. Connectors add providers:
-- **SDK connectors** (`transport: "sdk"`): such as `google_ads`, `microsoft_ads`, `meta_ads`. These build the SDK client used by sdk requests; a source with an SDK connector provider has only sdk requests.
+- **SDK connectors** (`transport: "sdk"`): such as `google_ads`, `microsoft_ads`, `meta_ads`. These build the SDK client a call runs on; a source with an SDK connector provider has only calls as operations.
 - **HTTP connectors** (`transport: "http"`): such as `openai_ads`, `linkedin_ads`, `apple_ads`, `amazon_ads`. These use StreamWright's unified HTTP engine. The `auth` block specifies `provider: <name>` together with the built-in `type` (`bearer`, `oauth2_refresh_token`, etc.) and its credentials.
 - **Reader connectors**: `files`, `s3`, `gcs`, `postgres` name what can be read instead of an account:
 
@@ -1167,8 +1170,16 @@ When sources use HTTP requests, the source-level `http` block sets shared networ
 | `params_encoding` | `plain` (default) or `dotted` (Rest.li / nested query params) |
 | `paginator` | Default paginator spec inherited by requests unless overridden |
 | `records` | Default records extraction path (`path`, `explode`) inherited by requests |
-| `rate_limit` | Default rate limit (`requests_per_second` or `requests_per_minute`) |
+
+### `policy` (source defaults)
+
+The source-level `policy` block sets the default execution policy of every request (a stream's own `policy:` replaces
+each key it sets, see [Errors, retries and rate limits](#errors-retries-and-rate-limits)):
+
+| Key | Meaning |
+|---|---|
 | `retry` | Default retry policy (`max_attempts`, `max_delay`, `backoff`, `codes`) |
+| `rate_limit` | Default rate limit (`requests` per `per`, e.g. `{requests: 10, per: 1s}`), shared by the source's streams |
 
 ### `requests`
 
@@ -1179,33 +1190,37 @@ convention a request is named `raw_<entity>`, e.g. `raw_campaigns`.
 | Key | Meaning |
 |---|---|
 | `name` | required; unique among the stream's requests and steps (names ignore case), and not the name of a DuckDB built-in table or view |
-| `http`, `sdk`, `async_job` | exactly one request kind (below) |
-| `paginator`, `records` | optional: how this request's responses are paged, and where its records are (below) |
+| `operation`, `async_job` | exactly one (below) |
 | `partitions` | optional request-level partitions, only with `transform.mode: run` (below) |
 
-- `http`: `path` (joined to `http.base_url`), `method` (default GET), `params`, `headers`, `json`.
-- `sdk`: `sdk` (connector), `service`, `method` and `arguments`. An sdk request takes no `headers`: per-request values
-  (an account, a customer) are the operation's arguments, e.g. Microsoft Ads' `account_id`. The connector allows only
-  read-only calls and converts responses to plain data, read with the request's `records` like HTTP responses
-  (replacing the legacy `post_processor`).
-- Reader connectors: `sdk` can also name a connector that reads files, objects or a database rather than an API SDK.
-  `sdk: files` (`service: object`, `method: read`) reads local csv, tsv, json, jsonl and parquet files, and `sdk: s3`
-  and `sdk: gcs` (`service: object`, `method: read`) read the same formats from object storage, all with
+- `operation`: what the request invokes. The connector named in `auth.provider` decides its kind (there is no `type`
+  key; an operation that mixes the two kinds' keys is an error):
+  - an HTTP request (built-in auth, or a REST API connector): `path` (joined to `http.base_url`), `method` (default
+    GET), `params`, `headers`, `json`, `params_encoding`, and this request's `paginator` and `records` (how its
+    responses are paged and where its records are; below), which replace the source's `http` defaults.
+  - a call (an SDK or reader connector): `service`, `method`, `arguments` and `records`, run on the client of the
+    connector named in `auth.provider` (there is no other way to name it). A call takes no `headers`: per-request values (an account, a
+  customer) are the operation's arguments, e.g. Microsoft Ads' `account_id`. The connector allows only read-only
+  calls and converts responses to plain data, read with the call's `records` like HTTP responses (replacing the
+  legacy `post_processor`).
+- Reader connectors: a call can also run on a connector that reads files, objects or a database rather than an
+  API SDK. With `auth.provider: files`, `operation: {service: object, method: read}` reads local csv, tsv, json, jsonl and
+  parquet files, and with `s3` or `gcs` the same call reads the same formats from object storage, all with
   `arguments: {path, format, options, on_missing, match, recursive}`: `path` is a file, a glob or a list of them, or,
   with `match` (a literal Python regex fully matched against each file's path relative to the `path` folder), a
-  folder, searched in its sub-folders too with `recursive: true` (default `false`). `sdk: postgres`
-  (`service: database`, `method: query`, `arguments: {query, params}`, or `method: table`,
+  folder, searched in its sub-folders too with `recursive: true` (default `false`). With `postgres`,
+  `operation: {service: database, method: query, arguments: {query, params}}` (or `method: table`,
   `arguments: {schema, table, columns, where}`) runs read-only SELECT queries. All read with DuckDB, on a connection
   of the connector's own, each row one record (examples 5 to 7 in [Worked examples](#worked-examples)). There is no
   other request kind for them.
-- `async_job`: `submit` (an sdk request), `poll` (`method` of the same service, `arguments`, `every`, `timeout`,
+- `async_job`: `submit` (`operation:`, a call), `poll` (`operation: {method, arguments}` of the same service, `every`, `timeout`,
   `done_when`, `fail_when`) and `download` (`url`, `format`: csv / jsonl / json, `compression`: zip / gzip) or
-  `results` (an sdk request). The submit and poll responses are the `submit` and `poll` scopes; one that is not a
+  `results` (`operation:`, a call; its `records` select the results). The submit and poll responses are the `submit` and `poll` scopes; one that is not a
   mapping (e.g. a job ID) is `submit.result`. `poll` runs every `every` until `done_when` matches; `fail_when` or
   `timeout` fails the request like an API error. Files are downloaded without the API's credentials (report URLs are
   pre-signed, and their query strings are redacted); csv and jsonl give one record per row (empty csv cells are
-  null), json is read with `records.path`, and a missing URL means no data.
-- Query builders are components: in a request (`http` or `sdk`), a mapping with a single key that is an
+  null), json is read with the request item's `records.path` (a download is not a call), and a missing URL means no data.
+- Query builders are components: in a request's `operation`, a mapping with a single key that is an
   installed query builder's name, such as `query: {gaql: {...}}`, is replaced by the query text the builder writes
   from it, after its references are rendered with their types. The builder checks, quotes and escapes every value,
   so inputs are never concatenated into queries. Only calls written in the source are built: a value from inputs
@@ -1259,10 +1274,10 @@ A stream reads its requests for each of its partitions. A request that uses `{{ 
   partition's values: use `{from: <step>, fields: [<stream partitions>, F], batch_size}`), on stream partitions
   (each one is a value with its own state), and on a `from:` item whose `name` is a stream partition's (it has no
   values of its own). Windows and bookmarks are per stream partition, as before.
-- `paginator` (source default or per request): `none`, `offset` (`offset_param`, `limit_param`, `page_size`, `total_path`),
+- `paginator` (source `http` default, or in an HTTP request's `operation`): `none`, `offset` (`offset_param`, `limit_param`, `page_size`, `total_path`),
   `cursor` (`token_path`, `param`, `has_more_path`), `page_number` (`page_param`, `size_param`, `total_pages_path`),
   or `link_header`. Supported locations: `in: query` (default) or `in: body`.
-- `records` (per request): `path` to the record list in the response; `explode: <field>` emits one record per nested
+- `records` (source `http` default, or in a request's `operation`): `path` to the record list in the response; `explode: <field>` emits one record per nested
   item, with parent fields copied (the legacy `extended_array`).
 
 ### `incremental`
@@ -1274,8 +1289,7 @@ run resumes where it stopped, and a `run` stream after its exports are written. 
 complete day (never today, which is still changing) and never moves back. A run resumes the day after the bookmark,
 re-reading `lookback` days but not before `start`; a bookmark older than `start` wins, so no days are skipped. A
 `from_stream` parent runs from its own bookmarks, like any stream. Streams without `incremental` save no bookmarks.
-A bookmark saved under a partition's key from before decimals were exact (its `DECIMAL` values as doubles, e.g.
-`{"amount": 1.2345678901234567e+19}`) is found and moved to the partition's exact key.
+A partition's key holds its values exactly (a `DECIMAL` as its exact number, not a double).
 
 ### `transform`: SQL steps
 
@@ -1315,11 +1329,9 @@ and 3, and two steps are exported:
 incremental: {cursor_field: date, start: "{{ config.start_date }}", window: 1d}
 requests:
   - name: raw_campaigns              # no {{ window.* }}: read once per stream partition
-    http: {path: /campaigns}
-    records: {path: data}
+    operation: {path: /campaigns, records: {path: data}}
   - name: raw_daily_stats            # read once per window
-    http: {path: /stats, params: {day: "{{ window.start }}"}}
-    records: {path: data}
+    operation: {path: /stats, params: {day: "{{ window.start }}"}, records: {path: data}}
 transform:
   mode: run
   steps:
@@ -1457,37 +1469,21 @@ not use them. `streamwright validate` checks the references.
 - A stream that is a `from_stream` parent has exactly one export: its rows give the children's partitions.
 - Exports are outputs only: no step reads them, in their own stream or another.
 
-### Removed keys
-
-Keys of earlier versions of the format are errors, each with a hint:
-
-| Removed | Use instead |
-|---|---|
-| `request` | `requests` with one named item |
-| stream-level `select`, `raw: true` | `transform` steps; for the records as returned, a step `SELECT record FROM <request>` |
-| stream-level `primary_key` | `primary_key` on the export |
-| stream-level `paginator`, `records` | `paginator` and `records` on the request item |
-| `transform_mode` | `transform.mode` |
-| `export: {}` (a stream that writes nothing) | at least one export |
-| a stream without `requests` (SQL over other streams' exports) | joins across streams in the warehouse ([Across streams](#across-streams)) |
-| top-level `models`, a `models/` folder | `transform` steps in a stream |
-| `fields`, `on_record_error` | `transform` steps; `TRY_CAST` for values that may not convert |
-
 ### Errors, retries and rate limits
 
 `retry` (`codes`: status codes or provider error codes, `max_attempts`, `backoff`, `max_delay`) and `rate_limit`
-(`requests` per period) are set in `http` or per stream. SDK connectors map their errors onto the same policy: an error
+(`requests` per period) are set in the source's `policy:` or a stream's `policy:`. SDK connectors map their errors onto the same policy: an error
 carries every provider code it has (e.g. Google Ads error names and the gRPC status, a Graph API code and subcode),
 and it is retried when one of them is in the connector's `retry_codes` (declared in its spec and listed in
 its guide). A stream's `retry.codes` replace those defaults: then only the listed codes are
 retried (compared as text, so `613` and `"613"` match), and codeless failures such as a dropped connection are still
-retried. A streamed SDK response that fails after records were read is not retried. The `rate_limit` in `http` is shared by all of the
-source's streams; a stream's own `rate_limit` replaces it for that stream. A stream's `timeout` (seconds, or a
-duration like `30s`) bounds each HTTP call.
+retried. A streamed SDK response that fails after records were read is not retried. The source's `policy.rate_limit` is shared by all of the
+source's streams; a stream's own `policy.rate_limit` replaces it for that stream. A stream's `policy.timeout` (seconds,
+or a duration like `30s`) bounds each HTTP call.
 
-This is the one *execution policy* vocabulary of connector contract v1.2 §6a — `retry`, `rate_limit`,
-`paginator`, `on_error` and `timeout` mean the same on a source stream, a DuckDBJob/SparkJob step and an output,
-with identical defaults. When retries run out the stream fails, unless the stream tolerates the error:
+This is the one *execution policy* vocabulary of connector contract v1.2 §6a, written in a `policy:` group everywhere
+— `retry`, `rate_limit`, `on_error` and `timeout` mean the same on a source stream, a DuckDBJob/SparkJob step and an
+output, with identical defaults. When retries run out the stream fails, unless the stream tolerates the error:
 
 - `on_error: skip` (the released alias `on_partition_error: skip` keeps working) — the failing partition is skipped
   and the stream is reported incomplete (see [Execution semantics](#execution-semantics));
@@ -1649,7 +1645,7 @@ For an incomplete full-refresh stream, DuckDB, DuckLake and dlt keep the last co
 | Legacy | Source format |
 |---|---|
 | `authorization` file, `initializer` + `callable` | `auth` block (built-in type or connector provider) |
-| connector `client` (`from_authorizer`, `instance`) | a request's `sdk` or `http` |
+| connector `client` (`from_authorizer`, `instance`) | a request's `operation` |
 | `method` + `arguments` | a `requests` item |
 | `query_builder` + `sql_filter` + `format_as` | a query builder component, e.g. `gaql` with typed `where` items |
 | `external_input` / `auth_input` | `{{ config.x }}` / `{{ secrets.x }}`, declared in `spec`; `$x` in SQL steps |
@@ -1715,7 +1711,7 @@ by hand, and custom `callable` / `instance` usage becomes a component.
    one transaction. Transform exports use the same table shape.
 8. Done (2026-10-04): one stream form and self-contained streams; cross-stream SQL removed (tag
    transform-cross-stream). Every stream has named `requests`, `transform: {mode, steps}` and at least one `export`,
-   and the keys of the other forms are errors with a hint ([Removed keys](#removed-keys)). Steps read only their own
+   and the keys of the other forms are unknown keys. Steps read only their own
    stream's requests and earlier steps (decision 11), so the `daily_report` streams were removed: their joins belong
    in the warehouse. Steps read config values as `$name` parameters (decision 15), and `--file-name` names output
    files (decision 16). The examples keep their columns and keys.
@@ -1724,7 +1720,7 @@ by hand, and custom `callable` / `instance` usage becomes a component.
    loggers and mask the tokens their SDKs get. Tests run full network logging with known secrets and tokens and check
    that none is logged.
 10. Done (2026-10-05): file, object storage and database sources as reader connectors (decisions 21 and 22), with
-    `sdk` requests and no change to the core: `files` (`streamwright-files`) reads local files, by a glob or a `match`
+    calls (`operation:`) and no change to the core: `files` (`streamwright-files`) reads local files, by a glob or a `match`
     regex; `s3` (`streamwright-s3`) and `gcs` (`streamwright-gcs`) read object storage through `httpfs`; and `postgres`
     (`streamwright-postgres`) runs read-only queries. A first version read object storage in `files` too; it was split
     the same day, so `files` never reaches the network, and no `https` reader was kept. The examples `files_demo`
@@ -1752,7 +1748,7 @@ starts.
 | 6 | Legacy kinds | One format: remove them once the runtime runs the four example sources (decided later on 2026-10-03, replacing "keep the v1 pipeline kind") | Nobody depends on them yet; one format halves the docs, checks and tests |
 | 7 | Loading into warehouses | dlt as an optional loader (`streamwright[dlt]`, `--output dlt:...`), not a rebuild of the runtime on dlt (decided later on 2026-10-03) | dlt brings destinations, merges and schema evolution; its `rest_api` covers neither SDK APIs nor async reports, its Python configs are not a safe customer contract, and it needs Python 3.10+ |
 | 8 | Per-client settings | A `--config` file per client and source (`config` values and the `streams` to run), never secrets; secrets come from a secret store at run time (decided later on 2026-10-03) | One source folder serves every client, so clients differ only in data that a platform can store, generate and review |
-| 9 | Query builders | Components in the `streamwright.query_builders` entry-point group, usable from `http` and `sdk` requests; `gaql` ships with streamwright-google-ads, and `sql_where` (unused) is removed. `streamwright validate` checks the references inside builder calls; `streamwright validate` and `streamwright run` add the builders' own checks (decided later on 2026-10-03, replacing built-in `gaql` / `sql_where`) | A query language is vendor knowledge: in the core, every change to it needed a core release, and each new vendor would add its own. As components, each builder evolves with its connector, HTTP sources can use them too (e.g. a SOQL builder), and the core keeps only what every builder shares: finding calls, rendering typed values and allow-lists |
+| 9 | Query builders | Components in the `streamwright.query_builders` entry-point group, usable from requests' operations; `gaql` ships with streamwright-google-ads, and `sql_where` (unused) is removed. `streamwright validate` checks the references inside builder calls; `streamwright validate` and `streamwright run` add the builders' own checks (decided later on 2026-10-03, replacing built-in `gaql` / `sql_where`) | A query language is vendor knowledge: in the core, every change to it needed a core release, and each new vendor would add its own. As components, each builder evolves with its connector, HTTP sources can use them too (e.g. a SOQL builder), and the core keeps only what every builder shares: finding calls, rendering typed values and allow-lists |
 | 10 | SQL shaping | SQL `transform` steps, DuckDB queries over the stream's request tables, are how a stream shapes its records; the records as returned are a step `SELECT record FROM <request>`. `fields`, the YAML field list SQL replaced, is removed (its last version is the git tag `fields-dsl`), and DuckDB is a dependency of streamwright (decided later on 2026-10-03; `fields` removed on 2026-10-04; the stream-level `select` and `raw: true` replaced by steps later on 2026-10-04) | Customers write standard SQL instead of learning a transform language, with all of DuckDB's functions. It is fast (one query per page, inputs loaded as one JSON array), typed statically (`DESCRIBE` gives the columns before any data) and safe to host (inputs are columns and bound parameters, never SQL text; DuckDB runs locked down). One way to shape records halves the docs, checks and tests |
 | 11 | Chained transformations | Steps within one stream: a stream has named `requests`, named SQL `transform` steps (each a table for later steps, `mode: page` or `run`) and named `export`s, and a step reads only its own stream's request tables and earlier steps. Joins across streams or sources and totals over full history run in the warehouse after loading (decided on 2026-10-04: models were replaced that day by transform streams whose steps also read other streams' exports, and those cross-stream reads, transform-only streams and internal streams were removed later that day; the git tag `transform-cross-stream` has them) | A stream's output depends only on what it read, so each stream is selected, scheduled, retried and checked on its own, with its own state; no stream waits for, holds back or skips another. Data an API gives in several calls (an account's campaigns and their ad groups) still joins in one stream with several requests. The warehouse has every run's rows, so joins and totals there are complete, where a run sees only the days it read |
 | 12 | Python and DuckDB versions | Python 3.10+ for streamwright and the connectors, with DuckDB 1.5.2+ (decided on 2026-10-04, replacing 3.9+ and DuckDB 1.4+) | Python 3.9 is past its end of life; DuckDB 1.4, the newest for 3.9, could not spill a run's tables to disk in a test where 1.5 did; dlt and DuckLake need them anyway |
@@ -1765,6 +1761,6 @@ starts.
 | 19 | Progress and run summary | `streamwright.source` logs each stream's start and end, each window or partition read, reads that keep paging (every 30 seconds or 100 pages) and the run's end; `--summary FILE` writes the run summary as JSON (status, times, each stream's counts, the outputs written, the state and the error), atomically, whatever the outcome. The counts come from one metrics object per run, fed by the runner, the HTTP client and the connector context (decided on 2026-10-04) | Long runs show that they are moving, and where; schedulers get the outcome and the counts without parsing logs. One metrics object, without global state, keeps the log lines and the summary in agreement and is simple to test |
 | 20 | Batched request partitions | `batch_size: N` on a request partition (`{name, values}`, `{name, from, field}`, or `{from, fields}` with exactly one field that is not a stream partition): one request per list of up to `N` distinct values, which the name holds, e.g. GAQL `campaign.id IN (...)`; a step's values in a partitioned stream are batched only with `{from, fields}` listing the stream partition fields, so each stream partition lists only its own; not on stream partitions, and windows and state stay per stream partition. `streamwright connectors` lists only the installed connectors and their SDK loggers; query builders such as `gaql` are still used and checked by `streamwright validate` (decided on 2026-10-05) | APIs that filter by a list read a large account in a few calls (1000 campaigns' ad groups in 5 GAQL queries, not 1000), within the query's limits, without a new request type. Stream partitions stay single values, so bookmarks do not change. `streamwright connectors` answers which connectors and SDK loggers are installed |
 | 21 | File and object storage sources | Files and objects are read by reader connectors, not a request kind of the core, one connector per kind of storage: `files` (`streamwright-files`) reads local folders only (`auth: {provider: files, roots: [...]}`; no URLs, no `httpfs`, no credentials, external access always off), and `s3` (`streamwright-s3`) and `gcs` (`streamwright-gcs`) read `s3://` and `gs://` prefixes through DuckDB's `httpfs` (`auth: {provider: s3, roots, key_id, secret, ...}`, or `provider: gcs`; credentials from secrets only). Requests (`method: read`) read csv, tsv, json, jsonl and parquet with DuckDB's readers, each row one record, picked by a path, a glob or a list, or by a `match` regex fully matched below a folder (`recursive` for sub-folders). Every path, and every file or key a glob, a regex or a listing selects, is checked inside a root before anything is read; `s3` and `gcs` refuse any `?` or `%` in a URL and check scheme, bucket and prefix exactly. There is no `https` reader (decided on 2026-10-05, replacing a first version in which `files` also read `s3://`, `gs://` and `https://` roots with credentials blocks) | A connector keeps the core unchanged and each reader optional, allow-listed (`--allow-connector files`) and versioned like the ad APIs, and partitions, windows, `batch_size`, retries and steps work as they are. Split connectors keep local reading free of network access and credentials, and give each object store only its own scheme and settings. DuckDB already shapes records, reads every format and streams large files in bounded memory; refusing `?` and `%` closes httpfs' URL settings (`?s3_endpoint=` would send signed requests to another host), and the roots in `auth` give deployments one place to decide what can be read. A regex picks files a glob cannot (date folders, no `_SUCCESS` markers) |
-| 22 | Database sources | PostgreSQL is read by the `postgres` connector (`streamwright-postgres`), not a request kind of the core: `auth: {provider: postgres, dsn: "{{ secrets.* }}"}` and `sdk: postgres` requests, `method: query` (one SELECT in DuckDB's SQL over the attached database, with `$name` values bound from `params`) or `method: table`. The database is attached `READ_ONLY` through DuckDB's postgres scanner and a temporary DuckDB secret holding the DSN; write keywords, other statements, functions that run text of their own and DuckDB's system and catalog views (`duckdb_*`, `pragma_*`, `system`, `pg_catalog`, `information_schema`, `SHOW`, `DESCRIBE`, `SUMMARIZE`) are refused before a query runs, and an unconstrained `numeric` is read as exact text (decided on 2026-10-05) | The same connector model as files and the ad APIs, with no new driver: DuckDB's scanner pushes filters down, pages large results and binds values, a list included (`= ANY($ids)` for `batch_size`). Read-only is enforced three times (the query check, the attach and a locked connection), so a write fails even when the role could write. Attaching through a secret keeps the DSN out of DuckDB's views, and refusing them keeps queries to the database's own tables; the DSN stays a redacted secret |
+| 22 | Database sources | PostgreSQL is read by the `postgres` connector (`streamwright-postgres`), not a request kind of the core: `auth: {provider: postgres, dsn: "{{ secrets.* }}"}` and calls, `method: query` (one SELECT in DuckDB's SQL over the attached database, with `$name` values bound from `params`) or `method: table`. The database is attached `READ_ONLY` through DuckDB's postgres scanner and a temporary DuckDB secret holding the DSN; write keywords, other statements, functions that run text of their own and DuckDB's system and catalog views (`duckdb_*`, `pragma_*`, `system`, `pg_catalog`, `information_schema`, `SHOW`, `DESCRIBE`, `SUMMARIZE`) are refused before a query runs, and an unconstrained `numeric` is read as exact text (decided on 2026-10-05) | The same connector model as files and the ad APIs, with no new driver: DuckDB's scanner pushes filters down, pages large results and binds values, a list included (`= ANY($ids)` for `batch_size`). Read-only is enforced three times (the query check, the attach and a locked connection), so a write fails even when the role could write. Attaching through a secret keeps the DSN out of DuckDB's views, and refusing them keeps queries to the database's own tables; the DSN stays a redacted secret |
 | 23 | Python and DuckDB versions (replaces 12) | Python 3.11+ for streamwright, the connectors, Spark and MCP, with DuckDB 2.0 (`duckdb>=2.0,<2.1`) (decided on 2026-11-02) | The engines are developed and tested on DuckDB 2.0, which needs Python 3.11; a range down to 1.5 let Python 3.10 install an untested DuckDB whose parser and option names differ |
 {% endraw %}

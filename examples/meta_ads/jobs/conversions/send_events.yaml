@@ -1,0 +1,108 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# Sends in-store purchases (a row per order, given with --input) to a Meta pixel (dataset) through the Conversions API,
+# as Purchase events with action_source physical_store. The customer's email and phone are normalized and SHA-256
+# hashed in SQL, so no plain contact detail leaves the job.
+#
+#   mkdir -p examples/meta_ads/.streamwright                  # once: the state folder (git-ignored)
+#   # a test run: the events show in Events Manager > Test Events, under the code, and are not counted
+#   streamwright duckdb run examples/meta_ads/jobs/conversions/send_events.yaml \
+#     --input examples/meta_ads/payloads/conversions/events.json \
+#     --set pixel_id=PIXEL_ID --set test_event_code=TEST12345 \
+#     --secrets ~/.streamwright/meta-ads-secrets.yaml --apply-state-migrations --summary
+#   # send them: drop test_event_code
+#
+# Shown here:
+#   - the rows become server events in SQL: event_time in Unix seconds, user_data and custom_data as structs
+#     (sent as JSON objects; a NULL field is left out), the email trimmed, lower-cased and hashed with sha256();
+#   - one call per chunk of up to 1000 events (the operation's most); Meta accepts or rejects the call as a whole;
+#   - once sent, the output's `log:` logs the rows Meta rejected, with its reason.
+# Meta deduplicates events on event_name and event_id, so a row sent again is not counted twice. A physical_store
+# event may be up to 62 days old; the payload's purchases are placeholders.
+kind: DuckDBJob
+version: 1
+name: meta_ads_conversions_send_events
+description: In-store purchases sent to a Meta pixel as Conversions API events, with hashed customer data
+
+spec:
+  config:
+    pixel_id: {type: string, required: true, pattern: "^[0-9]+$", description: "the pixel (dataset) id"}
+    test_event_code: {type: string, default: "", description: "Events Manager's test code: events shown, not counted"}
+  secrets:
+    access_token: {type: string, required: true}
+  input:
+    columns:
+      order_id: {type: string, required: true, max_length: 100}                 # the event_id: Meta deduplicates on it
+      email: {type: string, required: true, max_length: 320}
+      phone: {type: string, max_length: 40}                                      # any format: digits are kept
+      purchased_at: {type: string, required: true,                               # ISO 8601 with an offset
+                     pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}$"}
+      value: {type: number, required: true, minimum: 0}
+      currency: {type: string, required: true, pattern: "^[A-Z]{3}$"}
+    max_rows: 10000
+
+connections:
+  meta:
+    provider: meta_ads
+    access_token: "{{ secrets.access_token }}"
+
+steps:
+  # the server events; columns are the event's fields (Meta's server event parameters)
+  - name: events
+    sql: |
+      SELECT 'Purchase' AS event_name,
+             epoch(purchased_at::TIMESTAMPTZ)::BIGINT AS event_time,
+             'physical_store' AS action_source,
+             order_id AS event_id,
+             {'em': [sha256(lower(trim(email)))],
+              'ph': CASE WHEN phone IS NULL THEN NULL
+                         ELSE [sha256(regexp_replace(phone, '[^0-9]', '', 'g'))] END} AS user_data,
+             {'currency': currency, 'value': value::DOUBLE, 'order_id': order_id} AS custom_data
+      FROM input
+
+outputs:
+  - name: send
+    connection: meta
+    step: events
+    operation:
+      service: AdsPixel
+      method: create_event
+      arguments:
+        id: "{{ config.pixel_id }}"
+        params:
+          test_event_code: "{{ config.test_event_code }}"     # empty: left out (the events count)
+    apply:
+      nulls: skip_field           # no phone: the field is left out
+      on_row_error: continue      # a rejected call fails its rows (logged below; `state show` keeps them too)
+    policy:
+      retry: {max_attempts: 5, backoff: exponential}
+    # once the rows are sent: a line per rejected event, from the results (the table `send`: the columns above, and
+    # outcome.status, outcome.error_code, outcome.error_message, outcome.result, outcome.row)
+    log:
+      sql: |
+        SELECT outcome.row AS row, event_id, outcome.error_code AS code, outcome.error_message AS error
+        FROM send
+        WHERE outcome.status = 'failed'
+        ORDER BY outcome.row
+      message: "row {row}: event {event_id} rejected: {code}: {error}"
+      level: warning
+      max_rows: 50
+
+runtime:
+  state:
+    sqlite: ../../.streamwright/meta_ads_conversions_send_events.state.db
+    scope: "pixel:{{ config.pixel_id }}"

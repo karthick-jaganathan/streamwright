@@ -1,0 +1,8 @@
+[
+  {"MicrosoftClickId": "EXAMPLE_MSCLKID_0001", "ConversionName": "Offline qualified lead", "ConversionTime": "2026-01-31T14:07:00Z"},
+  {"MicrosoftClickId": "EXAMPLE_MSCLKID_0002", "ConversionName": "Offline purchase", "ConversionTime": "2026-01-31T14:14:00Z", "ConversionValue": 16.5, "ConversionCurrencyCode": "USD"},
+  {"MicrosoftClickId": "EXAMPLE_MSCLKID_0003", "ConversionName": "Offline qualified lead", "ConversionTime": "2026-01-31T14:21:00Z"},
+  {"MicrosoftClickId": "EXAMPLE_MSCLKID_0004", "ConversionName": "Offline purchase", "ConversionTime": "2026-01-31T14:28:00Z", "ConversionValue": 42.0, "ConversionCurrencyCode": "USD"},
+  {"MicrosoftClickId": "EXAMPLE_MSCLKID_0005", "ConversionName": "Offline purchase", "ConversionTime": "2026-01-31T14:35:00Z", "ConversionValue": 8.25, "ConversionCurrencyCode": "USD"},
+  {"MicrosoftClickId": "EXAMPLE_MSCLKID_0006", "ConversionName": "No such goal", "ConversionTime": "2026-01-31T14:42:00Z"}
+]

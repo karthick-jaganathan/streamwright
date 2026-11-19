@@ -24,7 +24,7 @@ from types import MappingProxyType
 import pytest
 
 from streamwright.connectors.s3 import CONNECTOR, client
-from streamwright.core.io.file_rules import DUCKDB_CAPABILITIES, ENGINE_CAPABILITIES, SOURCE_CAPABILITIES
+from streamwright.core.io.file_rules import FILE_DUCKDB_CAPABILITIES, FILE_ENGINE_CAPABILITIES, FILE_SOURCE_CAPABILITIES
 from streamwright.core.io.locations import secret_parameters
 from streamwright.core.sdk.contract import (
     InvalidConnectionError,
@@ -101,29 +101,29 @@ def test_optional_endpoint_overrides_are_omitted_when_their_config_is_unset():
 
 def test_the_spec_uses_the_catalog_operations():
     assert [operation.name for operation in CONNECTOR.operations] == ["object.read", "object.write"]
-    assert [operation.name for operation in CONNECTOR.operations_for(SOURCE_CAPABILITIES)] == ["object.read"]
+    assert [operation.name for operation in CONNECTOR.operations_for(FILE_SOURCE_CAPABILITIES)] == ["object.read"]
 
 
 def test_arguments_are_checked_against_each_engines_capabilities():
     read, write = CONNECTOR.operation("object", "read"), CONNECTOR.operation("object", "write")
-    assert check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, SOURCE_CAPABILITIES) == []
-    unsupported = check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, DUCKDB_CAPABILITIES)
+    assert check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, FILE_SOURCE_CAPABILITIES) == []
+    unsupported = check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, FILE_DUCKDB_CAPABILITIES)
     assert codes(unsupported) == [("unsupported-argument", "arguments.match")]
     assert unsupported[0].message == "`match` is not supported by the duckdb engine"
-    assert codes(check_arguments(CONNECTOR, read, {"path": "a.csv", "row_errors": True}, SOURCE_CAPABILITIES)) == [
+    assert codes(check_arguments(CONNECTOR, read, {"path": "a.csv", "row_errors": True}, FILE_SOURCE_CAPABILITIES)) == [
         ("unsupported-argument", "arguments.row_errors")]
     # an undeclared argument is a vendor option now (forwarded to DuckDB's reader), not an unknown-key error
-    assert check_arguments(CONNECTOR, read, {"path": "a.csv", "bucket": "x"}, SOURCE_CAPABILITIES) == []
+    assert check_arguments(CONNECTOR, read, {"path": "a.csv", "bucket": "x"}, FILE_SOURCE_CAPABILITIES) == []
     assert codes(check_arguments(CONNECTOR, read, {"path": ["a.csv", "b.csv?x=1"], "format": "xlsx"})) == [
         ("bad-value", "arguments.path"), ("bad-value", "arguments.format")]
     assert codes(check_arguments(CONNECTOR, read, {"path": "{{ secrets.x }}"})) == [
         ("secret-placement", "arguments.path")]
-    assert codes(check_arguments(CONNECTOR, write, {"path": "out/", "format": "csv"}, SOURCE_CAPABILITIES)) == [
+    assert codes(check_arguments(CONNECTOR, write, {"path": "out/", "format": "csv"}, FILE_SOURCE_CAPABILITIES)) == [
         ("unsupported-operation", "")]
     assert check_arguments(CONNECTOR, write, {"path": "out/", "format": "tsv", "mode": "overwrite"},
-                           DUCKDB_CAPABILITIES) == []
+                           FILE_DUCKDB_CAPABILITIES) == []
     append = check_arguments(CONNECTOR, write, {"path": "out/", "format": "jsonl", "mode": "append"},
-                             DUCKDB_CAPABILITIES)
+                             FILE_DUCKDB_CAPABILITIES)
     assert codes(append) == [("unsupported-choice", "arguments.mode")]
     assert append[0].message.startswith("`mode: append` is not supported by the duckdb engine")
 
@@ -131,20 +131,20 @@ def test_arguments_are_checked_against_each_engines_capabilities():
 def test_the_engines_semantic_checks_run_after_the_declared_ones():
     read = CONNECTOR.operation("object", "read")
     assert [issue.message for issue in check_arguments(CONNECTOR, read, {"path": "in/", "recursive": True},
-                                                       SOURCE_CAPABILITIES)] == [
+                                                       FILE_SOURCE_CAPABILITIES)] == [
         "`recursive` goes with `match` (the folder to look in is `path`)"]
     write = CONNECTOR.operation("object", "write")
     assert codes(check_arguments(CONNECTOR, write, {"path": "out/", "format": "csv", "split_by": ["day"]},
-                                 DUCKDB_CAPABILITIES)) == [("bad-value", "arguments")]
+                                 FILE_DUCKDB_CAPABILITIES)) == [("bad-value", "arguments")]
 
 
 def test_each_engines_schema_holds_only_what_it_supports():
     write = CONNECTOR.operation("object", "write")
-    duckdb = write.json_schema(DUCKDB_CAPABILITIES)["properties"]
+    duckdb = write.json_schema(FILE_DUCKDB_CAPABILITIES)["properties"]
     assert "single_file" not in duckdb and "partition_by" in duckdb
     assert duckdb["mode"]["anyOf"][0]["enum"] == ["error", "overwrite"]
     assert set(write.json_schema()["properties"]) == {argument.name for argument in write.arguments}
-    described = CONNECTOR.describe(*ENGINE_CAPABILITIES)["capabilities"]
+    described = CONNECTOR.describe(*FILE_ENGINE_CAPABILITIES)["capabilities"]
     assert sorted(described) == ["duckdb", "source"] and list(described["source"]) == ["object.read"]
     assert described["duckdb"]["object.write"]["mode"] == ["error", "overwrite"]
 
@@ -156,7 +156,7 @@ def test_the_connection_schema_declares_secret_fields_as_references():
 
 
 def test_the_guide_has_its_sections_and_tables_generated_from_the_spec():
-    text = guide_text(CONNECTOR, "streamwright.connectors.s3", ENGINE_CAPABILITIES)
+    text = guide_text(CONNECTOR, "streamwright.connectors.s3", FILE_ENGINE_CAPABILITIES)
     assert [line for line in text.splitlines() if line.startswith("## ")] == [
         "## Connection", "## Operations", "## Engines"]
     assert "| `use_ssl` | boolean | default `true` |" in text

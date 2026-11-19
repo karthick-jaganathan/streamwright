@@ -22,7 +22,7 @@ import os
 
 from streamwright.core.config.inputs import InputError
 from streamwright.core.runtime.templates import TemplateError, expressions, render, to_text
-from streamwright.core.validation.schema import split_outside_quotes
+from streamwright.core.runtime.text import split_outside_quotes
 
 # what --file-name can use: {{ export }}, {{ source }}, {{ today }}, {{ timestamp }} and {{ config.NAME }}
 FILE_NAME_SCOPES = ("export", "source", "today", "timestamp", "format")

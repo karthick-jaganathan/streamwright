@@ -117,6 +117,6 @@ The vocabulary (keys, types, enums) is in validation.vocabulary, the JSON Schema
 """
 
 from streamwright.core.validation.json_schemas import json_schema, stream_json_schema
-from streamwright.core.validation.vocabulary import KIND, SUPPORTED_VERSIONS, VERSION, split_outside_quotes
+from streamwright.core.validation.vocabulary import KIND, SUPPORTED_VERSIONS, VERSION
 
-__all__ = ["KIND", "SUPPORTED_VERSIONS", "VERSION", "json_schema", "split_outside_quotes", "stream_json_schema"]
+__all__ = ["KIND", "SUPPORTED_VERSIONS", "VERSION", "json_schema", "stream_json_schema"]

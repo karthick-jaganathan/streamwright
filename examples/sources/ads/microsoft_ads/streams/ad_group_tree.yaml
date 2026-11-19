@@ -19,24 +19,24 @@ partitions:
   - {name: account_id, values: "{{ config.account_ids }}"}
 requests:
   - name: raw_campaigns
-    sdk: microsoft_ads
-    service: CampaignManagementService
-    method: GetCampaignsByAccountId
-    arguments:
-      request:
-        AccountId: "{{ partition.account_id }}"
-        CampaignType: [Search, Shopping, DynamicSearchAds, Audience, PerformanceMax]
-    records: {path: Campaign}
+    operation:
+      service: CampaignManagementService
+      method: GetCampaignsByAccountId
+      arguments:
+        request:
+          AccountId: "{{ partition.account_id }}"
+          CampaignType: [Search, Shopping, DynamicSearchAds, Audience, PerformanceMax]
+      records: {path: Campaign}
   - name: raw_ad_groups
     partitions:
       - {from: campaign_rows, fields: [account_id, campaign_id]}   # account_id: this account's campaigns only
-    sdk: microsoft_ads
-    service: CampaignManagementService
-    method: GetAdGroupsByCampaignId
-    arguments:
-      account_id: "{{ partition.account_id }}"
-      request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
-    records: {path: AdGroup}
+    operation:
+      service: CampaignManagementService
+      method: GetAdGroupsByCampaignId
+      arguments:
+        account_id: "{{ partition.account_id }}"
+        request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
+      records: {path: AdGroup}
 transform:
   mode: run                        # two requests, the second partitioned by a step: in dependency order
   steps:

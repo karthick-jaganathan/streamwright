@@ -15,7 +15,7 @@
 # * limitations under the License.
 # **************************************************************************/
 
-"""The microsoft_ads spec: certified, read-only, and the connection and call arguments it takes."""
+"""The microsoft_ads spec: certified, its read and apply operations, and the connection and call arguments."""
 
 from types import MappingProxyType
 
@@ -24,7 +24,13 @@ from bingads.exceptions import OAuthTokenRequestException
 
 from streamwright.connectors.microsoft_ads import CONNECTOR, client
 from streamwright.core.runtime.source_connectors import check_call
-from streamwright.core.sdk.contract import InvalidConnectionError, check_arguments, check_connection, resolve_values
+from streamwright.core.sdk.contract import (
+    InvalidConnectionError,
+    OperationKind,
+    check_arguments,
+    check_connection,
+    resolve_values,
+)
 from streamwright.core.sdk.engines.source import ConnectorContext
 from streamwright.core.sdk.testing import certify, components, load_source
 
@@ -58,12 +64,20 @@ def test_the_environment_is_production_by_default_or_sandbox():
 
 
 def test_reads_are_families_and_the_installed_wsdl_decides_which_operations_exist():
-    names = {operation.name for operation in CONNECTOR.operations}
-    assert names == {"*Service.Get*", "*Service.Search*", "*Service.Find*",
+    reads = {operation.name for operation in CONNECTOR.operations if operation.kind == OperationKind.READ}
+    assert reads == {"*Service.Get*", "*Service.Search*", "*Service.Find*",
                      "ReportingService.SubmitGenerateReport", "ReportingService.PollGenerateReport"}
-    assert not [name for name in names if ".Delete" in name or ".Update" in name or ".Add" in name]
+    applies = {operation.name: (operation.idempotent, operation.actions, operation.destructive_actions)
+               for operation in CONNECTOR.operations if operation.kind == OperationKind.APPLY}
+    assert applies["*Service.Add*"] == (False, ("create",), ())
+    assert applies["*Service.Delete*"] == (True, ("remove",), ("remove",))
+    assert applies["CampaignManagementService.Apply*Conversion*"] == (True, ("upload",), ())
+    upload = CONNECTOR.operation("CampaignManagementService", "ApplyOnlineConversionAdjustments")
+    assert (upload.idempotent, upload.actions, upload.max_chunk) == (True, ("upload",), 1000)
+    # other Apply* methods (customer lists, listing groups) are not conversion uploads: no apply operation
+    assert CONNECTOR.operation("CampaignManagementService", "ApplyCustomerListItems") is None
     connector = components.load("microsoft_ads")
-    # a mutation matches no read family, so it is refused before the SDK is even consulted
+    # a mutation is an apply operation (job outputs only), so a stream's request refuses it before the SDK is consulted
     (problem,) = check_call(connector, {"service": "CampaignManagementService", "method": "DeleteCampaigns"})
     assert problem.startswith("microsoft_ads: CampaignManagementService.DeleteCampaigns is not supported (supported: ")
     # a read of any service is allowed by policy; the installed bingads WSDL decides at run time whether it exists

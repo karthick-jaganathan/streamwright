@@ -1,0 +1,133 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# Creates Google Ads campaigns from a list (given with --input); a campaign whose name the account already has is
+# left alone and logged. Each campaign needs its own (non-shared) budget: give its resource name.
+#
+#   mkdir -p examples/google_ads/.streamwright                # once: the state folder (git-ignored)
+#   streamwright duckdb run examples/google_ads/jobs/campaigns/create.yaml \
+#     --input examples/google_ads/payloads/campaigns/create.json \
+#     --set customer_id=CUSTOMER_ID --set login_customer_id=MANAGER_ID --set validate_only=true \
+#     --secrets ~/.streamwright/google-ads-secrets.yaml --apply-state-migrations --summary
+#   # create them: drop validate_only; the output's log: logs each new campaign's resource name
+kind: DuckDBJob
+version: 1
+name: google_ads_campaigns_create
+description: Google Ads campaigns created from a list, those the account already has (by name) left alone
+
+spec:
+  config:
+    customer_id: {type: string, required: true, pattern: "^[0-9]{10}$", description: "the account (10 digits)"}
+    login_customer_id: {type: string, required: true, pattern: "^[0-9]{10}$", description: "the manager account"}
+    validate_only: {type: boolean, default: false, description: "true: Google checks the campaigns, creates none"}
+  secrets:
+    developer_token: {type: string, required: true}
+    client_id: {type: string, required: true}
+    client_secret: {type: string, required: true}
+    refresh_token: {type: string, required: true}
+  input:
+    columns:
+      name: {type: string, required: true, max_length: 255}
+      status: {type: string, enum: [ENABLED, PAUSED]}                                    # default PAUSED
+      advertising_channel_type: {type: string, enum: [SEARCH, DISPLAY]}                 # default SEARCH
+      campaign_budget: {type: string, required: true, pattern: "^customers/[0-9]+/campaignBudgets/[0-9]+$",
+                        description: "the campaign's own budget, e.g. customers/1234567890/campaignBudgets/111"}
+      bidding_strategy: {type: string, enum: [MANUAL_CPC, MAXIMIZE_CLICKS]}             # default MANUAL_CPC
+      max_cpc_micros: {type: integer, minimum: 10000,                                   # MAXIMIZE_CLICKS only
+                       description: "the most a click may cost, in micros (1000000 = 1 unit of the currency)"}
+      contains_eu_political_advertising: {type: boolean}                                # default false
+      target_google_search: {type: boolean}
+      target_search_network: {type: boolean}
+      target_content_network: {type: boolean}
+    max_rows: 1000
+
+connections:
+  ads:
+    provider: google_ads
+    developer_token: "{{ secrets.developer_token }}"
+    client_id: "{{ secrets.client_id }}"
+    client_secret: "{{ secrets.client_secret }}"
+    refresh_token: "{{ secrets.refresh_token }}"
+    login_customer_id: "{{ config.login_customer_id }}"
+
+steps:
+  # the account's campaigns, by name
+  - name: existing_campaigns
+    connection: ads
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ config.customer_id }}"
+        query: {gaql: {select: [campaign.id, campaign.name], from: campaign}}
+    sql: |
+      SELECT record->>'$.campaign.name' AS name, record->>'$.campaign.id' AS id
+      FROM records
+
+  - name: skipped_campaigns
+    sql: SELECT i.name, e.id FROM input AS i JOIN existing_campaigns AS e USING (name)
+    log:
+      message: "campaign {name} already exists (id {id}): not created"
+      max_rows: 50
+
+  # the campaigns to create; columns are Campaign field paths, `op` the row's action
+  - name: new_campaigns
+    sql: |
+      SELECT
+        i.name                                                 AS "campaign.name",
+        coalesce(i.status, 'PAUSED')                           AS "campaign.status",
+        coalesce(i.advertising_channel_type, 'SEARCH')         AS "campaign.advertising_channel_type",
+        i.campaign_budget                                      AS "campaign.campaign_budget",
+        coalesce(i.target_google_search, true)                 AS "campaign.network_settings.target_google_search",
+        coalesce(i.target_search_network, false)               AS "campaign.network_settings.target_search_network",
+        coalesce(i.target_content_network, false)              AS "campaign.network_settings.target_content_network",
+        CASE WHEN coalesce(i.contains_eu_political_advertising, false)
+             THEN 'CONTAINS_EU_POLITICAL_ADVERTISING' ELSE 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING' END
+                                                               AS "campaign.contains_eu_political_advertising",
+        CASE WHEN coalesce(i.bidding_strategy, 'MANUAL_CPC') = 'MANUAL_CPC' THEN false END
+                                                               AS "campaign.manual_cpc.enhanced_cpc_enabled",
+        CASE WHEN i.bidding_strategy = 'MAXIMIZE_CLICKS' THEN coalesce(i.max_cpc_micros, 1000000) END
+                                                               AS "campaign.target_spend.cpc_bid_ceiling_micros",
+        'create'                                               AS op
+      FROM input AS i
+      ANTI JOIN existing_campaigns AS e USING (name)
+
+outputs:
+  - name: create_campaigns
+    connection: ads
+    step: new_campaigns
+    operation:
+      service: CampaignService
+      method: mutate_campaigns
+      arguments:
+        customer_id: "{{ config.customer_id }}"
+        validate_only: "{{ config.validate_only }}"
+        partial_failure: true
+    apply:
+      nulls: skip_field
+      on_row_error: fail
+      on_unknown: hold            # a call cut short is held: check the account, then `state resend` or `state skip`
+    log:
+      sql: |
+        SELECT "campaign.name" AS name, outcome.status AS status,
+               coalesce(outcome.result->>'$.resource_name', outcome.error_message, '') AS detail
+        FROM create_campaigns
+      message: "campaign {name}: {status} {detail}"
+
+runtime:
+  state:
+    sqlite: ../../.streamwright/google_ads_campaigns_create.state.db
+    scope: "customer:{{ config.customer_id }}"

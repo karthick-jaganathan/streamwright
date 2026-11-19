@@ -22,9 +22,11 @@ engine supplying how its state store is opened and what a retry does next. Every
 
     list     [--limit N] [--scope TEXT] [--json]   the newest batches
     status                                          the newest batch of the job's scope
-    show     JOB_ID                                  one batch: pinned manifest, lock tokens, metrics, receipts
+    show     JOB_ID                                  one batch: pinned manifest, lock tokens, metrics, receipts, outbox
     retry    JOB_ID [--no-run]                       retry a failed batch from the status it failed in
     abandon  JOB_ID                                  a batch is given up
+    resend   JOB_ID [--output NAME]                  apply rows with an unknown outcome are sent again by the next run
+    skip     JOB_ID [--output NAME]                  apply rows with an unknown outcome are marked failed
     leases   [--json]                                every lease token of the job
     purge    [--older-than 30d] [--scope TEXT]       terminal batches are deleted (sequences are kept)
     migrate  [--dry-run]                             the state tables are created or upgraded
@@ -40,27 +42,27 @@ from types import MappingProxyType
 from streamwright.core.cli.commands.state import check as check_migrations
 from streamwright.core.cli.commands.state import migrate as apply_migrations
 from streamwright.core.cli.help_format import DescriptionFormatter, sentence
-from streamwright.core.cli.jobs import add_job_inputs, add_lookup_exec_argument, add_renamed_option
+from streamwright.core.cli.jobs import add_job_inputs, add_lookup_exec_argument
 from streamwright.core.cli.log_options import log_defaults
 from streamwright.core.config.inputs import InputError, parse_duration
 from streamwright.core.jobs.locking import batch_tokens
 from streamwright.core.jobs.runner import owner_id
 
-__all__ = ["JOB_ID_ACTIONS", "add_state_commands", "job_id_from_job", "run_state_command"]
+__all__ = ["JOB_ID_ACTIONS", "add_state_commands", "job_id_from_job", "purge_age", "run_state_command"]
 
 SUCCESS, FAILURE = 0, 1
 _STATE_SECRETS_HELP = ("a YAML/JSON file of spec.secrets values (or STREAMWRIGHT_SECRET_<NAME> variables); only the "
                        "state connection's are needed")
 _RUN_SECRETS_HELP = ("a YAML/JSON file of spec.secrets values (or STREAMWRIGHT_SECRET_<NAME> variables): all of them, "
                      "since the job runs after the retry (--no-run: only the state connection's)")
-JOB_ID_ACTIONS = ("show", "retry", "abandon")
+JOB_ID_ACTIONS = ("show", "retry", "abandon", "resend", "skip")
 _PUBLIC_KEYS = MappingProxyType({"batch_id": "job_id", "batch_sequence": "sequence"})   # store keys -> output
 _NO_INITIALIZE = ("migrate", "check")    # these look at the tables as they are
 _LEASE_SECONDS = 60
 _LIST_COLUMNS = "%-*s %-10s %8s %8s  %-*s %-24s %8s  %s\n"
 
 
-def _age(text):
+def purge_age(text):
     """A purge age: days as a number (30), or a duration (30d, 12h)."""
     text = str(text).strip()
     try:
@@ -72,7 +74,6 @@ def _age(text):
 def _add_job_id(parser, what):
     parser.add_argument("job_id", nargs="?", metavar="JOB_ID",
                         help="the job id of the batch to %s, as `state list` shows it" % what)
-    add_renamed_option(parser, "--batch", "JOB_ID (a positional argument)")
 
 
 def _add_inputs(parser, secrets_help):
@@ -99,8 +100,12 @@ def _actions(retry_runs):
         if retry_runs:
             parser.add_argument("--no-run", action="store_true", help="mark the batch for retry, do not run the job")
 
+    def settle_options(parser, what):
+        _add_job_id(parser, what)
+        parser.add_argument("--output", metavar="NAME", help="only this apply output's rows (default: every output)")
+
     def purge_options(parser):
-        parser.add_argument("--older-than", type=_age, metavar="AGE",
+        parser.add_argument("--older-than", type=purge_age, metavar="AGE",
                             help="delete completed, abandoned and skipped batches last updated longer ago than this: "
                                  "days (30) or a duration (30d, 12h); default 30 days")
         parser.add_argument("--scope", metavar="TEXT", help="only this runtime.state.scope; default: every scope")
@@ -113,6 +118,11 @@ def _actions(retry_runs):
         ("retry", retry_help, retry_options),
         ("abandon", "give a batch up: its scope runs new batches again; what it wrote stays",
          lambda p: _add_job_id(p, "abandon")),
+        ("resend", "send an apply output's held rows again at the next run: a run stopped mid-call, their outcome "
+                   "is unknown and the operation is not idempotent; check the vendor first (they may be applied "
+                   "twice)", lambda p: settle_options(p, "resend")),
+        ("skip", "mark an apply output's held rows (unknown outcome) failed with UNKNOWN_OUTCOME: the next run "
+                 "carries on without them", lambda p: settle_options(p, "skip")),
         ("leases", "list every lease token of the job (scope:<scope> and lock tokens): owner, epoch, expiry",
          lambda p: p.add_argument("--json", action="store_true", help="the leases as a JSON list")),
         ("purge", "delete old completed, abandoned and skipped batches with their receipts (sequences are kept)",
@@ -210,7 +220,8 @@ def _show(store, job_name, batch):
         manifest["messages"] = "%d message(s)" % len(manifest["messages"])
     shown = dict(_public(batch), manifest=manifest,
                  receipts={name: _public(receipt)
-                           for name, receipt in store.get_receipts(job_name, batch["batch_id"]).items()})
+                           for name, receipt in store.get_receipts(job_name, batch["batch_id"]).items()},
+                 outbox=[_public(row) for row in store.list_events(job_name, batch["batch_id"])])
     sys.stdout.write(json.dumps(shown, indent=2, default=str, sort_keys=True) + "\n")
     return SUCCESS
 
@@ -221,7 +232,12 @@ def _change(store, job_name, batch, args, *, scope, retry_runs):
                          "scope (or --no-run to only mark it)" % (batch["batch_id"], batch["scope"], scope))
     lease = store.acquire_lease(job_name, owner_id(), _LEASE_SECONDS, tokens=batch_tokens(batch))
     try:
-        if args.state_command == "retry":
+        if args.state_command in ("resend", "skip"):
+            count = store.settle_in_flight_events(lease, batch["batch_id"], args.output,
+                                                  resend=args.state_command == "resend")
+            sys.stdout.write("%s: %d held row(s) %s\n" % (batch["batch_id"], count, "will be sent again"
+                             if args.state_command == "resend" else "marked failed (UNKNOWN_OUTCOME)"))
+        elif args.state_command == "retry":
             resumed = store.retry_batch(lease, batch["batch_id"])
             sys.stdout.write("%s resumes from %s (attempt %d)\n" % (batch["batch_id"], resumed,
                                                                    batch.get("attempts", 1) + 1))

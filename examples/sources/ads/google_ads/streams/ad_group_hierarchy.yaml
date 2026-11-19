@@ -19,31 +19,31 @@ partitions:
   - {name: customer_id, values: "{{ config.customer_ids }}"}
 requests:
   - name: raw_campaigns
-    sdk: google_ads
-    service: GoogleAdsService
-    method: search_stream
-    arguments:
-      customer_id: "{{ partition.customer_id }}"
-      query:
-        gaql:
-          select: [customer.id, campaign.id, campaign.name, campaign.status]
-          from: campaign
-          where:
-            - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ partition.customer_id }}"
+        query:
+          gaql:
+            select: [customer.id, campaign.id, campaign.name, campaign.status]
+            from: campaign
+            where:
+              - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
   - name: raw_ad_groups
     partitions:                    # campaign_ids: a list of up to 200 of this customer's campaign ids per query
       - {name: campaign_ids, from: raw_campaigns, field: campaign.id, batch_size: 200}
-    sdk: google_ads
-    service: GoogleAdsService
-    method: search_stream
-    arguments:
-      customer_id: "{{ partition.customer_id }}"
-      query:
-        gaql:
-          select: [customer.id, campaign.id, ad_group.id, ad_group.name, ad_group.status]
-          from: ad_group
-          where:
-            - {field: campaign.id, op: IN, type: int, value: "{{ partition.campaign_ids }}"}
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ partition.customer_id }}"
+        query:
+          gaql:
+            select: [customer.id, campaign.id, ad_group.id, ad_group.name, ad_group.status]
+            from: ad_group
+            where:
+              - {field: campaign.id, op: IN, type: int, value: "{{ partition.campaign_ids }}"}
 transform:
   mode: run                        # the ad group queries take their campaign ids from the campaign query
   steps:

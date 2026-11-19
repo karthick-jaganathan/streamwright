@@ -1,0 +1,5 @@
+[
+  {"name": "Example traffic campaign", "objective": "OUTCOME_TRAFFIC"},
+  {"name": "Example leads campaign", "objective": "OUTCOME_LEADS"},
+  {"name": "Example sales campaign", "objective": "OUTCOME_SALES", "daily_budget": 50000}
+]

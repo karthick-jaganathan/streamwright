@@ -18,8 +18,9 @@
 """Stream-level `partitions`: names, parents and partition sources."""
 
 
+from streamwright.core.runtime.text import suggest
 from streamwright.core.validation import vocabulary as spec
-from streamwright.core.validation.checker import describe, suggest
+from streamwright.core.validation.checker import describe
 from streamwright.core.validation.sections.stream_context import lower_name
 from streamwright.core.validation.sections.tables import TableSection
 

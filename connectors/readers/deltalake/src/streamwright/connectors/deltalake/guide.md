@@ -14,15 +14,30 @@ roots: ["s3://acme-lake/delta/"]             # required: references allowed, e.g
 aws_access_key_id: "{{ secrets.aws_key }}"   # credentials: secret references only
 aws_secret_access_key: "{{ secrets.aws_secret }}"
 aws_region: us-east-1
+# Google Cloud Storage (roots: ["gs://acme-lake/delta/"]): an HMAC key for DuckDB reads, a key file for delta-rs writes
+# gcs_hmac_key_id: "{{ secrets.gcs_hmac_key_id }}"
+# gcs_hmac_secret: "{{ secrets.gcs_hmac_secret }}"
+# gcs_key_file: /keys/lake-writer.json
 # SparkJob: the object-store connection whose credentials and settings reach the tables
 # storage: lake_s3
 ```
 
 - `roots` is required: the source engine's DuckDB sandbox is fail-closed (it reads only inside them:
   allowed_directories, external access off, configuration locked), and every path is checked against them first.
-- The S3 (`aws_*`, `s3_*`), GCS (`gcs_*`) and Azure (`azure_*`) keys reach DuckDB only as bound parameters of a
-  temporary secret scoped to the roots on their scheme, and delta-rs as storage options; credentials are `***` in
-  every log line and error (the account key inside an Azure connection string too).
+- The S3 (`aws_*`, `s3_*`), GCS HMAC (`gcs_hmac_*`) and Azure (`azure_*`) keys reach DuckDB only as bound parameters
+  of a temporary secret scoped to each root on their scheme, and the S3 and Azure keys reach delta-rs as storage
+  options (an Azure connection string as its account name, key, SAS and blob endpoint); credentials are `***` in every
+  log line and error (the account key inside an Azure connection string too).
+- Google Cloud Storage (`gs://` roots) takes a different credential per engine:
+
+  | Engine | GCS credential |
+  |---|---|
+  | source engine, DuckDBJob reads (DuckDB httpfs) | `gcs_hmac_key_id` + `gcs_hmac_secret`: an HMAC key, as a temporary `gcs` secret scoped to each `gs://` root |
+  | DuckDBJob writes (delta-rs) | `gcs_key_file` (a service account key file), else the environment's Google credentials; delta-rs has no HMAC key option |
+  | SparkJob | the `gcs` connection named by `storage` (its HMAC `key_id`/`secret`); the connection's own GCS keys are not used |
+
+  The HMAC key id and secret go together (secret references only). DuckDB has no service account key file setting, so
+  the source engine and DuckDBJob reads refuse a connection with `gcs_key_file` and no HMAC key.
 - Spark takes credentials from the object-store connection named by `storage` (s3, gcs, azure_blob, files) and ignores
   the connection's own storage keys; `schema`, `schema_location` and `schema_comment` are the defaults of the tables
   its writes register in the catalog.

@@ -19,8 +19,8 @@
 
 import re
 
+from streamwright.core.runtime.text import split_outside_quotes, suggest
 from streamwright.core.validation import vocabulary as spec
-from streamwright.core.validation.checker import suggest
 from streamwright.core.validation.sections.document import DocumentSection
 from streamwright.core.validation.sections.templates import REFERENCE_HEAD, TEMPLATE
 
@@ -59,7 +59,7 @@ class ReferenceSection(DocumentSection):
                 self.check_reference(inner, path, container=container, key=key, scopes=scopes, stream=stream)
 
     def check_reference(self, inner, path, *, container, key, scopes, stream):
-        parts = spec.split_outside_quotes(inner, "|")
+        parts = split_outside_quotes(inner, "|")
         match = REFERENCE_HEAD.match(parts[0])
         shown = "{{ %s }}" % inner.strip()
         if not match:
@@ -114,7 +114,7 @@ class ReferenceSection(DocumentSection):
             self.error("unknown-filter", path, "unknown filter %r in %s%s; filters: %s" % (
                 name, shown, suggest(name, spec.FILTERS), ", ".join(spec.FILTERS)), container, key)
             return
-        values = ([value for value in spec.split_outside_quotes(arguments, ",") if value]
+        values = ([value for value in split_outside_quotes(arguments, ",") if value]
                   if arguments is not None else [])
         if len(values) != spec.FILTERS[name]:
             self.error("bad-value", path, "filter %r takes %d argument(s), got %d in %s" % (

@@ -34,10 +34,10 @@ import os
 
 import yaml
 
+from streamwright.core.config import grammar
 from streamwright.core.config.reader import load_yaml
 
 __all__ = [
-    "MODELS_FOLDER",
     "SOURCE_FILES",
     "STREAMS_FOLDER",
     "SourceFilesError",
@@ -46,14 +46,12 @@ __all__ = [
     "find_source",
     "load_source",
     "missing_path_message",
+    "read_source",
     "source_folder",
 ]
 
 SOURCE_FILES = ("source.yaml", "source.yml")
 STREAMS_FOLDER = "streams"
-MODELS_FOLDER = "models"
-MODELS_REMOVED_HINT = "models were replaced by `transform` steps: a stream's SQL steps join and aggregate its own " \
-                      "`requests`, and its `export` names the outputs"
 YAML_SUFFIXES = (".yaml", ".yml")
 # the folders of a source folder that hold one file per stream: (folder, what one file holds, source key)
 _PART_FOLDERS = ((STREAMS_FOLDER, "stream", "streams"),)
@@ -103,11 +101,11 @@ def _is_source_folder(folder):
 
 def source_folder(path):
     """
-    The source folder that `path` belongs to, or None: the folder itself, its source.yaml, its streams/ or models/
-    folder, or a file in them (even one named source.yaml: there it is a stream). A source folder has a
-    source.yaml (or source.yml) and a streams/ folder.
+    The source folder that `path` belongs to, or None: the folder itself, its source.yaml, its streams/ folder, or a
+    file in them (even one named source.yaml: there it is a stream). A source folder has a source.yaml (or
+    source.yml) and a streams/ folder.
     """
-    part_folders = [folder for folder, _, _ in _PART_FOLDERS] + [MODELS_FOLDER]
+    part_folders = [folder for folder, _, _ in _PART_FOLDERS]
     if os.path.isdir(path):
         if os.path.basename(os.path.abspath(path)) in part_folders:
             parent = os.path.normpath(os.path.join(path, os.pardir))
@@ -166,8 +164,6 @@ def find_source(path):
     folder = source_folder(path)
     if folder is not None:
         stream_files, problems = _part_files(os.path.join(folder, STREAMS_FOLDER), STREAMS_FOLDER, "stream")
-        if os.path.isdir(os.path.join(folder, MODELS_FOLDER)):
-            problems.append((os.path.join(folder, MODELS_FOLDER), MODELS_REMOVED_HINT))
         return SourceLayout(_source_file_in(folder), folder, stream_files, problems)
     if os.path.isdir(path):
         source_file = _source_file_in(path)
@@ -214,7 +210,15 @@ def assemble(layout, source, documents):
 
 
 def load_source(path):
-    """Reads the source at `path` (a path, see find_source, or a SourceLayout) as one document."""
+    """
+    Reads the source at `path` (a path, see find_source, or a SourceLayout) as one document, in the shape the source
+    engine reads (see config.grammar).
+    """
+    return grammar.to_internal(read_source(path))
+
+
+def read_source(path):
+    """Reads the source at `path` (a path, see find_source, or a SourceLayout) as one document, as it is written."""
     layout = path if isinstance(path, SourceLayout) else find_source(path)
     def read_yaml(filename):
         try:

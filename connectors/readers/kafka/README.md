@@ -12,10 +12,10 @@ auth:
   bootstrap_servers: broker:9092
 requests:
   - name: peek
-    sdk: kafka
-    service: message
-    method: read
-    arguments: {destination: arrivals, max_messages: 100, max_wait: 10s, from: latest}
+    operation:
+      service: message
+      method: read
+      arguments: {destination: arrivals, max_messages: 100, max_wait: 10s, from: latest}
 ```
 
 In SparkJob use `message.consume` with `destination` and `group_id` (optionally `from`, `max_messages`,

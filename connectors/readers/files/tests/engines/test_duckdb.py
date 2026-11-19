@@ -83,6 +83,25 @@ def job(tmp_path, **output):
             "runtime": {"state": {"sqlite": str(tmp_path / "state.db"), "apply_migrations": True}}}
 
 
+@pytest.mark.parametrize("link", ["linked", ".linked"])   # DuckDB's glob matches hidden entries too
+def test_a_glob_through_a_symbolic_link_out_of_the_roots_is_refused(tmp_path, link):
+    (tmp_path / "data" / "own").mkdir(parents=True)
+    (tmp_path / "data" / "own" / "a.csv").write_text("x\n1\n")
+    (tmp_path / "outside").mkdir()
+    (tmp_path / "outside" / "a.csv").write_text("x\n2\n")
+    os.symlink(str(tmp_path / "outside"), str(tmp_path / "data" / link))
+    connection = resolve_values(CONNECTOR, {"roots": ["data"]})
+    session = Session(base_dir=str(tmp_path))
+    context = ReadContext(session, "lake", connection, {"name": "s"}, batch=None, pinned={}, limits={}, values=None)
+    try:
+        adapter = CONNECTOR.load_adapter("duckdb")
+        with pytest.raises(AdapterError, match="resolves outside the connection's roots"):
+            adapter.read_sql(context, CONNECTOR.operation("object", "read"), {"path": "*/a.csv", "format": "csv"})
+        assert adapter.read_sql(context, CONNECTOR.operation("object", "read"), {"path": "own/*.csv", "format": "csv"})
+    finally:
+        session.close()
+
+
 def test_a_job_reads_with_the_shared_option_vocabulary_and_writes_creating_folders(tmp_path):
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "orders.csv").write_text("id;country\n1;US\n2;CA\n3;US\n")

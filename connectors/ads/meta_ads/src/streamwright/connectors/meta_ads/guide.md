@@ -1,6 +1,7 @@
 # Meta Ads (`meta_ads`)
 
-Meta Marketing API campaigns, ad sets, ads, and insights extraction.
+Meta Marketing API campaigns, ad sets, ads, and insights extraction; creates, updates and deletes of objects, and
+Conversions API events (apply outputs).
 
 Connects to Meta Marketing API using official `facebook_business` SDK.
 Supports object reads and graph edge traversals (`get_campaigns`, `get_insights`) with automatic pagination and throttling handling.
@@ -32,7 +33,8 @@ auth:
 
 - `provider`: `meta_ads`
 - Credentials: `access_token` and optional `app_secret` must be `{{ secrets.* }}` references. Credentials and appsecret proofs are never written in source configs and are redacted from all logs.
-- Security: Sandboxed SDK client. Only read-only operations (`api_get` and `get_*` edge methods) are permitted. The
+- Security: Sandboxed SDK client. Requests and call steps only read (`api_get` and `get_*` edge methods); writes
+  (`create_*`, `api_update`, `api_delete`, `AdsPixel.create_event`) run only as job apply outputs. The
   object (service) and method are resolved against the installed `facebook_business` library, which is the authority
   on which objects, edges and fields exist; the connector never enumerates them (contract v1.3 §6b). A typo is caught
   before a run, with a "did you mean" suggestion drawn from the SDK.
@@ -65,16 +67,16 @@ incremental:
 requests:
   # An edge of an object (here the account's insights); paged by the connector
   - name: raw_campaign_insights
-    sdk: meta_ads
-    service: AdAccount
-    method: get_insights
-    arguments:
-      id: "act_{{ partition.account_id }}"
-      fields: [account_id, campaign_id, campaign_name, date_start, impressions, clicks, spend]
-      params:
-        level: campaign
-        time_increment: 1
-        time_range: {since: "{{ window.start }}", until: "{{ window.end }}"}
+    operation:
+      service: AdAccount
+      method: get_insights
+      arguments:
+        id: "act_{{ partition.account_id }}"
+        fields: [account_id, campaign_id, campaign_name, date_start, impressions, clicks, spend]
+        params:
+          level: campaign
+          time_increment: 1
+          time_range: {since: "{{ window.start }}", until: "{{ window.end }}"}
   # One object's fields: service Campaign, method api_get, arguments {id, fields}
 
 transform:
@@ -104,14 +106,55 @@ export:
   `partition`): extract values with `->>` (`record->>'campaign_id'`) and cast the numbers, which the API sends as
   text.
 
+## Apply outputs (writes)
+
+A DuckDBJob or SparkJob output can write to Meta, a row per object or event (the engine guide's Apply outputs section
+has the policies: chunks, unknown outcomes, `state resend|skip`):
+
+- `*.create_*` (any edge: `AdAccount.create_campaign`, `AdAccount.create_ad_set`, `Campaign.create_ad_set`, ...): a
+  request per row, its columns the new object's parameters. Arguments: `id` (required, the parent, e.g.
+  `act_1234567890`) and `params` (every row's parameters; a row's columns win). Not idempotent: a chunk cut short is
+  held for you (`on_unknown`). At most 100 rows a chunk. Result: the new object's `id`.
+- `*.api_update`: a request per row; the `id` column names the object, the other columns are the parameters to
+  change (argument `params` as above). `*.api_delete`: a request per row by `id` (`op: remove`, needs
+  `allow_remove: true`). Both idempotent; at most 100 rows a chunk. A row without `id` fails as `INVALID_ROW`.
+- `AdsPixel.create_event` (the Conversions API): one request per chunk of up to 1000 events, `data` the rows.
+  Arguments: `id` (required, the pixel or dataset id) and `params` (e.g. `test_event_code`). Columns are the server
+  event's fields (`event_name`, `event_time` in Unix seconds, `action_source`, `event_id`, `user_data`,
+  `custom_data`, ...). Meta deduplicates on `event_name` + `event_id`, so a chunk cut short is sent again. Result per
+  row: the call's `events_received` and `fbtrace_id`; a rejected call fails all its rows.
+- Values: structs and lists are sent as JSON; a text value that is a JSON object (`'{"em": ["<sha256>"]}'`) is sent
+  as the object; NULLs (also inside structs) are not sent, so use `nulls: skip_field`; an empty `params` value is
+  left out (an optional config input can fill it). Cast DECIMALs to DOUBLE. Hash `user_data` in SQL
+  (`sha256(lower(trim(email)))`).
+- Errors: a row Meta rejects fails alone, with its Graph API code (`100`, ...) and message (and Meta's
+  `error_user_msg`); a throttled or temporary error (the `retry_codes`, transient, 5xx) cuts the chunk short: the
+  rows already sent keep their results and the rest stay in flight.
+
+```yaml
+outputs:
+  - name: send
+    connection: meta
+    step: events
+    operation:
+      service: AdsPixel
+      method: create_event
+      arguments:
+        id: "{{ config.pixel_id }}"
+        params: {test_event_code: "{{ config.test_event_code }}"}   # empty: left out
+    apply:
+      nulls: skip_field
+      on_row_error: continue
+```
+
 ## Engines
 
 ### Execution & Behavior
 
 - **Transport**: `sdk` (`facebook_business`).
 - **Services & Methods**: resolved dynamically against the installed `facebook_business` library (contract v1.3 §6b).
-  The read-only policy is the operation families `*.api_get` (read any object) and `*.get_*` (read any of its edges);
-  which objects (`AdAccount`, `Campaign`, `Ad`, ...), edges and fields exist is whatever the installed SDK exposes.
+  Reads are the operation families `*.api_get` (read any object) and `*.get_*` (read any of its edges); writes are
+  `*.create_*`, `*.api_update`, `*.api_delete` and `AdsPixel.create_event` (apply outputs, above); which objects (`AdAccount`, `Campaign`, `Ad`, ...), edges and fields exist is whatever the installed SDK exposes.
 - **Streaming**: Yields rows in cursor pages of up to 500 records.
 - **Throttling**: backs off as the `x-business-use-case-usage` headers ask. An error carries its Graph API code and
   subcode; the spec's `retry_codes` (throttling and temporary codes such as `4`, `17`, `613`, `80004`) are retried by
@@ -119,4 +162,4 @@ export:
 
 | Engine | Adapter | Notes |
 |---|---|---|
-| source (`streamwright run`, DuckDBJob call steps) | `engines/source.py` | the `facebook_business` SDK; object reads and graph edges, paged by the connector |
+| source (`streamwright run`, DuckDBJob call steps and apply outputs) | `engines/source.py` | the `facebook_business` SDK; object reads and graph edges, paged by the connector; writes |

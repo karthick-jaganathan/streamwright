@@ -17,7 +17,7 @@
 
 """
 Applies the state store's migrations: modules `NNNN_name.py` in this package, each with VERSION, NAME, DESCRIPTION,
-get_statements(dialect, schema) and apply(conn, dialect, schema, legacy_prefix), in version order, each once,
+get_statements(dialect, schema) and apply(conn, dialect, schema), in version order, each once,
 recorded in sw_migrations under a database lock so concurrent runners serialize.
 """
 
@@ -56,9 +56,7 @@ class MigrationRunner:
         self._connect, self._dialect, self._schema, self._catalog = connect, dialect, schema, catalog
         self.target = target or "%s database" % dialect.name
         prefix, self._create_schema = dialect.namespace(schema, catalog)
-        # SQLite keeps the sw_* tables unprefixed; elsewhere they live in the schema. The tables of the store
-        # before sw_* (batches, job_leases, ...) were named with the prefix on every database.
-        self._legacy_prefix = dialect.namespace(schema or DEFAULT_SCHEMA)[0] if dialect.name == "sqlite" else prefix
+        # SQLite keeps the sw_* tables unprefixed; elsewhere they live in the schema
         self._table_schema = None if dialect.name == "sqlite" else schema
         self._migrations_table = ("" if dialect.name == "sqlite" else prefix) + "sw_migrations"
 
@@ -149,8 +147,7 @@ class MigrationRunner:
             records = []
             for module in pending:
                 started = time.monotonic()
-                store_id = module.apply(conn, self._dialect, schema=self._table_schema,
-                                        legacy_prefix=self._legacy_prefix)
+                store_id = module.apply(conn, self._dialect, schema=self._table_schema)
                 conn.execute(self._dialect.placeholders(
                     "INSERT INTO %s (version, name, applied_at, store_id, created_at, updated_at) VALUES (?, ?, %s, ?, "
                     "%s, %s)" % (self._migrations_table, self._dialect.now, self._dialect.now, self._dialect.now)),

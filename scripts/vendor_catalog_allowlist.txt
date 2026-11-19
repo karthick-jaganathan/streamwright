@@ -17,6 +17,11 @@ google_ads/gaql.py:_ESCAPES        # GAQL string-literal escape map (its own gra
 deltalake/client.py:S3_PARAMETERS     # credential -> delta-rs S3 storage option (own translation)
 deltalake/client.py:AZURE_PARAMETERS  # credential -> delta-rs Azure storage option (own translation)
 deltalake/client.py:DELTA_RS_OPTIONS  # the delta-rs storage options the connector itself sets (transport)
+deltalake/client.py:AZURE_CONNECTION_STRING_OPTIONS  # connection-string part -> delta-rs Azure option (own translation)
+
+# postgres: the libpq parameters whose pgjdbc property has another name - the translation of the connection's own
+# parameters into the Spark JDBC driver's (transport mechanics), not a vendor API surface.
+postgres/client.py:JDBC_PROPERTIES  # libpq parameter -> pgjdbc property name (own translation)
 
 # object-store Spark adapters: the Maven coordinates of the Hadoop/cloud jars the adapter ships - transport mechanics.
 gcs/engines/spark.py:_JARS   # Hadoop GCS connector jar coordinates (transport)

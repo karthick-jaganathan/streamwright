@@ -26,8 +26,12 @@ CONNECTORS_DIR := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
 REPO_ROOT := $(abspath $(CONNECTORS_DIR)/..)
 PACKAGE_PATH := $(patsubst $(REPO_ROOT)/%,%,$(CURDIR))
 
-# Installation mode (dev, prod, dist) and the distribution directory
+# The Python whose environment the targets use (an active pyenv / virtualenv by default)
+PYTHON ?= python
+# Installation mode (dev, prod, dist) and the distribution directory; FORCE_DEPS=true reinstalls dependencies
 MODE ?= prod
+FORCE_DEPS ?= false
+PIP_FORCE := $(if $(filter true,$(FORCE_DEPS)),--force-reinstall,)
 # shared with core: MODE=dist installs the connector's `streamwright` requirement from here
 DIST_DIR ?= /tmp/sdist/streamwright
 
@@ -36,7 +40,7 @@ DIST_DIR ?= /tmp/sdist/streamwright
 help:
 	@echo "StreamWright $(CONNECTOR) connector - Available commands:"
 	@echo ""
-	@echo "  make install [MODE=dev|prod|dist] - Install $(PACKAGE_NAME) package (default: prod)"
+	@echo "  make install [MODE=dev|prod|dist] - Install $(PACKAGE_NAME) package (default: prod; FORCE_DEPS=true)"
 	@echo "  make uninstall                    - Uninstall $(PACKAGE_NAME) package"
 	@echo "  make build                        - Build distribution packages"
 	@echo "  make clean                        - Clean build artifacts"
@@ -52,37 +56,37 @@ help:
 install:
 ifeq ($(MODE),dev)
 	@echo "Installing $(PACKAGE_NAME) package in development mode..."
-	pip install -e .
+	$(PYTHON) -m pip install -e . $(PIP_FORCE)
 else ifeq ($(MODE),prod)
 	@echo "Installing $(PACKAGE_NAME) package in production mode..."
-	pip install .
+	$(PYTHON) -m pip install . $(PIP_FORCE)
 else ifeq ($(MODE),dist)
 	@echo "Installing $(PACKAGE_NAME) package from distribution..."
 	@$(MAKE) build
-	pip install $(PACKAGE_NAME) --find-links $(DIST_DIR) --force-reinstall
+	$(PYTHON) -m pip install $(PACKAGE_NAME) --find-links $(DIST_DIR) --force-reinstall
 else
 	@echo "❌ Invalid MODE: $(MODE). Use dev, prod, or dist"
 	@exit 1
 endif
 	@echo "✅ Installation complete!"
-	@pip list | grep streamwright
+	@$(PYTHON) -m pip list | grep streamwright
 
 build: clean
 	@mkdir -p $(DIST_DIR)
-	python -m build --outdir $(DIST_DIR)
+	$(PYTHON) -m build --outdir $(DIST_DIR)
 	@echo "✅ Build complete: $(DIST_DIR)"
 
 uninstall:
-	pip uninstall -y $(PACKAGE_NAME)
+	$(PYTHON) -m pip uninstall -y $(PACKAGE_NAME)
 
 clean:
 	find . -type d \( -name "__pycache__" -o -name "*.egg-info" -o -name build -o -name dist \) -prune -exec rm -rf {} + 2>/dev/null || true
 
 # From the repository root: the examples the connector's tests load are relative to it
 test:
-	cd $(REPO_ROOT) && python -m pytest $(PACKAGE_PATH)/tests -q --import-mode=importlib
+	cd $(REPO_ROOT) && $(PYTHON) -m pytest $(PACKAGE_PATH)/tests -q --import-mode=importlib
 
 verify:
-	@pip show $(PACKAGE_NAME) >/dev/null 2>&1 && echo "✅ $(PACKAGE_NAME) is installed!" || echo "❌ $(PACKAGE_NAME) is not installed!"
-	@python -c "import streamwright.connectors.$(CONNECTOR).connector" 2>/dev/null && echo "✅ streamwright.connectors.$(CONNECTOR) import works!" || echo "❌ streamwright.connectors.$(CONNECTOR) import failed!"
-	@streamwright connectors | grep -qE '\[installed\]\s+$(CONNECTOR)\b' && echo "✅ $(CONNECTOR) connector is registered!" || echo "❌ $(CONNECTOR) connector is not registered!"
+	@$(PYTHON) -m pip show $(PACKAGE_NAME) >/dev/null 2>&1 && echo "✅ $(PACKAGE_NAME) is installed!" || echo "❌ $(PACKAGE_NAME) is not installed!"
+	@$(PYTHON) -c "import streamwright.connectors.$(CONNECTOR).spec" 2>/dev/null && echo "✅ streamwright.connectors.$(CONNECTOR) import works!" || echo "❌ streamwright.connectors.$(CONNECTOR) import failed!"
+	@$(PYTHON) -m streamwright.core.cli connectors 2>/dev/null | grep -qx "Name: $(CONNECTOR)" && echo "✅ $(CONNECTOR) connector is registered!" || echo "❌ $(CONNECTOR) connector is not registered!"

@@ -17,16 +17,14 @@
 
 """A source's plan: each stream's requests, steps and exports, checked before any request."""
 
+import copy
+
+from streamwright.core.config import grammar
+from streamwright.core.config.streams import exports_of, incremental_exports, is_table_name
 from streamwright.core.engine.sql.compilation import StreamCompilation
 from streamwright.core.engine.sql.ordering import RunOrdering
 from streamwright.core.engine.sql.sandbox import Sandbox
-from streamwright.core.engine.sql.stream_plan import (
-    StreamPlan,
-    exports_of,
-    incremental_exports,
-    is_table_name,
-    partition_fields,
-)
+from streamwright.core.engine.sql.stream_plan import StreamPlan, partition_fields
 from streamwright.core.engine.sql.tables import MODES, _path_text, param_type
 
 __all__ = [
@@ -148,10 +146,13 @@ class SourcePlan(StreamCompilation, RunOrdering):
 
 
 def plan_source(source):
-    """A source's SourcePlan (its problems, and what runs for a selection, in which order), made in its own DuckDB."""
+    """
+    A source's SourcePlan (its problems, and what runs for a selection, in which order), made in its own DuckDB. The
+    source is written in the source grammar (config.grammar); the plan reads a translated copy.
+    """
     sandbox = Sandbox()
     try:
-        return SourcePlan(sandbox, source)
+        return SourcePlan(sandbox, grammar.to_internal(copy.deepcopy(source)))
     finally:
         sandbox.close()
 

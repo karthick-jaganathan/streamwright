@@ -23,7 +23,7 @@ classifiers = [
 requires-python = ">=3.11"
 # DuckDB installs its azure extension on the first connect (or ahead of time: INSTALL azure)
 dependencies = [
-    "streamwright~=0.1.10",
+    "streamwright~=0.1.16",
 ]
 
 [project.optional-dependencies]

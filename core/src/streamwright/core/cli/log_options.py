@@ -98,7 +98,7 @@ def log_options():
     return parser
 
 
-def _read_log_config(path):
+def read_log_config(path):
     """A --log-config file: a logging.config.dictConfig mapping, in YAML or JSON."""
     with open(path, encoding="utf-8") as stream:
         config = yaml.safe_load(stream)
@@ -114,7 +114,7 @@ def log_setup(options):
                           "the formatters in the config (JSON lines: \"()\": "
                           "streamwright.core.runtime.logs.JsonFormatter)")
     try:
-        config = _read_log_config(options.log_config) if options.log_config else None
+        config = read_log_config(options.log_config) if options.log_config else None
         return logs.LogSetup(options.log_level, options.log_format or "text", options.log, config,
                              max_chars=options.log_max_chars)
     except (OSError, ValueError, TypeError, AttributeError, ImportError, yaml.YAMLError) as exc:

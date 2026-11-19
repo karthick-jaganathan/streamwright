@@ -14,33 +14,33 @@
 # * limitations under the License.
 # **************************************************************************/
 
-# Each campaign with its settings, budget and metrics (the legacy connector + serializer pair for campaigns).
+# Each campaign with its settings, budget and metrics.
 partitions:
   - {name: customer_id, values: "{{ config.customer_ids }}"}
 requests:
   - name: raw_campaigns
-    sdk: google_ads
-    service: GoogleAdsService
-    method: search_stream
-    arguments:
-      customer_id: "{{ partition.customer_id }}"
-      query:
-        gaql:
-          select: [customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone,
-                   customer.auto_tagging_enabled, customer.tracking_url_template,
-                   customer.conversion_tracking_setting.conversion_tracking_id,
-                   customer.remarketing_setting.google_global_site_tag, campaign.id, campaign.name,
-                   campaign.status, campaign.advertising_channel_type, campaign.bidding_strategy_type,
-                   campaign.start_date_time, campaign.end_date_time, campaign.target_cpa.target_cpa_micros,
-                   campaign.target_roas.target_roas, campaign_budget.id, campaign_budget.amount_micros,
-                   metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions,
-                   metrics.conversions_value]
-          from: campaign
-          where:
-            - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
-            - {field: campaign.id, op: IN, type: int, value: "{{ config.campaign_ids }}", skip_if_empty: true}
-            - {field: campaign.advertising_channel_type, op: IN, type: enum, value: "{{ config.channel_types }}",
-               skip_if_empty: true}
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ partition.customer_id }}"
+        query:
+          gaql:
+            select: [customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone,
+                     customer.auto_tagging_enabled, customer.tracking_url_template,
+                     customer.conversion_tracking_setting.conversion_tracking_id,
+                     customer.remarketing_setting.google_global_site_tag, campaign.id, campaign.name,
+                     campaign.status, campaign.advertising_channel_type, campaign.bidding_strategy_type,
+                     campaign.start_date_time, campaign.end_date_time, campaign.target_cpa.target_cpa_micros,
+                     campaign.target_roas.target_roas, campaign_budget.id, campaign_budget.amount_micros,
+                     metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions,
+                     metrics.conversions_value]
+            from: campaign
+            where:
+              - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
+              - {field: campaign.id, op: IN, type: int, value: "{{ config.campaign_ids }}", skip_if_empty: true}
+              - {field: campaign.advertising_channel_type, op: IN, type: enum, value: "{{ config.channel_types }}",
+                 skip_if_empty: true}
 transform:
   mode: page
   steps:

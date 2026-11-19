@@ -25,12 +25,11 @@ from types import MappingProxyType
 
 import yaml
 
-from streamwright.core.validation import vocabulary
-
 __all__ = [
     "SECRET_ENV_PREFIX",
     "InputError",
     "as_date",
+    "input_definition_problems",
     "parse_duration",
     "read_config_file",
     "read_values_file",
@@ -125,9 +124,75 @@ def _coerce(definition, value, today):
     return [_coerce_scalar(definition.get("items", "string"), item, today) for item in value]
 
 
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _regex_problem(pattern):
+    if not isinstance(pattern, str):
+        return "got %r" % (pattern,)
+    try:
+        re.compile(pattern)
+    except re.error as exc:
+        return "%r: %s" % (pattern, exc)
+    return None
+
+
+def _constraint_definition_problems(definition):
+    """(key, why) for each of enum, pattern, minimum, maximum, max_length that cannot be applied."""
+    problems = []
+    if "enum" in definition and not (isinstance(definition["enum"], list) and definition["enum"]):
+        problems.append(("enum", "`enum` must be a non-empty list of values"))
+    if "pattern" in definition:
+        why = _regex_problem(definition["pattern"])
+        if why:
+            problems.append(("pattern", "`pattern` must be a regular expression: %s" % why))
+    problems.extend((key, "`%s` must be a number" % key) for key in ("minimum", "maximum")
+                    if key in definition and not _is_number(definition[key]))
+    length = definition.get("max_length")
+    if "max_length" in definition and not (isinstance(length, int) and not isinstance(length, bool) and length >= 1):
+        problems.append(("max_length", "`max_length` must be a whole number >= 1"))
+    return problems
+
+
+def input_definition_problems(definition, today=None):
+    """
+    (key, why) for each constraint of an input definition that cannot be applied, else for a `default` that breaks
+    them. A default of the wrong type is not reported here.
+    """
+    problems = _constraint_definition_problems(definition)
+    if problems or definition.get("default") is None:
+        return problems
+    try:
+        default = _coerce(definition, definition["default"], today)
+    except InputError:
+        return []
+    broken = _constraint_problem(definition, default)
+    return [("default", "the default %s" % broken)] if broken else []
+
+
+def _constraint_problem(definition, value):
+    """Why a typed value breaks its enum, pattern, minimum, maximum or max_length (a list: any item), or None."""
+    for item in value if isinstance(value, list) else [value]:
+        if "enum" in definition and item not in definition["enum"]:
+            return "is not one of: %s" % ", ".join(map(str, definition["enum"]))
+        if isinstance(item, str):
+            if "pattern" in definition and not re.fullmatch(definition["pattern"], item):
+                return "does not match %s" % definition["pattern"]
+            if "max_length" in definition and len(item) > definition["max_length"]:
+                return "is longer than %s characters" % definition["max_length"]
+        if _is_number(item):
+            if "minimum" in definition and item < definition["minimum"]:
+                return "is less than %s" % definition["minimum"]
+            if "maximum" in definition and item > definition["maximum"]:
+                return "is more than %s" % definition["maximum"]
+    return None
+
+
 def resolve_inputs(definitions, provided, section, today=None, hide_values=False, *, config_names=()):
     """
-    Applies defaults, required checks and types; raises one InputError listing every problem.
+    Applies defaults, required checks, types and constraints (enum, pattern, minimum, maximum, max_length); raises
+    one InputError listing every problem.
     With hide_values (secrets), the messages never include the values. `config_names`: the declared config inputs, so
     an unknown secret that is one of them is reported as given in the wrong place.
     """
@@ -135,6 +200,10 @@ def resolve_inputs(definitions, provided, section, today=None, hide_values=False
     values, problems = {}, []
     for name, declared in definitions.items():
         definition = declared or {}
+        unusable = _constraint_definition_problems(definition)
+        if unusable:
+            problems.extend("%s %r: %s" % (section, name, why) for _, why in unusable)
+            continue
         if provided.get(name) is not None:
             raw = provided[name]
         elif definition.get("default") is not None:
@@ -151,6 +220,10 @@ def resolve_inputs(definitions, provided, section, today=None, hide_values=False
                 problems.append("%s %r is not a valid %s" % (section, name, definition.get("type", "string")))
             else:
                 problems.append("%s %r: %s" % (section, name, exc))
+            continue
+        broken = _constraint_problem(definition, values[name])
+        if broken:
+            problems.append("%s %r %s" % (section, name, "breaks its constraints" if hide_values else broken))
     unknown = sorted(set(provided) - set(definitions))
     if unknown:
         misplaced = [name for name in unknown if name in config_names]
@@ -231,10 +304,3 @@ def secrets_from_env(names, environ=None):
         if key.startswith(SECRET_ENV_PREFIX) and key[len(SECRET_ENV_PREFIX):].lower() in declared:
             found[declared[key[len(SECRET_ENV_PREFIX):].lower()]] = value
     return found
-
-
-def check_names(values):
-    """Raises InputError for names that cannot be referenced as {{ config.<name> }}."""
-    bad = [name for name in values if not re.match(vocabulary.NAME_PATTERN, str(name))]
-    if bad:
-        raise InputError("invalid input names: %s" % ", ".join(map(repr, bad)))

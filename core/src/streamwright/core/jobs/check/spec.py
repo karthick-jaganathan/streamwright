@@ -21,10 +21,13 @@ import datetime
 import re
 from types import MappingProxyType
 
+from streamwright.core.config.inputs import input_definition_problems
 from streamwright.core.jobs.check.rules import INPUT_NAME_PATTERN
 
 __all__ = ["check_spec"]
 
+_CONSTRAINT_TYPES = MappingProxyType({"minimum": (int, float), "maximum": (int, float), "max_length": int,
+                                     "enum": list, "pattern": str})
 _DATE = re.compile(r"^(today|-?[0-9]+d|[0-9]{4}-[0-9]{2}-[0-9]{2})$")
 _DEFAULTS = MappingProxyType({
     "string": (lambda v: isinstance(v, str), "text"),
@@ -53,7 +56,19 @@ def check_spec(job, rules, findings):
                 _check_definition(section, definition, path, findings)
 
 
+def _check_constraints(definition, path, findings):
+    """
+    The constraints and the default against them, by the sources' rules; a constraint of the wrong type is the
+    structure check's issue (bad-type), not reported twice.
+    """
+    for key, why in input_definition_problems(definition):
+        expected = _CONSTRAINT_TYPES.get(key)
+        if expected is None or (isinstance(definition[key], expected) and not isinstance(definition[key], bool)):
+            findings.error("bad-value", (*path, key), why)
+
+
 def _check_definition(section, definition, path, findings):
+    _check_constraints(definition, path, findings)
     kind = definition.get("type", "string")
     if kind == "list" and "items" not in definition:
         findings.error("missing-key", (*path, "items"), "a list input needs `items`")

@@ -1,0 +1,111 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# Creates Search campaigns (paused) in a Microsoft Advertising account from --input rows; a campaign whose name the
+# account already has is skipped (a warning each).
+#
+#   streamwright duckdb run examples/microsoft_ads/jobs/campaigns/create.yaml \
+#     --input examples/microsoft_ads/payloads/campaigns/create.json \
+#     --set customer_id=CUSTOMER_ID --set account_id=ACCOUNT_ID \
+#     --secrets ~/.streamwright/microsoft-ads-secrets.yaml --apply-state-migrations
+kind: DuckDBJob
+version: 1
+name: microsoft_ads_campaigns_create
+description: Search campaigns created in a Microsoft Advertising account; existing names skipped
+
+spec:
+  config:
+    customer_id: {type: string, required: true, pattern: "^[0-9]+$", description: "the customer (CustomerId)"}
+    account_id: {type: string, required: true, pattern: "^[0-9]+$", description: "the account (CustomerAccountId)"}
+  secrets:
+    developer_token: {type: string, required: true}
+    client_id: {type: string, required: true}
+    client_secret: {type: string, required: true}
+    refresh_token: {type: string, required: true}
+  input:
+    columns:
+      name: {type: string, required: true, max_length: 128}
+      daily_budget: {type: number, required: true, minimum: 0.05}
+      time_zone: {type: string, description: "a Microsoft time zone name, e.g. EasternTimeUSCanada (default)"}
+      status: {type: string, enum: [Paused, Active], description: "default Paused"}
+    max_rows: 100
+
+connections:
+  ads:
+    provider: microsoft_ads
+    developer_token: "{{ secrets.developer_token }}"
+    client_id: "{{ secrets.client_id }}"
+    client_secret: "{{ secrets.client_secret }}"
+    refresh_token: "{{ secrets.refresh_token }}"
+    customer_id: "{{ config.customer_id }}"
+    account_id: "{{ config.account_id }}"
+
+steps:
+  # the account's campaigns (one record: {"Campaign": [...]})
+  - name: existing
+    connection: ads
+    operation:
+      service: CampaignManagementService
+      method: GetCampaignsByAccountId
+      arguments:
+        request: {AccountId: "{{ config.account_id }}", CampaignType: [Search, Shopping, Audience, PerformanceMax]}
+    sql: |
+      SELECT c->>'$.Name' AS name, c->>'$.Id' AS id
+      FROM records, unnest(CAST(record->'$.Campaign' AS JSON[])) AS t(c)
+
+  - name: skipped
+    sql: SELECT i.name, e.id FROM input AS i JOIN existing AS e USING (name)
+    log:
+      message: "skipped campaign {name}: the account already has it (id {id})"
+      level: warning
+
+  # the new campaigns; columns are Campaign fields (the WSDL's names)
+  - name: campaigns
+    sql: |
+      SELECT i.name AS Name,
+             'DailyBudgetStandard' AS BudgetType,
+             CAST(i.daily_budget AS DOUBLE) AS DailyBudget,
+             coalesce(i.time_zone, 'EasternTimeUSCanada') AS TimeZone,
+             coalesce(i.status, 'Paused') AS Status,
+             ['All'] AS Languages
+      FROM input AS i
+      ANTI JOIN existing AS e USING (name)
+      ORDER BY i.name
+
+outputs:
+  - name: create
+    connection: ads
+    step: campaigns
+    operation:
+      service: CampaignManagementService
+      method: AddCampaigns
+      arguments:
+        request: {AccountId: "{{ config.account_id }}"}
+    apply:
+      on_row_error: continue
+    log:
+      sql: |
+        SELECT Name AS name,
+               CASE WHEN outcome.status = 'applied' THEN 'created, id ' || (outcome.result->>'Id')
+                    ELSE 'rejected: ' || outcome.error_code || ': ' || outcome.error_message END AS what
+        FROM "create"
+        ORDER BY outcome.row
+      message: "campaign {name}: {what}"
+
+runtime:
+  state:
+    sqlite: ../../.streamwright/microsoft_ads_campaigns_create.state.db
+    scope: "account:{{ config.account_id }}"

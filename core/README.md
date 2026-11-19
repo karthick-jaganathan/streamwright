@@ -43,7 +43,7 @@ http:
 # my_api/streams/items.yaml
 requests:
   - name: raw_items
-    http: {path: /v1/items}
+    operation: {path: /v1/items}
 transform:
   mode: page
   steps:

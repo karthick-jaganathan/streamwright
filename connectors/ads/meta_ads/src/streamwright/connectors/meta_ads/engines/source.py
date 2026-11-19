@@ -15,23 +15,26 @@
 # * limitations under the License.
 # **************************************************************************/
 
-"""The meta_ads connector on the `source` engine (streamwright run): reads through the Marketing API SDK."""
+"""
+The meta_ads connector on the `source` engine (streamwright run, and job call steps and apply outputs): reads and
+writes (creates, updates, deletes, Conversions API events) through the Marketing API SDK.
+"""
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
 from facebook_business.api import FacebookAdsApi
 
-from streamwright.connectors.meta_ads import client
-from streamwright.core.io.api_calls import make_caller, translate_pages
+from streamwright.connectors.meta_ads import client, writes
+from streamwright.core.sdk.apply import RowResult
 from streamwright.core.sdk.contract import Operation, ResolvedConnection, vendor_arguments
-from streamwright.core.sdk.engines.source import ConnectorContext
+from streamwright.core.sdk.engines.source import ConnectorContext, make_caller, translate_errors, translate_pages
 
 __all__ = ["MetaAdsSession", "MetaAdsSourceAdapter"]
 
 
 class MetaAdsSession:
-    """Reads objects and edges; rate limits and retries come from the stream's context."""
+    """Reads objects and edges and applies rows; rate limits and retries come from the stream's or output's context."""
 
     def __init__(self, api: FacebookAdsApi):
         self.api = api
@@ -42,6 +45,14 @@ class MetaAdsSession:
         pages = client.read_pages(self.api, operation.service, operation.method, arguments, call,
                                   vendor=vendor_arguments(operation, arguments))
         return translate_pages(pages, client.translate_error)
+
+    def apply(self, operation: Operation, arguments: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
+              context: ConnectorContext) -> list[RowResult]:
+        call = make_caller(context, client.translate_error)
+        with translate_errors(client.translate_error):
+            return writes.apply_rows(self.api, operation.service, operation.method, arguments=arguments, rows=rows,
+                                     call=call, retryable=context.retryable,
+                                     vendor=vendor_arguments(operation, arguments))
 
     def close(self) -> None:
         self.api = None

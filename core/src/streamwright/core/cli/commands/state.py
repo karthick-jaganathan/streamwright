@@ -32,12 +32,11 @@ INVALID_INPUT = 2
 
 _DESCRIPTION = """\
 The bookkeeping tables of runtime.state (sw_jobs, sw_leases, sw_sequences, sw_receipts, sw_events, sw_signatures,
-sw_migrations), in a database named by --url or $%s. A job run checks them and fails while a migration is
-pending; it applies them itself only with --apply-state-migrations or runtime.state.apply_migrations: true. These
-commands let a deployment apply them ahead of time and check them. A database that holds the tables of an earlier
-StreamWright release is imported by migration 0001 (batches, job keys, sequences and the store identity carry over;
-the old tables are kept). A job's batches are listed, retried and abandoned with `streamwright duckdb state` and
-`sw spark state`.""" % ENV_STATE_URL
+sw_requests - the run queue of `streamwright serve` - and sw_migrations), in a database named by --url or $%s. A job
+run checks them and fails while a migration is pending; it applies them itself only with --apply-state-migrations or
+runtime.state.apply_migrations: true. These commands let a deployment apply them ahead of time and check them.
+A job's batches are listed, retried and abandoned with `streamwright duckdb state` and `sw spark state`.""" % \
+    ENV_STATE_URL
 
 _URL_HELP = ("the state database: sqlite:///state.db (relative to the working folder), sqlite:////abs/state.db, "
              "duckdb:///state.duckdb (?catalog=NAME), postgresql://user:pass@host:5432/db?schema=streamwright "

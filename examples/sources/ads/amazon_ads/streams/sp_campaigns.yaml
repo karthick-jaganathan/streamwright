@@ -19,7 +19,7 @@ description: Amazon Sponsored Products campaigns metadata and budgets.
 # HTTP GET request to list Sponsored Products campaigns
 requests:
   - name: raw_sp_campaigns
-    http:
+    operation:
       path: /v2/sp/campaigns
       method: GET
 

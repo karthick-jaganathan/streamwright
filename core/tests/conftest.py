@@ -20,7 +20,7 @@ import os
 
 import pytest
 
-from streamwright.core.runtime.testing import FakeApi
+from streamwright.core.sdk.testing import FakeApi
 
 # No dlt telemetry from tests: its request would reach the `responses` mocks of the HTTP tests.
 os.environ["RUNTIME__DLTHUB_TELEMETRY"] = "false"
@@ -28,7 +28,7 @@ os.environ["RUNTIME__DLTHUB_TELEMETRY"] = "false"
 
 @pytest.fixture
 def api():
-    """A local fake HTTP API (streamwright.core.runtime.testing.FakeApi)."""
+    """A local fake HTTP API (streamwright.core.sdk.testing.FakeApi)."""
     with FakeApi() as server:
         yield server
 

@@ -19,7 +19,7 @@ description: Apple Ads ad groups and default bidding.
 # HTTP POST query for ad groups across campaigns
 requests:
   - name: raw_ad_groups
-    http:
+    operation:
       path: /v1/adgroups/query
       method: POST
       json:

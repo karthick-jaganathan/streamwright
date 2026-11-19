@@ -195,7 +195,7 @@ def test_single_entity_get():
                 "name": "raw_ad_group",
                 "paginator": {"type": "none"},
                 "records": {},
-                "http": {
+                "operation": {
                     "path": "/v1/ad_groups/ag_123",
                     "method": "GET",
                 },

@@ -18,13 +18,13 @@ description: MongoDB users collection document stream.
 
 requests:
   - name: raw_users
-    service: collection
-    method: find
-    sdk: mongodb
-    arguments:
-      collection: users
-      filter:
-        status: active
+    operation:
+      service: collection
+      method: find
+      arguments:
+        collection: users
+        filter:
+          status: active
 
 transform:
   mode: page

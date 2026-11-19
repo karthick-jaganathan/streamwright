@@ -16,10 +16,12 @@
 # **************************************************************************/
 
 """
-What the google_ads connector accepts: its connection fields and its read-only policy over the Google Ads API (pure
-data). `GoogleAdsService.search`/`search_stream` are typed (a `customer_id` and a GAQL `query`); the `get_*`/`list_*`
-read methods of any `*Service` are families (contract v1.3 §6b) whose request fields are vendor arguments. The
-installed google-ads library decides which services, methods and request fields exist; the connector never lists them.
+What the google_ads connector accepts: its connection fields and its operations over the Google Ads API (pure data).
+`GoogleAdsService.search`/`search_stream` are typed (a `customer_id` and a GAQL `query`); the `get_*`/`list_*` read
+methods of any `*Service` are families (contract v1.3 §6b) whose request fields are vendor arguments. Apply operations
+(apply outputs): the `mutate_*` methods of any `*Service` (create, update, remove rows; not idempotent) and the
+conversion uploads (deduplicated by Google, so idempotent). The installed google-ads library decides which services,
+methods and request fields exist; the connector never lists them.
 """
 
 from streamwright.core.sdk.contract import ConnectorDefinition, Field, Operation, OperationKind
@@ -44,6 +46,15 @@ def _read(method: str, description: str) -> Operation:
     return Operation(service="*Service", method=method, kind=OperationKind.READ, description=description)
 
 
+_APPLY_ARGUMENTS = (
+    _CUSTOMER,
+    Field("partial_failure", "boolean", default=True,
+          description="a rejected row fails alone (true) or the whole call (false)"),
+    Field("validate_only", "boolean", default=False,
+          description="Google checks every row and changes nothing (a dry run of the call)"),
+)
+
+
 CONNECTOR = ConnectorDefinition(
     name="google_ads",
     title="Google Ads",
@@ -63,6 +74,17 @@ CONNECTOR = ConnectorDefinition(
         _search("search", "Page through the rows of a GAQL query."),
         _read("get_*", "Read one resource of any `*Service` (its request fields are vendor arguments)."),
         _read("list_*", "List the resources of any `*Service` (its request fields are vendor arguments)."),
+        Operation(service="*Service", method="mutate_*", kind=OperationKind.APPLY, idempotent=False, max_chunk=5000,
+                  actions=("create", "update", "remove"), destructive_actions=("remove",), arguments=_APPLY_ARGUMENTS,
+                  description="Create, update or remove resources of any `*Service`, a row each (columns are the "
+                              "resource's field paths; `op` the action; update needs `resource_name`)."),
+        # the conversion uploads (upload_click_conversions, upload_call_conversions, upload_conversion_adjustments):
+        # Google deduplicates them, so a call cut short is sent again
+        Operation(service="*UploadService", method="upload_*", kind=OperationKind.APPLY, idempotent=True,
+                  max_chunk=2000, actions=("upload",), arguments=_APPLY_ARGUMENTS,
+                  description="Upload conversions or conversion adjustments, a row each (e.g. "
+                              "ConversionUploadService.upload_click_conversions: gclid, conversion_action, "
+                              "conversion_date_time, ...)."),
     ),
     adapters={"source": "streamwright.connectors.google_ads.engines.source:GoogleAdsSourceAdapter"},
     validator="streamwright.connectors.google_ads.client:validate_connection",

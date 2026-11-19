@@ -18,11 +18,11 @@ description: Metadata discovery for all sheet tabs in the spreadsheet workbook.
 
 requests:
   - name: raw_sheet_tabs
-    service: spreadsheet
-    method: list_sheets
-    sdk: google_sheets
-    arguments:
-      spreadsheet_id: "{{ config.spreadsheet_id }}"
+    operation:
+      service: spreadsheet
+      method: list_sheets
+      arguments:
+        spreadsheet_id: "{{ config.spreadsheet_id }}"
 
 transform:
   mode: page

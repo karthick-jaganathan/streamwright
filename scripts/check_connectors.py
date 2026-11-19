@@ -56,18 +56,24 @@ def check_targets(source, spec, name, problems):
     if engines and not (source / "engines/__init__.py").exists():
         problems.append("missing engines/__init__.py")
     if not engines and (source / "engines").exists():
-        problems.append("engines/ holds no adapter of the spec (an HTTP connector's adapter is core's io.http)")
+        problems.append("engines/ holds no adapter of the spec (an HTTP connector's adapter is core's "
+                        "HttpSourceAdapter)")
     return engines
 
 
 def check_definition_package(package, name, project, data, problems):
-    """One entry point to `<package>:CONNECTOR`, spec.py, client.py, guide.md, and the modules the spec names."""
+    """
+    One entry point to `<package>:CONNECTOR`, spec.py, guide.md, the modules the spec names, and client.py when the spec
+    names code of the package (an adapter, a validator, a surface): an HTTP connector's adapter is core's
+    HttpSourceAdapter (streamwright.core.sdk.engines.source).
+    """
     source = package / "src/streamwright/connectors" / name
     groups = sorted(project.get("entry-points", {}))
     if groups != ["streamwright.connectors"]:
         problems.append("a connector has exactly one entry point group, streamwright.connectors (has %s)" %
                         ", ".join(groups))
-    for required in ("spec.py", "client.py", "guide.md"):
+    own_code = (source / "spec.py").exists() and bool(spec_targets(source / "spec.py", name))
+    for required in ("spec.py", "client.py", "guide.md") if own_code else ("spec.py", "guide.md"):
         if not (source / required).exists():
             problems.append("missing %s" % required)
     for legacy in ("connector.py", "reader.py", "duckdb_adapter.py", "spark_adapter.py", "spark.py", "_spark.py"):

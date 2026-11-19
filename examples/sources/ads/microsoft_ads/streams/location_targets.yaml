@@ -19,13 +19,13 @@ partitions:
   - {from_stream: campaigns, fields: [account_id, campaign_id]}
 requests:
   - name: raw_location_targets
-    sdk: microsoft_ads
-    service: CampaignManagementService
-    method: GetCampaignCriterionsByIds      # without criterion IDs: all of the campaign's criteria of this type
-    arguments:
-      account_id: "{{ partition.account_id }}"
-      request: {CampaignId: "{{ partition.campaign_id }}", CriterionType: Location}
-    records: {path: CampaignCriterions.CampaignCriterion}   # two parts: CampaignCriterions and PartialErrors
+    operation:
+      service: CampaignManagementService
+      method: GetCampaignCriterionsByIds      # without criterion IDs: all of the campaign's criteria of this type
+      arguments:
+        account_id: "{{ partition.account_id }}"
+        request: {CampaignId: "{{ partition.campaign_id }}", CriterionType: Location}
+      records: {path: CampaignCriterions.CampaignCriterion}   # two parts: CampaignCriterions and PartialErrors
 transform:
   mode: page
   steps:

@@ -1,0 +1,4 @@
+[
+  {"campaign_id": "1111111111", "name": "Search - Brand (renamed)", "status": "ENABLED"},
+  {"resource_name": "customers/1234567890/campaigns/2222222222", "status": "PAUSED"}
+]

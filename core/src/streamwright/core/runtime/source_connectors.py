@@ -41,7 +41,7 @@ from streamwright.core.runtime.contract_validation import (
     resolve_arguments,
     resolve_values,
 )
-from streamwright.core.sdk.operations import http
+from streamwright.core.runtime.operations import http
 
 __all__ = ["CAPABILITIES", "check_call", "check_declared_auth", "check_resolved_auth", "describe_connector",
            "open_session", "read_call", "select_transport"]

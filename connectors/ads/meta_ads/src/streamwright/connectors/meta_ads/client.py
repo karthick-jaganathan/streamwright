@@ -17,8 +17,9 @@
 
 """
 What the meta_ads connector knows about the Meta Marketing API, shared by its engines: the connection rules, the
-FacebookAdsApi built for one access token, reads of objects and edges (paged by the connector), and the SDK's errors
-as ConnectorError (with the code, retryability and the wait the throttling headers ask for).
+FacebookAdsApi built for one access token, reads of objects and edges (paged by the connector), the bound methods
+writes call, and the SDK's errors as ConnectorError (with the code, retryability and the wait the throttling headers
+ask for).
 """
 
 import datetime
@@ -35,14 +36,16 @@ from facebook_business.api import FacebookAdsApi
 from facebook_business.exceptions import FacebookRequestError
 from facebook_business.session import FacebookSession
 
-from streamwright.core.sdk import ConnectorError
+from streamwright.core.sdk import ConnectorError, suggest
 from streamwright.core.sdk.contract import ResolvedConnection
 from streamwright.core.sdk.network import http_details
 
-__all__ = ["connect", "read_pages", "surface", "translate_error", "validate_connection"]
+__all__ = ["api_message", "bound_method", "connect", "export", "read_pages", "surface", "translate_error",
+           "validate_connection"]
 
 PAGE_SIZE: Final = 500
 TIMEOUT_SECONDS: Final = 300  # insights can take minutes
+_NODE_METHODS: Final = ("api_get", "api_update", "api_delete")
 Call = Callable[..., Any]
 
 
@@ -61,7 +64,8 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _export(item: Any) -> Any:
+def export(item: Any) -> Any:
+    """An SDK object as its plain data (other values as they are)."""
     return item.export_all_data() if hasattr(item, "export_all_data") else item
 
 
@@ -105,14 +109,9 @@ def _object_class(service: str) -> Any:
     return cls if isinstance(cls, type) else None
 
 
-def _read_methods(cls: Any) -> list[str]:
-    """The read methods an object offers: `api_get` and its `get_<edge>` edges."""
-    return sorted(name for name in dir(cls) if name == "api_get" or name.startswith("get_"))
-
-
-def _did_you_mean(value: str, candidates: list[str]) -> str:
-    matches = difflib.get_close_matches(value, candidates, n=3)
-    return "; did you mean %s?" % ", ".join(matches) if matches else ""
+def _methods(cls: Any) -> list[str]:
+    """The methods an object offers: `api_get`, `api_update`, `api_delete`, its `get_<edge>` and `create_<edge>`."""
+    return sorted(name for name in dir(cls) if name in _NODE_METHODS or name.startswith(("get_", "create_")))
 
 
 def _object_suggestions(service: str) -> list[str]:
@@ -126,16 +125,16 @@ def _object_suggestions(service: str) -> list[str]:
 
 def surface(service: str, method: str) -> list[str]:
     """
-    Problems if `service.method` is not a readable object and method of the installed facebook_business (§6b): a pure
+    Problems if `service.method` is not an object and method of the installed facebook_business (§6b): a pure
     introspection (no network), with the SDK's own "did you mean" suggestions, so a typo is caught before a run.
     """
     cls = _object_class(service)
     if cls is None:
         return ["%s is not a Marketing API object in %s%s" % (
-            service, _sdk_version(), _did_you_mean(service, _object_suggestions(service)))]
+            service, _sdk_version(), suggest(service, _object_suggestions(service), style="list"))]
     if not callable(getattr(cls, method, None)):
         return ["%s has no %s method in %s%s" % (
-            service, method, _sdk_version(), _did_you_mean(method, _read_methods(cls)))]
+            service, method, _sdk_version(), suggest(method, _methods(cls), style="list"))]
     return []
 
 
@@ -144,16 +143,20 @@ def _node(api: FacebookAdsApi, service: str, identifier: Any) -> Any:
     cls = _object_class(service)
     if cls is None:
         raise ConnectorError("meta_ads: %s is not a Marketing API object in %s%s" % (
-            service, _sdk_version(), _did_you_mean(service, _object_suggestions(service))), retryable=False)
+            service, _sdk_version(), suggest(service, _object_suggestions(service), style="list")), retryable=False)
     return cls(str(identifier), api=api)
 
 
-def _read_method(node: Any, service: str, method: str) -> Call:
-    """The bound read of `node`; an unknown method fails without a retry, naming the SDK version and suggestions."""
+def bound_method(api: FacebookAdsApi, service: str, identifier: Any, method: str) -> Call:
+    """
+    `method` of the object `service` with `identifier`; an unknown object or method fails without a retry, naming the
+    SDK version and suggestions.
+    """
+    node = _node(api, service, identifier)
     bound = getattr(node, method, None)
     if not callable(bound):
         raise ConnectorError("meta_ads: %s has no %s method in %s%s" % (
-            service, method, _sdk_version(), _did_you_mean(method, _read_methods(type(node)))), retryable=False)
+            service, method, _sdk_version(), suggest(method, _methods(type(node)), style="list")), retryable=False)
     return bound
 
 
@@ -165,14 +168,14 @@ def read_pages(api: FacebookAdsApi, service: str, method: str, arguments: Mappin
     action_breakdowns, filtering, action_attribution_windows, ...), merged into the request's `params` (an explicit
     `params` entry wins where they collide).
     """
-    read = _read_method(_node(api, service, arguments["id"]), service, method)
+    read = bound_method(api, service, arguments["id"], method)
     fields = arguments.get("fields") or []
     if isinstance(fields, str):
         fields = [field.strip() for field in fields.split(",") if field.strip()]
     params = _jsonable({**(vendor or {}), **(arguments.get("params") or {})})
     result = call(lambda: read(fields=fields, params=params))  # edges load their first page here
     if method == "api_get":
-        yield [_export(result)]
+        yield [export(result)]
         return
     load_next_page = result.load_next_page
 
@@ -183,7 +186,7 @@ def read_pages(api: FacebookAdsApi, service: str, method: str, arguments: Mappin
     result.load_next_page = next_page
     page: list[dict[str, Any]] = []
     for item in result:
-        page.append(_export(item))
+        page.append(export(item))
         if len(page) >= PAGE_SIZE:
             yield page
             page = []
@@ -207,18 +210,29 @@ def _regain_seconds(headers: Mapping[str, Any] | None) -> float | None:
     return longest * 60 if longest else None
 
 
+def _error_body(exc: FacebookRequestError) -> dict[str, Any]:
+    body = exc.body() if isinstance(exc.body(), dict) else {}
+    return body["error"] if isinstance(body.get("error"), dict) else {}
+
+
+def api_message(exc: FacebookRequestError) -> str:
+    """The Graph API error's message, with Meta's explanation for users when it has one (e.g. which value is wrong)."""
+    message = exc.api_error_message() or exc.get_message()
+    user_message = _error_body(exc).get("error_user_msg")
+    return "%s: %s" % (message, user_message) if user_message else message
+
+
 def translate_error(exc: Exception) -> ConnectorError | None:
     """The ConnectorError of a Graph API or connection exception; None for exceptions that are not API errors."""
     if isinstance(exc, FacebookRequestError):
         code, subcode, status = exc.api_error_code(), exc.api_error_subcode(), exc.http_status()
-        body = exc.body() if isinstance(exc.body(), dict) else {}
-        trace = (body.get("error") or {}).get("fbtrace_id") if isinstance(body.get("error"), dict) else None
+        trace = _error_body(exc).get("fbtrace_id")
         details = ["code %s" % code] + (["subcode %s" % subcode] if subcode else []) + ["HTTP %s" % status] + \
             (["fbtrace_id %s" % trace] if trace else [])
         # the codes worth retrying are configuration (the spec's `retry_codes`, or a stream's `retry.codes`);
         # Meta's own transient flag and a 5xx are the vendor's judgement
         transient = bool(exc.api_transient_error()) or (isinstance(status, int) and status >= 500)
-        return ConnectorError("meta_ads: %s (%s)" % (exc.api_error_message() or exc.get_message(), ", ".join(details)),
+        return ConnectorError("meta_ads: %s (%s)" % (api_message(exc), ", ".join(details)),
                               codes=(code, subcode), retryable=transient,
                               retry_after=_regain_seconds(exc.http_headers()))
     if isinstance(exc, (requests.ConnectionError, requests.Timeout, requests.exceptions.ChunkedEncodingError,

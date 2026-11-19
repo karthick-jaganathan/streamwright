@@ -28,14 +28,14 @@ class AsyncJobSection(RequestPartitionSection):
     """Async job and paginator validation."""
 
     def check_job_request(self, request, path, *, container, key, info, scopes):
-        """The `submit` or `results` request of an async job: an sdk request (an `http:` one is reported already)."""
+        """The `submit` or `results` request of an async job: an `operation:` that is a call (a request is reported)."""
         if not self._expect(isinstance(request, dict), "a mapping", request, path, container=container, key=key):
             return
         if "sdk" in request:
             self.check_sdk_request(request, path, scopes, info)
         else:
-            self.error("missing-key", path, "`%s` needs `sdk`: async jobs run through a connector" % key, container,
-                       key)
+            self.error("missing-key", path, "`%s` needs an `operation:`: async jobs run through a connector" % key,
+                       container, key)
 
     def check_http_request(self, http, path, container, scopes, info):
         HttpChecker(self, info).check_request(http, path, container, scopes, info)
@@ -55,8 +55,9 @@ class AsyncJobSection(RequestPartitionSection):
         base = self.scopes(info)
         for part in ("submit", "results"):
             if isinstance(job.get(part), dict) and "http" in job[part]:
-                self.error("bad-value", (*path, part), "`%s` must be an sdk request: async jobs run through a "
-                            "connector (its `poll` calls the same service)" % part, job, part)
+                self.error("bad-value", (*path, part), "`%s`'s operation must be a call (service, method, "
+                           "arguments): async jobs run through a connector (its `poll` calls the same service)" % part,
+                           job, part)
         if "submit" in job and not (isinstance(job["submit"], dict) and "http" in job["submit"]):
             self.check_job_request(job["submit"], (*path, "submit"), container=job, key="submit", info=info,
                                    scopes=base)

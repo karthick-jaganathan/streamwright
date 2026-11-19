@@ -18,7 +18,8 @@
 """The order a source runs in: a run-mode stream's requests and steps, `from_stream` parents and streams."""
 
 
-from streamwright.core.engine.sql.stream_plan import exports_of, mapping_entries, partition_fields
+from streamwright.core.config.streams import exports_of
+from streamwright.core.engine.sql.stream_plan import mapping_entries, partition_fields
 from streamwright.core.graph import toposort
 
 

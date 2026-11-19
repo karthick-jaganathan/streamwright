@@ -99,7 +99,8 @@ jobs:
       # Dynamically install all connectors and test dependencies
       - name: Install StreamWright, connectors and test dependencies
         run: |
-          python -m pip install ./core connectors/*/* "streamwright-spark[all]~=0.1.0" pytest jsonschema responses \
+          python -m pip install "./core[serve]" connectors/*/* "streamwright-spark[all]~=0.1.0" pytest jsonschema \
+            responses httpx \
             pyarrow deltalake "dlt[duckdb]>=1.0" "ruff==0.17.3"
 
       - name: Check the connectors are registered

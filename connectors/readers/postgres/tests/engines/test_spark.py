@@ -75,6 +75,8 @@ def spark():
         pytest.skip("the PostgreSQL JDBC driver is not in the local ivy cache")
     session = (SparkSession.builder.master("local[1]").appName("mg-db-postgres").config("spark.jars", JAR)
                .config("spark.ui.enabled", "false").getOrCreate())
+    # an earlier test module may have started the JVM without the driver: ADD JAR loads it into the running session
+    session.sql("ADD JAR '%s'" % JAR)
     yield session
     session.stop()
 

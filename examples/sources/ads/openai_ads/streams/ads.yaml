@@ -19,12 +19,13 @@
 # To extract ads with their parent campaign details, use the ad_tree stream.
 partitions:
   - {name: account_id, values: "{{ config.account_ids }}"}
-retry: {max_attempts: 3, max_delay: 2m}
+policy:
+  retry: {max_attempts: 3, max_delay: 2m}
 
 # HTTP request to list ads for each account
 requests:
   - name: raw_ads
-    http:
+    operation:
       path: /v1/ads
       method: GET
       params:

@@ -40,6 +40,9 @@ CONNECTOR = "deltalake"
 
 def _configure_storage(sandbox: DuckDBSandbox, connection: Mapping[str, Any], roots: tuple[str, ...]) -> None:
     """Each object store's extension, and its credentials as bound parameters of a secret scoped to its roots."""
+    problem = client.duckdb_problem(connection)
+    if problem:
+        raise ConnectError(problem)
     for secret in client.storage_secrets(connection, roots):
         load_extension(sandbox.connection, secret.extension)
         names = "".join(", %s ?" % parameter for parameter, _ in secret.parameters)
@@ -51,11 +54,6 @@ def _configure_storage(sandbox: DuckDBSandbox, connection: Mapping[str, Any], ro
         except duckdb.Error as exc:
             raise ConnectError("cannot create the %s secret: %s" % (
                 secret.secret_type, sandbox.mask(message(exc)))) from None
-    settings = client.gcs_settings(connection)
-    if settings:
-        load_extension(sandbox.connection, "httpfs")
-    for name, value in settings:
-        sandbox.connection.execute("SET %s = %s" % (name, quote_literal(value)))
 
 
 class DeltaLakeSession:

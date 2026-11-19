@@ -19,14 +19,14 @@ partitions:
   - {name: account_id, values: "{{ config.account_ids }}"}
 requests:
   - name: raw_ad_sets
-    sdk: meta_ads
-    service: AdAccount
-    method: get_ad_sets
-    arguments:
-      id: "act_{{ partition.account_id }}"
-      fields: [id, account_id, campaign_id, name, status, effective_status, optimization_goal, billing_event,
-               bid_strategy, daily_budget, lifetime_budget, start_time, end_time, updated_time, targeting]
-      params: {limit: 100}                   # targeting is large: smaller pages
+    operation:
+      service: AdAccount
+      method: get_ad_sets
+      arguments:
+        id: "act_{{ partition.account_id }}"
+        fields: [id, account_id, campaign_id, name, status, effective_status, optimization_goal, billing_event,
+                 bid_strategy, daily_budget, lifetime_budget, start_time, end_time, updated_time, targeting]
+        params: {limit: 100}                   # targeting is large: smaller pages
 transform:
   mode: page
   steps:

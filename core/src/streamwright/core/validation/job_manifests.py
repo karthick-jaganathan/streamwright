@@ -32,9 +32,9 @@ from streamwright.core.config import loader as source_files
 from streamwright.core.jobs.engine import load_job_engine
 from streamwright.core.jobs.manifest import MANIFEST_FILE_NAMES
 from streamwright.core.runtime import plugins
+from streamwright.core.runtime.issues import Issue
 from streamwright.core.runtime.plugins import PluginError
 from streamwright.core.validation.checker import ERROR
-from streamwright.core.validation.issues import Issue
 from streamwright.core.validation.marked_yaml import parse_yaml, read_file
 
 # what a unit of validate_paths is: one file, a source folder (checked as one source) or a job manifest

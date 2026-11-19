@@ -19,20 +19,20 @@ partitions:
   - {name: customer_id, values: "{{ config.customer_ids }}"}
 requests:
   - name: raw_location_targets
-    sdk: google_ads
-    service: GoogleAdsService
-    method: search_stream
-    arguments:
-      customer_id: "{{ partition.customer_id }}"
-      query:
-        gaql:
-          select: [customer.id, campaign.id, campaign_criterion.criterion_id,
-                   campaign_criterion.location.geo_target_constant, campaign_criterion.negative,
-                   campaign_criterion.bid_modifier, campaign_criterion.status]
-          from: campaign_criterion
-          where:
-            - {field: campaign_criterion.type, op: "=", type: enum, value: LOCATION}
-            - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ partition.customer_id }}"
+        query:
+          gaql:
+            select: [customer.id, campaign.id, campaign_criterion.criterion_id,
+                     campaign_criterion.location.geo_target_constant, campaign_criterion.negative,
+                     campaign_criterion.bid_modifier, campaign_criterion.status]
+            from: campaign_criterion
+            where:
+              - {field: campaign_criterion.type, op: "=", type: enum, value: LOCATION}
+              - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
 transform:
   mode: page
   steps:

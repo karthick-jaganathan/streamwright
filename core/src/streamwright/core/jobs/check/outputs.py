@@ -15,9 +15,13 @@
 # * limitations under the License.
 # **************************************************************************/
 
-"""Section: outputs, through the WriteTarget of each output's connection (the writers' own rules)."""
+"""
+Section: outputs: an apply output through its connector's operation (streamwright.core.jobs.apply), a publish output
+through its broker, any other through the WriteTarget of its connection (the writers' own rules).
+"""
 
 from streamwright.core.jobs import policy
+from streamwright.core.jobs.apply.log import check_output_log
 from streamwright.core.jobs.check.findings import connections_of, named_items
 from streamwright.core.jobs.write_rules import OutputSpec, check_output
 
@@ -29,18 +33,25 @@ def check_outputs(job, rules, findings):
     steps = {item["name"] for _, item in named_items(job, "steps")}
     for index, item in named_items(job, "outputs"):
         path = ("outputs", index)
-        for code, message, is_warning in policy.check_policy(item, rules.output_policy_keys(), rules.engine,
-                                                             surface="outputs"):
+        conn = connections.get(item.get("connection"))
+        applied = rules.check_apply(item, conn) if conn is not None else None
+        keys = policy.APPLY_POLICY_KEYS if applied is not None else rules.output_policy_keys()
+        for code, message, is_warning in policy.check_policy(item, keys, rules.engine, surface="outputs"):
             findings.add(code, path, message, is_warning)
         if isinstance(item.get("step"), str) and item["step"] not in steps:
             findings.error("unknown-step", (*path, "step"), "unknown step %r" % item["step"])
-        conn = connections.get(item.get("connection"))
         if conn is None:
             if isinstance(item.get("connection"), str):
                 findings.error("unknown-connection", (*path, "connection"), "unknown connection %r" % (
                     item["connection"],))
             continue
-        published = rules.check_publish(item, conn)
+        if applied is not None:
+            for code, message, is_warning in check_output_log(item.get("log")):
+                findings.add(code, (*path, "log"), message, is_warning)
+        elif "log" in item:
+            findings.error("unsupported-key", (*path, "log"), "only an apply output logs its results (log:); a step's "
+                           "log: logs the step's rows")
+        published = applied if applied is not None else rules.check_publish(item, conn)
         if published is not None:
             for code, message, is_warning in published:
                 findings.add(code, path, message, is_warning)

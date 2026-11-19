@@ -183,7 +183,7 @@ def test_streamwright_validate_checks_the_declared_source(storage, capsys, tmp_p
         document = yaml.safe_load(stream)
     with open(os.path.join(EXAMPLE, "streams", "orders.yaml")) as stream:
         orders = yaml.safe_load(stream)
-    orders["requests"][0]["arguments"]["path"] = "orders/east.csv?s3_endpoint=evil.example.com"
+    orders["requests"][0]["operation"]["arguments"]["path"] = "orders/east.csv?s3_endpoint=evil.example.com"
     document["streams"] = [dict(orders, name="orders")]
     document["auth"]["secret"] = "wJalrXUtnFEMIwrittenInTheSource"
     bad = tmp_path / "source.yaml"

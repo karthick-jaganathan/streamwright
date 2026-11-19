@@ -50,9 +50,9 @@ def new_job():
         "connections": {"wh": {"provider": "duckdb", "path": "wh.duckdb"},
                         "lake": {"provider": "files", "roots": ["data"]},
                         "vault": {"provider": "vault", "host": "h", "token": "{{ secrets.token }}"},
-                        "api": {"provider": "rest_api", "base_url": "https://x"}},
+                        "api": {"provider": "rest_api", "http": {"base_url": "https://x"}}},
         "steps": [{"name": "raw", "connection": "lake", "read": "csv", "path": "in/*.csv"},
-                  {"name": "calls", "connection": "api", "request": {"path": "/v1/{{ partition.id }}"},
+                  {"name": "calls", "connection": "api", "operation": {"path": "/v1/{{ partition.id }}"},
                    "partitions": [{"from": "raw", "field": "id"}]},
                   {"name": "shaped", "sql": "SELECT * FROM raw JOIN calls USING (id)", "materialize": "table"}],
         "outputs": [{"name": "fact", "connection": "wh", "step": "shaped", "table": "fact", "mode": "merge",
@@ -115,10 +115,46 @@ def test_references_must_be_declared_steps_or_constants_and_only_where_rendered(
 
 
 def test_step_kinds_allow_only_their_keys():
-    assert _changed(lambda j: j["steps"][0].update(service="x")) == [("unsupported-key", "steps[0].service")]
+    assert _changed(lambda j: j["steps"][0].update(service="x")) == [("unknown-key", "steps[0].service")]
+    assert set(_changed(lambda j: j["steps"][0].update(operation={"service": "x", "method": "y"}))) == {
+        ("unsupported-key", "steps[0].operation.service"), ("unsupported-key", "steps[0].operation.method")}
     assert _changed(lambda j: j["steps"][0].update(table="t")) == [("unsupported-key", "steps[0].table")]
     assert ("bad-value", "steps[0]") in _changed(lambda j: j["steps"][0].update(read="table"))
     assert ("unsupported-key", "steps[2].partitions") in _changed(lambda j: j["steps"][2].update(partitions=[]))
+
+
+def test_an_operation_is_one_group_whose_kind_the_connector_decides():
+    def regroup(name):
+        return lambda j: j["steps"][1].update({name: j["steps"][1].pop("operation")})
+    assert ("unknown-key", "steps[1].http") in _changed(regroup("http"))
+    assert ("unknown-key", "steps[1].call") in _changed(regroup("call"))
+    assert _changed(lambda j: j["steps"][1]["operation"].update(type="http")) == [
+        ("unknown-key", "steps[1].operation.type")]
+    assert _changed(lambda j: j["steps"][1]["operation"].update(service="S")) == [("bad-value", "steps[1].operation")]
+
+
+def test_an_operation_needs_the_keys_of_its_kind():
+    def operation(value):
+        return lambda j: j["steps"][1].update(operation=value)
+    assert _changed(operation({"method": "POST", "json": {"a": 1}})) == [("missing-key", "steps[1].operation.path")]
+    assert _changed(operation({"method": "GET", "records": {"path": "data"}})) == [
+        ("missing-key", "steps[1].operation.path")]
+    assert {("missing-key", "steps[1].operation.service"), ("missing-key", "steps[1].operation.method")} <= set(
+        _changed(operation({"arguments": {"id": 1}})))
+
+
+def test_a_mixed_operation_is_reported_once():
+    assert _changed(lambda j: j["steps"][1].update(operation={"service": 5, "path": 7, "params": 3, "bogus": 1,
+                                                              "type": "http"})) == [("bad-value", "steps[1].operation")]
+
+
+def test_input_constraints_and_defaults_are_checked_as_sources_do():
+    def constrain(j):
+        j["spec"]["config"].update(code={"type": "string", "pattern": "[a-"}, size={"type": "integer", "minimum": "5"},
+                                   kind={"type": "string", "enum": ["x"], "default": "y"})
+    assert sorted(_changed(constrain)) == [("bad-type", "spec.config.size.minimum"),
+                                           ("bad-value", "spec.config.code.pattern"),
+                                           ("bad-value", "spec.config.kind.default")]
 
 
 def test_outputs_follow_their_writer():

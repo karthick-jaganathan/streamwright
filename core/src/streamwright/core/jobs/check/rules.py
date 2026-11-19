@@ -47,6 +47,11 @@ def input_field():
         "default": Field(),
         "description": Field("string"),
         "lookup": INPUT_LOOKUP_FIELD,
+        "enum": Field("array", description="the values it accepts (a list input: each item)"),
+        "pattern": Field("string", description="a regular expression a text value matches in full"),
+        "minimum": Field("number"),
+        "maximum": Field("number"),
+        "max_length": Field("integer", minimum=1, description="the longest text value"),
     })
 
 
@@ -110,6 +115,13 @@ class JobRules:
 
     def write_target(self, connection):
         """The WriteTarget for outputs through `connection`, or None when it cannot be written to."""
+        return
+
+    def check_apply(self, output, connection):
+        """
+        None when `output` does not apply connector operations; when it does (service/method of a connector the
+        engine reaches through a call, streamwright.core.jobs.apply), its problems [(code, message, is_warning)].
+        """
         return
 
     def check_publish(self, output, connection):

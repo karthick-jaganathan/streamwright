@@ -22,5 +22,7 @@ Engine I/O helpers, by feature, composed by connector adapters (connector contra
 - `files`: object-store files for the `source` and `duckdb` engines (store facts, locations inside a connection's
   roots, reads, COPY writes); `file_rules`: the engines' capabilities for the file operations and their semantic
   checks (importable without DuckDB); `locations`: store facts and URL rules; `store_reader`: the source engine's
-  locked DuckDB reader of one store; `file_formats`: formats and options.
+  locked DuckDB reader of one store; `file_formats`: formats and options; `downloads`: the rows of the files async
+  jobs produce (csv, jsonl, json; zip or gzip). `database_rules`, `message_rules`: the engines' capabilities for the
+  database/table and message operations; `capabilities`: each core engine's, combined.
 """

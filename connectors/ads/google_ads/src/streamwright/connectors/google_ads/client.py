@@ -36,17 +36,16 @@ from google.protobuf.json_format import MessageToDict
 
 from streamwright.connectors.google_ads.surface import (
     default_version,
-    did_you_mean,
     read_method_names,
     sdk_version,
     service_names,
     supported_versions,
 )
-from streamwright.core.sdk import ConnectorError
+from streamwright.core.sdk import ConnectorError, suggest
 from streamwright.core.sdk.contract import ResolvedConnection
 
-__all__ = ["GoogleAdsConnection", "connect", "customer_id", "read_pages", "remember_tokens", "rows",
-           "supported_versions", "translate_error", "validate_connection"]
+__all__ = ["GoogleAdsConnection", "connect", "customer_id", "error_code", "read_pages", "remember_tokens", "rows",
+           "sdk_version", "supported_versions", "translate_error", "validate_connection"]
 
 CREDENTIALS: Final = ("developer_token", "client_id", "client_secret", "refresh_token")
 _CUSTOMER_ID: Final = re.compile(r"^[0-9]+$")
@@ -132,7 +131,7 @@ class GoogleAdsConnection:
             except ValueError as exc:  # get_service rejects an unknown service name
                 version_name = self.version or default_version()
                 raise ConnectorError("google_ads: %s is not a service in %s%s" % (
-                    name, sdk_version(), did_you_mean(name, service_names(version_name))),
+                    name, sdk_version(), suggest(name, service_names(version_name), style="list")),
                     retryable=False) from exc
         return self.services[name]
 
@@ -237,7 +236,7 @@ def _resolve_method(api: Any, service: str, method: str) -> Call:
     bound = getattr(api, method, None)
     if not callable(bound):
         raise ConnectorError("google_ads: %s has no %s method in %s%s" % (
-            service, method, sdk_version(), did_you_mean(method, read_method_names(api))), retryable=False)
+            service, method, sdk_version(), suggest(method, read_method_names(api), style="list")), retryable=False)
     return bound
 
 
@@ -268,7 +267,7 @@ def _message_row(message: Any) -> dict[str, Any]:
 # * errors
 # * ------
 
-def _error_code(error: Any) -> str:
+def error_code(error: Any) -> str:
     """The name of a GoogleAdsError's code, e.g. RESOURCE_EXHAUSTED (from `quota_error`)."""
     code = error.error_code
     kind = type(code).pb(code).WhichOneof("error_code")
@@ -299,7 +298,7 @@ def _connector_error(status: str | None, failure: Any, request_id: str | None, m
     """A ConnectorError from a gRPC status and the Google Ads failure that came with it."""
     codes, details, retry_after = [], [], None
     for error in (failure.errors if failure is not None else ()):
-        code = _error_code(error)
+        code = error_code(error)
         codes.append(code)
         details.append("%s: %s" % (code, error.message))
         delay = error.details.quota_error_details.retry_delay

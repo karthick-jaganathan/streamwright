@@ -22,14 +22,15 @@ run) and `DUCKDB_CAPABILITIES` (kind: DuckDBJob). The engines' connector binding
 
 from typing import Final
 
-from streamwright.core.io import database_rules, file_rules
+from streamwright.core.io import database_rules, file_rules, message_rules
 from streamwright.core.runtime.contract import combine_capabilities
-from streamwright.core.sdk import messaging
 
 __all__ = ["DUCKDB_CAPABILITIES", "ENGINE_CAPABILITIES", "SOURCE_CAPABILITIES"]
 
-SOURCE_CAPABILITIES: Final = combine_capabilities(file_rules.SOURCE_CAPABILITIES, database_rules.SOURCE_CAPABILITIES,
-                                                  messaging.SOURCE_CAPABILITIES)
-DUCKDB_CAPABILITIES: Final = combine_capabilities(file_rules.DUCKDB_CAPABILITIES, database_rules.DUCKDB_CAPABILITIES,
-                                                  messaging.DUCKDB_CAPABILITIES)
+SOURCE_CAPABILITIES: Final = combine_capabilities(file_rules.FILE_SOURCE_CAPABILITIES,
+                                                  database_rules.DATABASE_SOURCE_CAPABILITIES,
+                                                  message_rules.MESSAGE_SOURCE_CAPABILITIES)
+DUCKDB_CAPABILITIES: Final = combine_capabilities(file_rules.FILE_DUCKDB_CAPABILITIES,
+                                                  database_rules.DATABASE_DUCKDB_CAPABILITIES,
+                                                  message_rules.MESSAGE_DUCKDB_CAPABILITIES)
 ENGINE_CAPABILITIES: Final = (SOURCE_CAPABILITIES, DUCKDB_CAPABILITIES)

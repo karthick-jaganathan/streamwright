@@ -18,13 +18,13 @@ description: Google Sheets budget targets and campaign allocations.
 
 requests:
   - name: raw_budgets
-    service: spreadsheet
-    method: read
-    sdk: google_sheets
-    arguments:
-      spreadsheet_id: "{{ config.spreadsheet_id }}"
-      sheet: "Budgets"
-      header_row: 1
+    operation:
+      service: spreadsheet
+      method: read
+      arguments:
+        spreadsheet_id: "{{ config.spreadsheet_id }}"
+        sheet: "Budgets"
+        header_row: 1
 
 transform:
   mode: page

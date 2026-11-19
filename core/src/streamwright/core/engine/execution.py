@@ -19,12 +19,12 @@
 
 from streamwright.core.engine import rules, sql
 from streamwright.core.engine.errors import SourceError
-from streamwright.core.engine.queries import QueryError
 from streamwright.core.engine.readers import read_pages
-from streamwright.core.net import downloads
+from streamwright.core.io import downloads
 from streamwright.core.net.http import HttpError
 from streamwright.core.runtime import components
 from streamwright.core.runtime.connector_types import ConnectorError
+from streamwright.core.runtime.queries import QueryError
 from streamwright.core.runtime.templates import TemplateError, json_numbers
 
 # errors that `on_partition_error: skip` can skip
@@ -63,6 +63,7 @@ class PageModeExecutor:
         steps = [(step["name"], plan.queries[step["name"]], runner._parameters(plan, step["name"]),
                   plan.conform.get(step["name"])) for _, step in plan.steps]
         exports = [(export, step, plan.columns[step]) for export, _, step in plan.exports]
+        keyed = [(export, step, spec["primary_key"]) for export, spec, step in plan.exports if spec.get("primary_key")]
         for export, spec, step in plan.exports:
             runner.writer.write_schema(export, plan.columns[step], spec.get("primary_key") or [], stats)
         wanted = runner.collected.get(stream["name"], {}) if len(exports) == 1 else {}
@@ -79,6 +80,7 @@ class PageModeExecutor:
                                            scopes=runner._scopes(partition, window), where=where, read=read)
                         for page in _named_errors(pages, "request %r" % request["name"]):
                             sandbox.run_page(request["name"], page, scope, steps)
+                            self._check_keys(sandbox, keyed)
                             for export, step, columns in exports:
                                 runner.writer.write_records(export, sandbox.table_records(step, columns), wanted, stats)
                         if window is not None:
@@ -92,6 +94,13 @@ class PageModeExecutor:
                 sandbox.drop_table(table)
         if stream["name"] in runner.incomplete:
             runner.writer.mark_partial(plan)
+
+    def _check_keys(self, sandbox, keyed):
+        """A page's rows must each have a primary_key, as run mode requires of all rows."""
+        for export, step, keys in keyed:
+            problem = sandbox.null_key_problem(step, keys)
+            if problem:
+                raise SourceError(self.runner.redact("export %r: %s" % (export, problem)))
 
 
 class RunModeExecutor:

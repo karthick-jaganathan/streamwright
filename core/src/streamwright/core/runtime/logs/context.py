@@ -20,26 +20,35 @@ The log context: who a log line is about (job, account, batch, step, ...), set b
 copied onto every record (the record factory), so lines of runs and passes that run side by side tell themselves
 apart. The keys are fixed (CONTEXT_FIELDS); a manifest adds only `labels` (runtime.log.labels), its own namespace.
 
-Text lines show `[job label=value ... item step=... | output=... | lookup=...]` after the logger name; JSON lines carry
-every key (labels as one object). Values are text, without newlines, at most 120 characters, and scrubbed like the
-message. A thread started for a run's work takes the context with it: `bind(function)`.
+Text lines show `[job label=value ... item step=... | output=... | lookup=... req=...]` after the logger name; JSON
+lines carry every key (labels as one object). `request_id` names one run (or, under `serve`, one request): every line
+of it, across its passes and threads, carries the same id (new_request_id: `sw_` and 22 URL-safe characters). Values
+are text, without newlines, at most 120 characters, and scrubbed like the message. A thread started for a run's work
+takes the context with it: `bind(function)`.
 """
 
+import base64
 import contextlib
 import contextvars
 import re
+import uuid
 from types import MappingProxyType
 
 __all__ = ["CONTEXT_FIELDS", "LABEL_PATTERN", "MAX_LABELS", "bind", "context_tag", "context_value", "current_context",
-           "log_context", "stamp"]
+           "log_context", "new_request_id", "stamp"]
 
-CONTEXT_FIELDS = ("job", "item", "scope", "job_id", "step", "output", "lookup")
+CONTEXT_FIELDS = ("job", "item", "scope", "job_id", "step", "output", "lookup", "request_id")
 LABEL_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 MAX_LABELS = 8
 _MAX_VALUE = 120
 _TAGGED = ("step", "output", "lookup")       # what the text tag shows after job, labels and item
 _EMPTY = MappingProxyType({})
 _CONTEXT = contextvars.ContextVar("streamwright_log_context", default=_EMPTY)
+
+
+def new_request_id():
+    """A new request id: `sw_` and 128 random bits as 22 URL-safe base64 characters."""
+    return "sw_" + base64.urlsafe_b64encode(uuid.uuid4().bytes).decode("ascii").rstrip("=")
 
 
 def _clean(value):
@@ -115,4 +124,6 @@ def context_tag(context):
     if context.get("item"):
         parts.append(context["item"])
     parts += ["%s=%s" % (key, context[key]) for key in _TAGGED if context.get(key)]
+    if context.get("request_id") and parts:
+        parts.append("req=%s" % context["request_id"])
     return " [%s]" % " ".join(parts) if parts else ""

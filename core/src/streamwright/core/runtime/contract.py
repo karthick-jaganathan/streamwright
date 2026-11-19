@@ -56,8 +56,8 @@ from streamwright.core.runtime.contract_terms import (
     is_secret_reference,
     types_of,
 )
+from streamwright.core.runtime.issues import Issue
 from streamwright.core.runtime.redact import Redactor
-from streamwright.core.validation.issues import Issue
 
 __all__ = [
     "ALL_ENGINES", "ENGINES", "FIELD_TYPES", "SDK_VERSION", "AdapterLoadError", "ConnectorDefinition",

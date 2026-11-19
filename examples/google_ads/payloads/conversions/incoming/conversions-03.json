@@ -1,0 +1,44 @@
+[
+ {
+  "gclid": "EXAMPLE_GCLID_0013",
+  "conversion_action": "Offline qualified lead",
+  "conversion_date_time": "2026-01-31 11:31:00-05:00",
+  "order_id": "EXAMPLE-ORDER-0013"
+ },
+ {
+  "gclid": "EXAMPLE_GCLID_0014",
+  "conversion_action": "Offline purchase",
+  "conversion_date_time": "2026-01-31 11:38:00-05:00",
+  "conversion_value": 55.5,
+  "currency_code": "USD",
+  "order_id": "EXAMPLE-ORDER-0014"
+ },
+ {
+  "gclid": "EXAMPLE_GCLID_0015",
+  "conversion_action": "Offline qualified lead",
+  "conversion_date_time": "2026-01-31 11:45:00-05:00",
+  "order_id": "EXAMPLE-ORDER-0015"
+ },
+ {
+  "gclid": "EXAMPLE_GCLID_0016",
+  "conversion_action": "Offline purchase",
+  "conversion_date_time": "2026-01-31 11:52:00-05:00",
+  "conversion_value": 62.0,
+  "currency_code": "USD",
+  "order_id": "EXAMPLE-ORDER-0016"
+ },
+ {
+  "gclid": "EXAMPLE_GCLID_0017",
+  "conversion_action": "Offline qualified lead",
+  "conversion_date_time": "2026-01-31 11:59:00-05:00",
+  "order_id": "EXAMPLE-ORDER-0017"
+ },
+ {
+  "gclid": "EXAMPLE_GCLID_0018",
+  "conversion_action": "Offline purchase",
+  "conversion_date_time": "2026-01-31 12:06:00-05:00",
+  "conversion_value": 68.5,
+  "currency_code": "USD",
+  "order_id": "EXAMPLE-ORDER-0018"
+ }
+]

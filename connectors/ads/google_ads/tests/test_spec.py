@@ -22,8 +22,8 @@ from types import MappingProxyType
 import pytest
 
 from streamwright.connectors.google_ads import CONNECTOR, client
-from streamwright.core.engine.queries import BuiltQuery
 from streamwright.core.runtime.source_connectors import check_call
+from streamwright.core.sdk import BuiltQuery
 from streamwright.core.sdk.contract import InvalidConnectionError, check_arguments, check_connection, resolve_values
 from streamwright.core.sdk.engines.source import ConnectorContext
 from streamwright.core.sdk.testing import certify, components, load_source
@@ -47,11 +47,18 @@ def test_the_credentials_are_secret_references():
         ("missing-key", "developer_token"), ("missing-key", "client_secret"), ("missing-key", "refresh_token")]
 
 
-def test_only_read_only_calls_are_offered():
-    assert [operation.name for operation in CONNECTOR.operations] == [
-        "GoogleAdsService.search_stream", "GoogleAdsService.search", "*Service.get_*", "*Service.list_*"]
+def test_streams_read_only_and_writes_are_apply_operations():
+    reads = [operation.name for operation in CONNECTOR.operations if operation.kind == "read"]
+    assert reads == ["GoogleAdsService.search_stream", "GoogleAdsService.search", "*Service.get_*", "*Service.list_*"]
+    applies = {operation.name: operation.idempotent for operation in CONNECTOR.operations if operation.kind == "apply"}
+    assert applies == {"*Service.mutate_*": False, "*UploadService.upload_*": True}
+    for service, method in (("ConversionUploadService", "upload_click_conversions"),
+                            ("ConversionAdjustmentUploadService", "upload_conversion_adjustments")):
+        upload = CONNECTOR.operation(service, method)                  # the family, bound to the concrete method
+        assert (upload.name, upload.idempotent, upload.actions, upload.max_chunk) == (
+            "%s.%s" % (service, method), True, ("upload",), 2000)
     connector = components.load("google_ads")
-    # a mutate matches no read family, so it is refused before the SDK is even consulted
+    # a source stream or call step runs reads only: a mutate is refused there (it runs as an apply output)
     assert check_call(connector, {"service": "CampaignService", "method": "mutate_campaigns"}) == [
         "google_ads: CampaignService.mutate_campaigns is not supported (supported: GoogleAdsService.search_stream, "
         "GoogleAdsService.search, *Service.get_*, *Service.list_*)"]

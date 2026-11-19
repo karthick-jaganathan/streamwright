@@ -12,7 +12,8 @@ core/src/streamwright/core/jobs/state/dialects.py:mysql
 core/src/streamwright/core/jobs/state/url.py:postgres
 core/src/streamwright/core/jobs/state/url.py:mysql
 core/src/streamwright/core/jobs/state/migrations/0001_initial_schema.py:postgres
-core/src/streamwright/core/jobs/state/migrations/0001_initial_schema.py:mysql
+core/src/streamwright/core/jobs/state/migrations/ddl.py:postgres
+core/src/streamwright/core/jobs/state/migrations/ddl.py:mysql
 core/src/streamwright/core/jobs/state/tables/base.py:postgres
 core/src/streamwright/core/jobs/state/tables/base.py:mysql
 core/src/streamwright/core/cli/commands/state.py:mysql

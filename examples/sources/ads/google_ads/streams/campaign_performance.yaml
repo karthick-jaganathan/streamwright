@@ -24,19 +24,19 @@ incremental:
   lookback: 30d                    # conversions are restated for weeks; re-read the last 30 days each run
 requests:
   - name: raw_campaign_performance
-    sdk: google_ads
-    service: GoogleAdsService
-    method: search_stream
-    arguments:
-      customer_id: "{{ partition.customer_id }}"
-      query:
-        gaql:                      # the gaql query builder (streamwright-google-ads) writes the escaped query
-          select: [customer.id, campaign.id, campaign.name, campaign.status, segments.date,
-                   metrics.impressions, metrics.clicks, metrics.cost_micros]
-          from: campaign
-          where:
-            - {field: segments.date, op: BETWEEN, type: date, value: ["{{ window.start }}", "{{ window.end }}"]}
-            - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ partition.customer_id }}"
+        query:
+          gaql:                      # the gaql query builder (streamwright-google-ads) writes the escaped query
+            select: [customer.id, campaign.id, campaign.name, campaign.status, segments.date,
+                     metrics.impressions, metrics.clicks, metrics.cost_micros]
+            from: campaign
+            where:
+              - {field: segments.date, op: BETWEEN, type: date, value: ["{{ window.start }}", "{{ window.end }}"]}
+              - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
 transform:
   mode: page
   steps:

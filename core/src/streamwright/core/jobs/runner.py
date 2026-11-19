@@ -36,9 +36,10 @@ receipt are not rerun; a committed batch is never re-executed), then the outbox 
 failed batch is dealt with by the scope's next run, before new work, as runtime.state.failed_job_policy says: abandon
 (the default) gives it up; retry resumes it from the status it failed from while it has been started fewer than
 max_job_attempts times; block (and retry after the last attempt) stops the job until it is retried (`state retry`) or
-abandoned (`state abandon`). A relay
-failure is reported on its own and never marks a batch failed. The lease is renewed by a heartbeat while a batch
-runs; a worker that lost it stops at its next fenced write (StaleLeaseError).
+abandoned (`state abandon`). A relay failure is reported on its own and never marks a batch failed, except rows an
+apply output rejected under on_row_error: fail (their batch fails); retrying that batch sends again only its failed
+rows of such outputs (never an applied row; in-flight rows keep their recovery rules). The lease is renewed by a
+heartbeat while a batch runs; a worker that lost it stops at its next fenced write (StaleLeaseError).
 """
 
 import datetime
@@ -53,11 +54,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from streamwright.core.jobs import outbox, payload
 from streamwright.core.jobs.heartbeat import Heartbeat
 from streamwright.core.jobs.locking import FailedJobPolicy, check_key, scope_token
 from streamwright.core.jobs.state import LeaseHeldError, StaleLeaseError
-from streamwright.core.jobs.types import BatchContext, Broker, ExecutionHooks, Message
+from streamwright.core.jobs.types import ERROR_TEXT_LIMIT, BatchContext, Broker, ExecutionHooks, Message
 from streamwright.core.runtime.logs import fields, log_context
+from streamwright.core.runtime.logs.context import current_context
 
 __all__ = [
     "DEFAULT_MAX_MESSAGES",
@@ -73,7 +76,6 @@ __all__ = [
 ]
 
 LOG = logging.getLogger("streamwright.jobs.runner")
-ERROR_TEXT_LIMIT = 2000
 MODES = ("once", "drain", "available_now", "follow")
 DEFAULT_MAX_MESSAGES = 500
 
@@ -83,7 +85,7 @@ class RunnerError(Exception):
 
 
 class RelayError(RunnerError):
-    """Publishing the outbox failed; the batches stay acked and are relayed by the next run."""
+    """Relaying the outbox failed (or an apply output stopped); the batches stay acked, the next run relays them."""
 
 
 @dataclass(frozen=True)
@@ -129,10 +131,13 @@ class Runner:
 
     def __init__(self, job_name, state, executor=None, consumer=None, publishers=None, *, redact=None,
                  lease_seconds=300, heartbeat_seconds=None, engine_metadata=None, owner=None, log=None,
-                 clock=_now_iso, sleep=time.sleep, scope="", lock=None, prepare=None, failed_jobs=None):
+                 clock=_now_iso, sleep=time.sleep, scope="", lock=None, prepare=None, failed_jobs=None,
+                 applier=None, input_payload=None):
         """
         consumer:   BrokerCall of the job's consume step, or None
         publishers: {output name: BrokerCall} for the outputs that publish events
+        applier:    the Applier of the outputs that apply operations (streamwright.core.jobs.apply), or None
+        input_payload: the run's input payload (streamwright.core.jobs.payload): pinned in its new batch
         redact:     callable applied to every error text that is logged or stored
         scope:      runtime.state.scope ("" for none)
         lock:       a LockPlan (tokens, item tokens, policy, timeout; inputs(lease) -> a new batch's pinned inputs)
@@ -140,7 +145,8 @@ class Runner:
         failed_jobs: a FailedJobPolicy (default: abandon)
         """
         self.job_name, self.state, self.executor, self.scope = job_name, state, executor, scope or ""
-        self.consumer, self.publishers = consumer, dict(publishers or {})
+        self.consumer, self.publishers, self.applier = consumer, dict(publishers or {}), applier
+        self.input_payload = input_payload
         self.redact = redact or (lambda text: text)
         self.lease_seconds = int(lease_seconds)
         self.heartbeat_seconds = heartbeat_seconds if heartbeat_seconds is not None else max(1, self.lease_seconds // 3)
@@ -156,6 +162,7 @@ class Runner:
         self.processed = []                  # batch ids this run processed (new and resumed)
         self.skipped = False                 # the lock policy pruned all this run's work
         self.error = None                    # the (redacted) reason the run stopped
+        self.lease_held = False              # it stopped because another run holds the job's lease (retry later)
 
     # --- public ---------------------------------------------------------------------------------------------
 
@@ -193,6 +200,7 @@ class Runner:
             if self.lease is None:
                 self.acquire()
         except LeaseHeldError as exc:
+            self.lease_held = True
             return self._stop("lease_held", exc)
         if not self.lease.epoch:
             return self._skip()
@@ -282,6 +290,7 @@ class Runner:
     def _failed(self, batch):
         """
         A failed batch under the failed-job policy: abandoned (None), moved back to work (its status), or RunnerError.
+        A retry puts the batch's failed rows of on_row_error: fail apply outputs back to pending (the relay resends).
         """
         name, error, policy = batch["batch_id"], batch.get("error") or "no detail", self.failed_jobs
         if policy.policy == "abandon":
@@ -293,7 +302,9 @@ class Runner:
         if reason:
             raise RunnerError("batch %s failed earlier and is not retried (%s): retry or abandon it (`state retry` or "
                               "`state abandon` with its job id); its error: %s" % (name, reason, error))
-        status = self.state.retry_batch(self.lease, name)
+        resend = [output for output, call in (self.applier.calls if self.applier else {}).items()
+                  if call.on_row_error == "fail"]
+        status = self.state.retry_batch(self.lease, name, resend=resend)
         attempt = "%d of %d" % (int(batch.get("attempts") or 1) + 1, policy.max_attempts)
         self.log("retry", job_id=name, attempt=attempt, resumes_from=status, error=error)
         return status
@@ -328,11 +339,15 @@ class Runner:
                     "messages": [m.to_dict() for m in messages]}
         if self.inputs is not None:
             manifest["inputs"] = json.loads(_canonical(self.inputs))
+        if self.input_payload is not None:
+            payload.pin(manifest, self.input_payload)
         fixed = [t for t in (self.lock.tokens if self.lock else ()) if t]
         tokens = {"accepted": fixed + list((self.inputs or {}).get("tokens") or ()),
                   "skipped": list(self.lease.pruned_tokens)}
+        request = current_context().get("request_id")       # the run (or serve request) that made the batch
+        metadata = dict(self.engine_metadata, **({"request_id": request} if request else {}))
         self.state.record_batch(self.lease, name, "received", manifest, batch_sequence=sequence, scope=self.scope,
-                                job_key=job_key, tokens=tokens, engine_metadata=self.engine_metadata or None)
+                                job_key=job_key, tokens=tokens, engine_metadata=metadata or None)
         self._process(name, sequence, manifest, "received")
         return True
 
@@ -361,7 +376,7 @@ class Runner:
                 self.state.record_batch(self.lease, batch_id, "failed", manifest, error=text)
                 raise RunnerError("batch %s failed: %s" % (batch_id, text)) from None
             self._relay()
-            self.state.record_batch(self.lease, batch_id, "completed", manifest)
+            self.state.record_batch(self.lease, batch_id, "completed", payload.settle(manifest))
             self.log("completed", job_id=batch_id)
 
     def _execute(self, batch_id, sequence, manifest, status):
@@ -384,12 +399,8 @@ class Runner:
                                                                                  pinned))
             result = executor.execute(context, manifest, done, hooks)
             fence()
-        events = {}
-        for output_name, rows in result.events.items():
-            if output_name not in self.publishers:
-                raise RunnerError("output %s produced events but publishes to no broker" % output_name)
-            call = self.publishers[output_name]
-            events[output_name] = (call.broker.destination(call.arguments), list(rows))
+        outputs = {item.get("name"): item for item in (getattr(executor, "job", None) or {}).get("outputs") or ()}
+        events = outbox.entries(result.events, self.publishers, self.applier, outputs)
         self.state.commit_batch(self.lease, batch_id, manifest, events, result.schema_signatures)
         if result.schema_reports:
             rejected = sum(1 for r in result.schema_reports if r.status == "rejected")
@@ -399,18 +410,8 @@ class Runner:
     # --- outbox ---------------------------------------------------------------------------------------------
 
     def _relay(self):
-        groups = {}
-        for row in self.state.list_pending_events(self.job_name, self.scope):
-            groups.setdefault((row["batch_id"], row["output_name"]), []).append(row)
-        for (batch_id, output_name), rows in sorted(groups.items()):
-            call = self.publishers.get(output_name)
-            if call is None:
-                raise RelayError("the outbox holds events for output %r, which publishes to no broker" % output_name)
-            try:
-                call.broker.publish(call.arguments, [r["payload"] for r in rows],
-                                    "%s:%s:%s" % (self.job_name, batch_id, output_name))
-            except Exception as exc:
-                raise RelayError("relaying %d events of %s/%s failed: %s: %s" % (
-                    len(rows), batch_id, output_name, type(exc).__name__, exc)) from None
-            self.state.mark_events_sent(self.lease, batch_id, output_name, [r["event_sequence"] for r in rows])
-            self.log("relayed", job_id=batch_id, output=output_name, events=len(rows))
+        try:
+            outbox.relay(self.state, self.lease, job_name=self.job_name, scope=self.scope, publishers=self.publishers,
+                         applier=self.applier, log=self.log)
+        except outbox.OutboxError as exc:
+            raise RelayError(self.redact(str(exc))) from None

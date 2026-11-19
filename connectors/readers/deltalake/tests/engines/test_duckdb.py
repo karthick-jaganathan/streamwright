@@ -25,6 +25,7 @@ import pytest
 from streamwright.connectors.deltalake import CONNECTOR
 from streamwright.connectors.deltalake.engines import duckdb as duckdb_engine
 from streamwright.connectors.deltalake.engines.duckdb import DeltaLakeDuckDBAdapter
+from streamwright.core.sdk.engines.duckdb import DuckDBSession
 from streamwright.core.sdk.testing import DuckDBAdapterContract, JobInvalidError, SqlStateStore, open_sqlite, run_job
 
 deltalake = pytest.importorskip("deltalake")
@@ -65,6 +66,75 @@ def test_a_step_reads_a_table_inside_the_roots_only(tmp_path, lake):
     job["steps"][0]["path"] = os.path.join(outside, "cities")
     failed = run_job(job)
     assert failed.exit_code == 1 and "outside the roots" in failed.error
+
+
+def test_each_root_has_its_own_secret_scoped_to_it():
+    class Session:
+        def __init__(self):
+            self.secrets = {}
+
+        def load_extension(self, name):
+            pass
+
+        def create_secret(self, name, kind, options, scope=None):
+            self.secrets[name] = scope       # CREATE OR REPLACE: a reused name keeps the last scope only
+    session = Session()
+    connection = {"roots": ["s3://a/x", "s3://b/y"], "aws_access_key_id": "AKIA", "aws_secret_access_key": "s"}
+    DeltaLakeDuckDBAdapter().configure(session, "lake", connection)
+    assert sorted(session.secrets.values()) == ["s3://a/x", "s3://b/y"]
+
+
+def test_each_gs_root_has_its_own_gcs_secret_of_the_hmac_key():
+    class Session:
+        def __init__(self):
+            self.secrets, self.extensions = {}, set()
+
+        def load_extension(self, name):
+            self.extensions.add(name)
+
+        def create_secret(self, name, kind, options, scope=None):
+            self.secrets[name] = (kind, [key for key, _ in options], scope)
+    session = Session()
+    connection = {"roots": ["gs://a/x", "/local", "GCS://b/y"], "gcs_hmac_key_id": "GOOG1E", "gcs_hmac_secret": "s"}
+    DeltaLakeDuckDBAdapter().configure(session, "lake", connection)
+    assert session.extensions == {"httpfs"}
+    assert session.secrets == {"lake_gcs_0": ("gcs", ["KEY_ID", "SECRET"], "gs://a/x"),
+                               "lake_gcs_1": ("gcs", ["KEY_ID", "SECRET"], "gcs://b/y")}
+
+
+def test_a_job_reads_with_the_gcs_secret_of_its_hmac_key_and_never_logs_it(lake, caplog, capsys, monkeypatch):
+    inside, _ = lake
+    created, real = [], DuckDBSession.create_secret
+
+    def create_secret(self, name, kind, options, scope=None):
+        created.append((real(self, name, kind, options, scope=scope), kind, scope))
+        return created[-1][0]
+    monkeypatch.setattr(DuckDBSession, "create_secret", create_secret)
+    job = {"kind": "DuckDBJob", "name": "read_job",
+           "connections": {"lake": {"provider": "deltalake", "roots": [inside, "gs://bucket/lake"],
+                                    "gcs_key_file": "/keys/sa.json", "gcs_hmac_key_id": "{{ secrets.gcs_id }}",
+                                    "gcs_hmac_secret": "{{ secrets.gcs_secret }}"}},
+           "steps": [{"name": "cities", "connection": "lake", "read": "delta", "path": "cities"}],
+           "outputs": [{"name": "copy", "connection": "lake", "step": "cities", "path": "copy", "mode": "append"}]}
+    secrets = {"gcs_id": "GOOG1EKEYID", "gcs_secret": "hmacS3cr3t"}
+    job["spec"] = {"secrets": {name: {"type": "string", "required": True} for name in secrets}}
+    caplog.set_level("DEBUG")
+    assert run_job(job, secrets=secrets).exit_code == 0
+    assert set(created) == {('"streamwright_lake_gcs_0"', "gcs", "gs://bucket/lake")}
+    job["steps"][0]["path"] = "gs://elsewhere/cities"
+    failed = run_job(job, secrets=secrets)
+    assert failed.exit_code == 1 and "outside the roots" in failed.error
+    seen = failed.error + caplog.text + "".join(capsys.readouterr())
+    assert "GOOG1EKEYID" not in seen and "hmacS3cr3t" not in seen
+
+
+def test_a_read_with_gcs_keys_duckdb_cannot_use_is_refused(tmp_path):
+    job = {"kind": "DuckDBJob", "name": "read_job",
+           "connections": {"lake": {"provider": "deltalake", "roots": [str(tmp_path)], "gcs_key_file": "/k.json"}},
+           "steps": [{"name": "cities", "connection": "lake", "read": "delta", "path": "cities"}],
+           "outputs": [{"name": "copy", "connection": "lake", "step": "cities", "path": "copy", "mode": "append"}]}
+    failed = run_job(job)
+    assert failed.exit_code == 1 and "gcs_key_file: DuckDB reads Google Cloud Storage" in failed.error
 
 
 def test_an_append_whose_commit_already_happened_is_not_written_again(tmp_path, monkeypatch):

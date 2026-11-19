@@ -33,18 +33,21 @@ from collections.abc import Mapping
 
 from streamwright.core.config.inputs import secrets_from_env
 from streamwright.core.jobs import validate as job_validation
+from streamwright.core.jobs.apply.delivery import Applier, apply_calls
 from streamwright.core.jobs.duckdb.executor import DuckDBExecutor
 from streamwright.core.jobs.duckdb.loading import discover_adapters, load_adapters
-from streamwright.core.jobs.duckdb.results import RunResult, combine_passes
+from streamwright.core.jobs.duckdb.results import RunResult, apply_counts, combine_passes
 from streamwright.core.jobs.duckdb.rules import DuckDBRules
 from streamwright.core.jobs.duckdb.session import Session
 from streamwright.core.jobs.duckdb.steps import message_kind
+from streamwright.core.jobs.grammar import to_internal
 from streamwright.core.jobs.inputs import InputError, declared_inputs, effective_config, secret_values, state_secrets
 from streamwright.core.jobs.locking import applies_migrations, lock_plan, resolve_failed_job_policy
 from streamwright.core.jobs.log_labels import job_log_context
 from streamwright.core.jobs.lookups import Lookups, has_lookups, lookup_optional, state_inputs
 from streamwright.core.jobs.lookups.passes import run_passes
 from streamwright.core.jobs.manifest import load_job, manifest_directory
+from streamwright.core.jobs.payload import run_payload
 from streamwright.core.jobs.plan import build_plan
 from streamwright.core.jobs.refs import resolve
 from streamwright.core.jobs.runner import DEFAULT_MAX_MESSAGES, BrokerCall, Runner
@@ -52,6 +55,7 @@ from streamwright.core.jobs.schema import json_schema as generate_schema
 from streamwright.core.jobs.state import DEFAULT_SCHEMA, open_sqlite, open_store
 from streamwright.core.jobs.state.target import describe_connection
 from streamwright.core.jobs.types import written_files
+from streamwright.core.runtime.logs.context import log_context, new_request_id
 from streamwright.core.runtime.redact import Redactor
 
 __all__ = [
@@ -144,8 +148,7 @@ class _RedactFilter(logging.Filter):
 
 def _used(job):
     """The connections a step, an output or the state store uses (only those are set up)."""
-    names = {s["connection"] for s in job.get("steps") or () if s.get("connection")}
-    return names | _writable(job)
+    return {s["connection"] for s in job.get("steps") or () if s.get("connection")} | _writable(job)
 
 
 def _writable(job):
@@ -184,7 +187,8 @@ def run_job(job, *, config=None, secrets=None, overlays=(), allowed_connectors=N
             base_dir=None, resume_only=False, strict=False, state_lock_policy=None, state_lock_timeout=None,
             job_key=None, mode="once", interval=10.0, max_messages=DEFAULT_MAX_MESSAGES,
             apply_state_migrations=False, failed_job_policy=None, max_job_attempts=None, allow_lookup_exec=False,
-            fan_out_concurrency=None, fan_out_on_failure=None):
+            fan_out_concurrency=None, fan_out_on_failure=None, input_source=None, request_id=None, input_rows=None,
+            log_row_values=True):
     """
     Runs a DuckDBJob (a mapping or a path) once: unfinished batches are resumed first (`resume_only`: and nothing
     else). `config`/`secrets` are provided values (spec definitions apply; secrets also come from
@@ -196,8 +200,10 @@ def run_job(job, *, config=None, secrets=None, overlays=(), allowed_connectors=N
     and `max_job_attempts` override runtime.state's: what the run does with a failed batch of its scope.
     spec.lookups fill the inputs not given explicitly (command and function lookups need `allow_lookup_exec`);
     runtime.fan_out runs the job once per item (`fan_out_concurrency`, `fan_out_on_failure` override it), and the
-    result then has one `passes` entry per item.
-    Raises JobInvalidError before anything runs; returns a RunResult (exit_code 0 on success).
+    result then has one `passes` entry per item. `input_source`: the input payload of a job with spec.input (a path,
+    or "-" for stdin), read and checked before anything runs; or `input_rows`, the rows themselves. `request_id` names
+    the run in every log line and its batches' metadata (default: a new one). `log_row_values` False (serve): a step's
+    `log:` logs its number of rows, not their values. Raises JobInvalidError before anything runs; returns a RunResult.
     """
     raw, found_dir = _load(job, list(overlays))
     redact = Redactor()
@@ -207,16 +213,19 @@ def run_job(job, *, config=None, secrets=None, overlays=(), allowed_connectors=N
                "redact": redact, "resume_only": resume_only, "strict": strict, "state_lock_policy": state_lock_policy,
                "state_lock_timeout": state_lock_timeout, "job_key": job_key, "mode": mode, "interval": interval,
                "max_messages": max_messages, "apply_state_migrations": apply_state_migrations,
-               "failed_job_policy": failed_job_policy, "max_job_attempts": max_job_attempts}
+               "log_row_values": log_row_values, "failed_job_policy": failed_job_policy,
+               "max_job_attempts": max_job_attempts,
+               "input_payload": run_payload(raw, input_source, needed=not resume_only, rows=input_rows)}
     try:
-        if not has_lookups(raw):
-            secret_map = secret_values(raw, secrets, environ)
-            for value in secret_map.values():
-                _mask(redact, value)
-            with job_log_context(raw, config):
-                return _run(raw, config=config, secret_map=secret_map, **options)
-        return _run_lookups(raw, config, secrets, environ, options, allow_exec=allow_lookup_exec,
-                            fan_out=(fan_out_concurrency, fan_out_on_failure))
+        with log_context(request_id=request_id or new_request_id()):
+            if not has_lookups(raw):
+                secret_map = secret_values(raw, secrets, environ)
+                for value in secret_map.values():
+                    _mask(redact, value)
+                with job_log_context(raw, config):
+                    return _run(raw, config=config, secret_map=secret_map, **options)
+            return _run_lookups(raw, config, secrets, environ, options, allow_exec=allow_lookup_exec,
+                                fan_out=(fan_out_concurrency, fan_out_on_failure))
     except (JobInvalidError, InputError):
         raise
     except Exception as exc:
@@ -294,11 +303,12 @@ def _broker_calls(job, rules):
 def _run(raw, *, config, secret_map, allowed_connectors, dry_run, base_dir, redact, resume_only, strict,
          state_lock_policy=None, state_lock_timeout=None, job_key=None, mode="once", interval=10.0,
          max_messages=DEFAULT_MAX_MESSAGES, apply_state_migrations=False, failed_job_policy=None,
-         max_job_attempts=None):
+         max_job_attempts=None, input_payload=None, log_row_values=True):
     report = job_validation.validate_job(raw, lambda found: duckdb_rules(found, allowed_connectors), config=config,
                                          strict=strict)
     if report.run_problems:
         raise JobInvalidError(report.run_problems)
+    raw = to_internal(raw)                        # the engine reads the internal shape (jobs.grammar)
     values = effective_config(raw, config)
     job, missing = resolve(raw, values, secret_map)
     if missing:
@@ -340,20 +350,26 @@ def _run(raw, *, config, secret_map, allowed_connectors, dry_run, base_dir, reda
             return DuckDBExecutor(pinned_job, build_plan(pinned_job, rules.dependencies_of), session, rules.adapters,
                                   secrets=secret_map, allowed_connectors=allowed_connectors, base_dir=base_dir,
                                   previous_signatures=signatures, declared_connections=raw["connections"],
-                                  config=pinned)
+                                  config=pinned, apply_outputs=applier.calls, payload=input_payload, redact=redact,
+                                  log_row_values=log_row_values)
 
         consumer, publishers, brokers = _broker_calls(job, rules)
+        applier = Applier(apply_calls(job, raw["connections"], rules.connectors), config=values, secrets=secret_map,
+                          redact=redact, log_row_values=log_row_values)
         try:
             runner = Runner(job["name"], store, None, consumer, publishers, redact=redact,
                             lease_seconds=state.get("ttl_seconds", 300), engine_metadata={"engine": "duckdb"},
-                            scope=lock.scope, lock=lock, prepare=prepare, failed_jobs=failed_jobs)
+                            scope=lock.scope, lock=lock, prepare=prepare, failed_jobs=failed_jobs, applier=applier,
+                            input_payload=input_payload)
             code = runner.run(mode=mode, interval=interval, max_messages=0 if resume_only else max_messages,
                               job_key=job_key if job_key is not None else state.get("job_key"))
         finally:
+            applier.close()
             for broker in brokers:
                 if callable(getattr(broker, "close", None)):
                     broker.close()
-        outputs, locations = {}, {}
+        outputs, rejected = apply_counts(applier.counts)
+        locations = {}
         skipped = set()
         for batch_id in runner.processed:            # (drain, follow: many batches; their rows add up)
             for name, receipt in store.get_receipts(job["name"], batch_id).items():
@@ -363,7 +379,7 @@ def _run(raw, *, config, secret_map, allowed_connectors, dry_run, base_dir, reda
                 if receipt.get("already_committed"):
                     skipped.add(name)
         return RunResult(code, job["name"], plan.describe(), list(runner.processed), outputs, skipped, runner.error,
-                         locations, runner.skipped)
+                         locations, runner.skipped, lease_held=runner.lease_held, rejected=rejected)
     finally:
         session.close()
 

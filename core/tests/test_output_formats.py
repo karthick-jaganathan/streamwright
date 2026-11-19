@@ -34,7 +34,7 @@ from streamwright.core.engine.runner import SourceRunner
 from streamwright.core.outputs.base import readable_size
 from streamwright.core.outputs.ducklake import load_ducklake
 from streamwright.core.outputs.output import ParquetOutput, log_summary, open_output, parquet_type
-from streamwright.core.runtime.testing import page_stream
+from streamwright.core.sdk.testing import page_stream
 
 needs_dlt = pytest.mark.skipif(importlib.util.find_spec("dlt") is None,
                                reason="needs dlt (pip install 'streamwright[dlt]' 'dlt[duckdb]')")
@@ -86,7 +86,7 @@ def two_exports(api, **top):
     """A page-mode stream read in two pages (ids 1, 2 then 3), with two exports: items and doubled."""
     pages = {"": {"data": [{"id": 1}, {"id": 2}], "next": "p2"}, "p2": {"data": [{"id": 3}]}}
     api.routes[("GET", "/items")] = lambda request: (200, pages[request["params"].get("cursor", "")])
-    stream = page_stream("items", {"http": {"path": "/items"}, "paginator": cursor_paginator()}, ID,
+    stream = page_stream("items", {"operation": {"path": "/items", "paginator": cursor_paginator()}}, ID,
                          records={"path": "data"})
     stream["transform"]["steps"].append({"name": "doubled_rows",
                                          "select": "SELECT id * 2 AS doubled, 'x' || id AS label FROM items"})
@@ -119,7 +119,7 @@ def test_tsv_files_have_a_header_csv_values_and_quote_tabs_newlines_and_quotes(a
          "flag": True, "price": 1.5},
         {"id": 2, "name": 'say "hi"', "note": None, "tags": [], "meta": None, "flag": False, "price": None}]})
     source = {"kind": "source", "name": "shop", "http": {"base_url": api.url},
-              "streams": [page_stream("items", {"http": {"path": "/items"}}, ROWS, records={"path": "data"})]}
+              "streams": [page_stream("items", {"operation": {"path": "/items"}}, ROWS, records={"path": "data"})]}
     path = write_source(tmp_path, source)
     for kind in ("tsv", "csv"):
         assert cli.main(["run", path, "--output", "%s:%s" % (kind, tmp_path / kind)]) == 0
@@ -162,7 +162,7 @@ def typed_source(api, big=BIG):
          "channel": "web", "big": str(big), "uid": UID, "wait": 90, "local": "2026-10-01 10:00:00", "small": 7},
         {"id": 2, "details": "plain text", "big": str(-big)}]})
     return {"kind": "source", "name": "shop", "http": {"base_url": api.url},
-            "streams": [page_stream("items", {"http": {"path": "/items"}}, TYPED, records={"path": "data"})]}
+            "streams": [page_stream("items", {"operation": {"path": "/items"}}, TYPED, records={"path": "data"})]}
 
 
 def test_parquet_files_keep_exact_types(api, tmp_path, stage, caplog):
@@ -307,11 +307,11 @@ def shop(api):
     api.routes[("GET", "/orders")] = lambda request: (200, {"data": [
         {"id": int(request["params"]["day"].replace("-", "")), "day": request["params"]["day"]}]})
     api.routes[("GET", "/events")] = lambda request: (200, {"data": [{"id": 1}]})
-    orders = page_stream("orders", {"http": {"path": "/orders", "params": {"day": "{{ window.start }}"}}},
+    orders = page_stream("orders", {"operation": {"path": "/orders", "params": {"day": "{{ window.start }}"}}},
                          "SELECT (record->>'id')::BIGINT AS id, (record->>'day')::DATE AS day FROM records",
                          records={"path": "data"}, primary_key=["id"],
                          incremental={"cursor_field": "day", "start": "2026-10-01", "window": "1d"})
-    events = page_stream("eventLog", {"http": {"path": "/events"}}, ID, records={"path": "data"})
+    events = page_stream("eventLog", {"operation": {"path": "/events"}}, ID, records={"path": "data"})
     return {"kind": "source", "name": "shop", "http": {"base_url": api.url}, "streams": [orders, events]}
 
 
@@ -403,7 +403,7 @@ def test_warehouse_outputs_summarize_their_tables(api, tmp_path, stage, monkeypa
 
 def test_duckdb_summary_marks_tables_kept_from_the_last_complete_run(api, tmp_path, stage, caplog):
     source = {"kind": "source", "name": "shop", "http": {"base_url": api.url}, "streams": [page_stream(
-        "orders", {"http": {"path": "/orders", "params": {"account": "{{ partition.account }}"}}},
+        "orders", {"operation": {"path": "/orders", "params": {"account": "{{ partition.account }}"}}},
         "SELECT partition->>'account' AS account, record->>'id' AS id FROM records", records={"path": "data"},
         partitions=[{"name": "account", "values": ["a", "b"]}], on_partition_error="skip")]}
     api.routes[("GET", "/orders")] = lambda request: (

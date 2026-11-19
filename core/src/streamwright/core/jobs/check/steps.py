@@ -19,6 +19,8 @@
 
 from streamwright.core.jobs import policy
 from streamwright.core.jobs.check.findings import connections_of, named_items
+from streamwright.core.jobs.grammar import public_key
+from streamwright.core.jobs.step_log import LOG_KEY, check_step_log
 
 __all__ = ["check_steps"]
 
@@ -40,9 +42,12 @@ def check_steps(job, rules, findings):
         for key in step:
             if key not in allowed:
                 findings.error("unsupported-key", (*path, key), "a %s step does not use `%s` (keys: %s)" % (
-                    kind, key, ", ".join(sorted(allowed))))
+                    kind, public_key(key), ", ".join(sorted({public_key(name) for name in allowed}))))
         for code, message, is_warning in rules.check_step(kind, step, connections):
             findings.add(code, path, message, is_warning)
+        if LOG_KEY in allowed:
+            for code, message, is_warning in check_step_log(step.get(LOG_KEY)):
+                findings.add(code, (*path, LOG_KEY, "message"), message, is_warning)
         for code, message, is_warning in policy.check_policy(step, rules.step_policy_keys(kind), rules.engine,
                                                              surface="steps"):
             findings.add(code, path, message, is_warning)

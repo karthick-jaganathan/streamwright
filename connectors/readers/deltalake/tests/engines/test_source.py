@@ -99,3 +99,29 @@ def test_credentials_are_masked_including_the_account_key_of_a_connection_string
     except ConnectorError as exc:
         assert "S3cr3tKey" not in str(exc)
     assert "S3cr3tKey" not in context.redact("key S3cr3tKey== here")
+
+
+def test_a_gcs_key_file_without_an_hmac_key_is_named_when_the_session_opens(lake):
+    with pytest.raises(ConnectorError, match="gcs_key_file: DuckDB reads Google Cloud Storage only with an HMAC key"):
+        read({"roots": [lake[0]], "gcs_key_file": "/keys/sa.json"}, "read", {"path": "cities"})
+
+
+def test_an_hmac_key_becomes_a_gcs_secret_scoped_to_the_gs_roots_and_is_masked(lake):
+    connection = resolve_values(CONNECTOR, {"roots": [lake[0], "gs://bucket/lake"], "gcs_key_file": "/keys/sa.json",
+                                            "gcs_hmac_key_id": "GOOG1EKEYID", "gcs_hmac_secret": "hmacS3cr3t"})
+    context = ConnectorContext(CONNECTOR.name, Redactor(connection.secret_values))
+    session = CONNECTOR.load_adapter("source").open(connection, context)
+    try:
+        secrets = session.reader.connection.execute(
+            "SELECT name, type, scope, secret_string FROM duckdb_secrets()").fetchall()
+        assert [row[:3] for row in secrets] == [("streamwright_gcs", "gcs", ["gs://bucket/lake"])]
+        assert "hmacS3cr3t" not in secrets[0][3]
+        records = [record for page in session.read(CONNECTOR.operation("table", "read"), {"path": "cities"}, context)
+                   for record in page]
+        assert len(records) == 3
+        with pytest.raises(ConnectorError) as caught:
+            list(session.read(CONNECTOR.operation("table", "read"), {"path": "gs://other/t"}, context))
+    finally:
+        session.close()
+    assert "GOOG1EKEYID" not in str(caught.value) and "hmacS3cr3t" not in str(caught.value)
+    assert "GOOG1EKEYID" not in context.redact("id GOOG1EKEYID") and "hmacS3cr3t" not in context.redact("hmacS3cr3t")

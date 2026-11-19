@@ -21,8 +21,9 @@ import os
 import re
 
 from streamwright.core.config import loader
+from streamwright.core.runtime.text import suggest
 from streamwright.core.validation import vocabulary as spec
-from streamwright.core.validation.checker import DURATION, ERROR, Checker, describe, suggest
+from streamwright.core.validation.checker import DURATION, ERROR, Checker, describe
 from streamwright.core.validation.sections.stream_context import NAME, transform_steps
 
 
@@ -60,12 +61,9 @@ class DocumentSection(Checker):
         self.require_keys(data, required, (), "a source")
         for key in data:
             if key not in spec.TOP_LEVEL_KEYS and not str(key).startswith(spec.EXTENSION_PREFIX):
-                if key == "models":
-                    self.error("removed-key", (key,), loader.MODELS_REMOVED_HINT, data, key)
-                else:
-                    self.error("unknown-key", (key,), "unknown top-level key %r%s; use an `%s` prefix for custom keys "
-                               "(e.g. to hold YAML anchors)" % (key, suggest(key, spec.TOP_LEVEL_KEYS),
-                                                               spec.EXTENSION_PREFIX), data, key)
+                self.error("unknown-key", (key,), "unknown top-level key %r%s; use an `%s` prefix for custom keys "
+                           "(e.g. to hold YAML anchors)" % (key, suggest(key, spec.TOP_LEVEL_KEYS),
+                                                           spec.EXTENSION_PREFIX), data, key)
         if "name" in data:
             self.check_name(data["name"], ("name",), data, "name")
         if "description" in data:

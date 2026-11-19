@@ -412,7 +412,7 @@ def test_validate_refuses_urls_secrets_and_unknown_formats(capsys, tmp_path):
         document = yaml.safe_load(stream)
     with open(os.path.join(EXAMPLE, "streams", "products.yaml")) as stream:
         products = yaml.safe_load(stream)
-    products["requests"][0]["arguments"]["format"] = "xlsx"
+    products["requests"][0]["operation"]["arguments"]["format"] = "xlsx"
     document["streams"] = [dict(products, name="products")]
     document["auth"]["roots"] = ["s3://bucket/prefix/"]
     bad = tmp_path / "source.yaml"

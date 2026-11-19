@@ -18,12 +18,12 @@ description: MySQL customers table extract.
 
 requests:
   - name: raw_customers
-    service: database
-    method: table
-    sdk: mysql
-    arguments:
-      table: customers
-      columns: [id, name, email, status, created_at]
+    operation:
+      service: database
+      method: table
+      arguments:
+        table: customers
+        columns: [id, name, email, status, created_at]
 
 transform:
   mode: page

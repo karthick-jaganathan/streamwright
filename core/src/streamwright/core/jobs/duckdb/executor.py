@@ -21,17 +21,20 @@ The DuckDB executor: builds a job's steps in a Session and writes its outputs th
 
 Per batch: the batch's broker messages are the table `input` (a consume step shapes them), the steps are built, the
 write outputs run (each recorded with its receipt), then `_commits` (output, table_name, version, rows, batch_id) and
-`_file_errors` (step, path, reason) describe them, and the publish outputs' rows become the batch's events, which
-the runner commits to the outbox with the batch and relays after the messages are acknowledged.
+`_file_errors` (step, path, reason) describe them, and the publish and apply outputs' rows become the batch's events,
+which the runner commits to the outbox with the batch and relays after the messages are acknowledged.
 """
 
 import json
 import logging
 
+from streamwright.core.jobs.apply.rules import DEFAULT_APPLY_ROWS
 from streamwright.core.jobs.duckdb.adapter import ReadContext, WriteContext
 from streamwright.core.jobs.duckdb.steps import MESSAGES_TABLE, build_step, message_kind
+from streamwright.core.jobs.payload import declared_input, load_input
 from streamwright.core.jobs.policy import SKIPPED, ExecutionPolicy, classify_transient, guard
 from streamwright.core.jobs.refs import RefError, decode_value, encode_value
+from streamwright.core.jobs.step_log import StepLog, log_step_rows
 from streamwright.core.jobs.types import ExecutionResult, WriteReceipt, written_files
 from streamwright.core.jobs.write_rules import OutputSpec, check_output
 from streamwright.core.runtime.logs.context import log_context
@@ -105,11 +108,15 @@ class _BatchRun:
 
 class DuckDBExecutor:
     def __init__(self, job, plan, session, adapters, *, secrets=None, allowed_connectors=None, base_dir=None,
-                 previous_signatures=None, declared_connections=None, config=None):
+                 previous_signatures=None, declared_connections=None, config=None, apply_outputs=(), payload=None,
+                 redact=None, log_row_values=True):
         """
-        `job`: resolved and checked; `adapters`: {provider: DuckDBAdapter} for its connections.
+        `job`: resolved and checked; `adapters`: {provider: DuckDBAdapter} for its connections; `apply_outputs`: the
+        names of its outputs that apply connector operations (their rows go to the outbox, like publish outputs);
+        `payload`: this run's input payload (streamwright.core.jobs.payload), for a batch that did not keep its rows.
         `declared_connections` (as written, secret references kept) and `config` (the job's values) are what call
-        steps hand to the source engine, which renders a connection like a source's auth block.
+        steps hand to the source engine, which renders a connection like a source's auth block. `redact` scrubs the
+        lines of a step's `log:`; `log_row_values` False (streamwright serve) logs only their number of rows.
         """
         self.job, self.plan, self.session, self.adapters = job, plan, session, adapters
         self.connections = job.get("connections") or {}
@@ -118,7 +125,9 @@ class DuckDBExecutor:
         self.secrets, self.allowed_connectors, self.base_dir = secrets or {}, allowed_connectors, base_dir
         self.limits = (job.get("runtime") or {}).get("limits") or {}
         self.previous_signatures = previous_signatures or {}
-        self.built = []
+        self.apply_outputs = frozenset(apply_outputs)
+        self.payload = payload
+        self.redact, self.log_row_values = redact, log_row_values
 
     def execute(self, context, manifest, done, hooks):
         self.session.start_clock()            # runtime.timeout_seconds bounds each batch
@@ -128,10 +137,15 @@ class DuckDBExecutor:
             self.session.stop_clock()
 
     def _publishes(self, item):
-        return message_kind(item, self.connections, self.adapters) == "publish"
+        """Whether an output's rows go to the outbox (a publish or an apply output) instead of being written."""
+        return item["name"] in self.apply_outputs or message_kind(item, self.connections, self.adapters) == "publish"
 
     def _messages(self, manifest):
         con = self.session.con
+        declared = declared_input(self.job)
+        if declared is not None:              # the payload is the batch's input (a job has a payload or a consumer)
+            load_input(con, MESSAGES_TABLE, declared, manifest, self.payload)
+            return
         con.execute("CREATE OR REPLACE TEMP TABLE %s (message_id VARCHAR, key VARCHAR, body VARCHAR, "
                     "headers MAP(VARCHAR, VARCHAR), timestamp VARCHAR)" % quote_ident(MESSAGES_TABLE))
         rows = [(m["message_id"], m.get("key"), m["body"], list((m.get("headers") or {}).keys()),
@@ -154,15 +168,17 @@ class DuckDBExecutor:
             con.executemany("INSERT INTO _file_errors VALUES (?, ?, ?)", [tuple(e) for e in run.file_errors])
 
     def _events(self, item):
-        """The rows of a publish output (its `sql`, or its `step`), as JSON-ready events."""
-        cap = int(self.limits.get("events", 10000))
+        """The rows of a publish or apply output (its `sql`, or its `step`), as JSON-ready events."""
+        applies = item["name"] in self.apply_outputs
+        limit = "apply_rows" if applies else "events"
+        cap = int(self.limits.get(limit, DEFAULT_APPLY_ROWS if applies else 10000))
         sql = item.get("sql") or "SELECT * FROM %s" % quote_ident(item["step"])
         cursor = self.session.con.execute("SELECT * FROM (%s) LIMIT %d" % (sql, cap + 1))
         names = [column[0] for column in cursor.description]
         rows = cursor.fetchall()
         if len(rows) > cap:
-            raise ExecutionError("publish output %s has more than %d events (runtime.limits.events)" % (
-                item["name"], cap))
+            raise ExecutionError("%s output %s has more than %d rows (runtime.limits.%s)" % (
+                "apply" if applies else "publish", item["name"], cap, limit))
         return [json.loads(json.dumps(dict(zip(names, row, strict=True)), default=str)) for row in rows]
 
     def _execute(self, context, manifest, done, hooks):
@@ -172,7 +188,6 @@ class DuckDBExecutor:
             self.session.check_clock()
             with log_context(step=name):
                 self._build(run, self.plan.by_name[name].item)
-            self.built.append(name)
         for step, path, reason in run.file_errors:
             LOG.warning("step %s rejected %s: %s", step, path, reason)
         hooks.save_manifest(manifest)
@@ -196,10 +211,13 @@ class DuckDBExecutor:
                         LOG.info("output %s: wrote %s", node.name, path,
                                  extra=fields(event="output_file", export=node.name, path=path))
         self._runtime_tables(run, receipts)
-        events = {node.name: self._events(node.item) for node in publishes}
-        for name, rows in events.items():
-            LOG.info("output %s: %d events to the outbox", name, len(rows),
-                     extra=fields(event="output_end", export=name, records=len(rows)))
+        events = {}
+        for node in publishes:
+            with log_context(output=node.name):
+                events[node.name] = rows = self._events(node.item)
+                LOG.info("output %s: %d %s to the outbox", node.name, len(rows),
+                         "operations" if node.name in self.apply_outputs else "events",
+                         extra=fields(event="output_end", export=node.name, records=len(rows)))
         return ExecutionResult(events=events, schema_signatures=tuple(run.schema_signatures),
                                schema_reports=tuple(run.schema_reports))
 
@@ -208,10 +226,24 @@ class DuckDBExecutor:
         policy = ExecutionPolicy.of(step)
         outcome = guard(policy, lambda: build_step(run, step), classify=classify_transient(policy),
                         on_retry=_retrying("step", step["name"]),
-                        on_tolerated=_tolerated(run, "step", step["name"]))
+                        on_tolerated=_tolerated(run, "step", step["name"]), on_timeout=self.session.con.interrupt)
         if outcome is SKIPPED:
             self.session.con.execute(
                 "CREATE OR REPLACE TEMP VIEW %s AS SELECT NULL AS record WHERE FALSE" % quote_ident(step["name"]))
+        else:
+            self._log_rows(run, step)
+
+    def _log_rows(self, run, step):
+        """A step's `log:`: its first rows (max_rows + 1), counted only when there are more or values are not logged."""
+        log = StepLog.of(step)
+        if log is None:
+            return
+        con, relation = self.session.con, quote_ident(step["name"])
+        columns = [column[0] for column in con.execute("SELECT * FROM %s LIMIT 0" % relation).description]
+        log_step_rows(log, columns, lambda n: con.execute("SELECT * FROM %s LIMIT %d" % (relation, n)).fetchall(),
+                      lambda: con.execute("SELECT count(*) FROM %s" % relation).fetchone()[0],
+                      row_values=self.log_row_values, redact=self.redact,
+                      constants={"batch.id": run.batch.batch_id, "batch.ts": run.batch.batch_ts})
 
     def _write(self, run, item, hooks):
         spec = OutputSpec.from_mapping(item)
@@ -234,7 +266,7 @@ class DuckDBExecutor:
         policy = ExecutionPolicy.of(item)
         receipt = guard(policy, write, classify=classify_transient(policy),
                         on_retry=_retrying("output", spec.name),
-                        on_tolerated=_tolerated(run, "output", spec.name))
+                        on_tolerated=_tolerated(run, "output", spec.name), on_timeout=self.session.con.interrupt)
         if receipt is SKIPPED:
             return WriteReceipt(spec.name, "skipped (on_error: %s)" % policy.on_error, 0)
         return receipt

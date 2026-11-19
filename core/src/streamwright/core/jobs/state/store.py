@@ -36,8 +36,10 @@ from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from typing import Any
 
+from streamwright.core.jobs.state.events import EventOperations
 from streamwright.core.jobs.state.leases import LOCK_POLICIES, LeaseOperations
 from streamwright.core.jobs.state.protocol import STATUSES, TERMINAL_STATUSES, StateError
+from streamwright.core.jobs.state.requests import RequestOperations
 from streamwright.core.jobs.state.sql import json_text as _json_text
 from streamwright.core.jobs.state.sql import json_value as _json_value
 from streamwright.core.jobs.types import Lease, WriteReceipt
@@ -64,8 +66,8 @@ def _parse_time(text: str | None) -> datetime.datetime | None:
     return datetime.datetime.fromisoformat(str(text).replace("Z", "+00:00"))
 
 
-class SqlStateStore(LeaseOperations):
-    """ACID state store for StreamWright jobs: leases, runs, receipts, outbox and signatures."""
+class SqlStateStore(EventOperations, LeaseOperations, RequestOperations):
+    """ACID state store for StreamWright jobs: leases, runs, receipts, outbox, signatures and the serve run queue."""
 
     # --- sequences (sw_sequences) ---------------------------------------------------------------------------
 
@@ -175,9 +177,12 @@ class SqlStateStore(LeaseOperations):
         self._x(conn, "UPDATE {sw_jobs} SET duration_ms = ? WHERE job_name = ? AND job_id = ?",
                 (duration, job_name, batch_id))
 
-    def retry_batch(self, lease: Lease, batch_id: str) -> str:
+    def retry_batch(self, lease: Lease, batch_id: str, *, resend: Sequence[str] | None = None) -> str:
         """
-        Moves a failed batch back to the status it failed from, counting one more attempt; returns that status.
+        Moves a failed batch back to the status it failed from, counting one more attempt; returns that status. In the
+        same transaction its failed apply rows of the `resend` outputs (None: every output) go back to pending, so the
+        relay sends them again; they keep their attempts and last error until then. Applied rows, in-flight rows and
+        rows the operator skipped (UNKNOWN_OUTCOME: they may have been applied) are left as they are.
         """
         def work(conn):
             self._check(conn, lease)
@@ -190,6 +195,7 @@ class SqlStateStore(LeaseOperations):
             self._x(conn, "UPDATE {sw_jobs} SET status = ?, failed_from = NULL, error_message = NULL, "
                           "attempts = attempts + 1, updated_at = {now} WHERE job_name = ? AND job_id = ?",
                     (row[1], lease.job_name, batch_id))
+            self._resend_failed(conn, lease.job_name, batch_id, resend)
             return row[1]
 
         return self._run(work)
@@ -237,10 +243,11 @@ class SqlStateStore(LeaseOperations):
                                                                           [job_name, scope])
         return self._batches(where, (*args, int(limit)), " ORDER BY created_at DESC, sequence DESC LIMIT ?")
 
-    def purge_batches(self, job_name: str, older_than: Any, scope: str | None = None) -> int:
+    def purge_batches(self, job_name: str, older_than: Any, scope: str | None = None, *, chunk: int = 1000) -> int:
         """
         Deletes the completed, abandoned and skipped batches last updated before `older_than` (an aware datetime),
-        with their receipts and sent events; sequences are kept.
+        with their receipts and outbox rows (events and apply rows, whatever their status), `chunk` batches per
+        transaction; sequences are kept.
         """
         cutoff = self._dialect.timestamp_parameter(older_than)
         where = "job_name = ? AND status IN (%s) AND updated_at < ?" % self._marks(TERMINAL_STATUSES)
@@ -249,15 +256,20 @@ class SqlStateStore(LeaseOperations):
             where, args = where + " AND scope = ?", [*args, scope]
 
         def work(conn):
-            ids = [row[0] for row in self._x(conn, "SELECT job_id FROM {sw_jobs} WHERE " + where, args).fetchall()]
-            for batch_id in ids:
-                self._x(conn, "DELETE FROM {sw_receipts} WHERE job_name = ? AND job_id = ?", (job_name, batch_id))
-                self._x(conn, "DELETE FROM {sw_events} WHERE job_name = ? AND job_id = ? AND status = 'sent'",
-                        (job_name, batch_id))
-                self._x(conn, "DELETE FROM {sw_jobs} WHERE job_name = ? AND job_id = ?", (job_name, batch_id))
+            ids = [row[0] for row in self._x(conn, "SELECT job_id FROM {sw_jobs} WHERE " + where +
+                                             " LIMIT %d" % int(chunk), args).fetchall()]
+            for table in ("sw_receipts", "sw_events", "sw_jobs"):
+                if ids:
+                    self._x(conn, "DELETE FROM {%s} WHERE job_name = ? AND job_id IN (%s)" % (
+                        table, self._marks(ids)), (job_name, *ids))
             return len(ids)
 
-        return self._run(work)
+        total = 0
+        while True:
+            deleted = self._run(work)
+            total += deleted
+            if deleted < chunk:
+                return total
 
     # --- receipts (sw_receipts) -----------------------------------------------------------------------------
 
@@ -319,26 +331,6 @@ class SqlStateStore(LeaseOperations):
                               "VALUES (?, ?, ?, ?, {now}, {now}) "
                         + self._dialect.conflict_update(("job_name", "path"), ("hash", "signature", "updated_at")),
                         (lease.job_name, path, header_hash, signature))
-
-        self._run(work)
-
-    def list_pending_events(self, job_name: str, scope: str = "") -> list[dict[str, Any]]:
-        """The scope's events not yet sent, in batch, output and event order."""
-        rows = self._run(lambda conn: self._x(
-            conn, "SELECT e.job_id, e.target, e.sequence, e.destination, e.payload FROM {sw_events} e "
-                  "JOIN {sw_jobs} j ON j.job_name = e.job_name AND j.job_id = e.job_id "
-                  "WHERE e.job_name = ? AND j.scope = ? AND e.status = 'pending' "
-                  "ORDER BY j.sequence, e.target, e.sequence", (job_name, scope)).fetchall())
-        return [{"batch_id": row[0], "output_name": row[1], "event_sequence": int(row[2]), "destination": row[3],
-                 "payload": _json_value(row[4])} for row in rows]
-
-    def mark_events_sent(self, lease: Lease, batch_id: str, output_name: str, event_sequences: Sequence[int]) -> None:
-        def work(conn):
-            self._check(conn, lease)
-            for number in event_sequences:
-                self._x(conn, "UPDATE {sw_events} SET status = 'sent', sent_at = {now}, updated_at = {now} "
-                              "WHERE job_name = ? AND job_id = ? AND target = ? AND sequence = ?",
-                        (lease.job_name, batch_id, output_name, int(number)))
 
         self._run(work)
 

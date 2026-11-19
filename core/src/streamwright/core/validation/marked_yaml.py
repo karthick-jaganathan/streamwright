@@ -21,8 +21,8 @@
 
 import yaml
 
+from streamwright.core.runtime.issues import Issue
 from streamwright.core.validation.checker import ERROR, WARNING
-from streamwright.core.validation.issues import Issue
 
 
 class MarkedLoader(yaml.SafeLoader):

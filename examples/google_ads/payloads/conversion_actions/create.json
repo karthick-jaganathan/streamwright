@@ -1,0 +1,6 @@
+[
+  {"name": "Offline purchase", "category": "PURCHASE", "counting_type": "MANY_PER_CLICK",
+   "default_value": 1.0, "currency_code": "USD", "click_through_lookback_window_days": 90},
+  {"name": "Offline qualified lead", "category": "QUALIFIED_LEAD", "counting_type": "ONE_PER_CLICK",
+   "click_through_lookback_window_days": 30}
+]

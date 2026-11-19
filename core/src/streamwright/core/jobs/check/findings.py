@@ -18,6 +18,7 @@
 """Collecting a checker's issues, and the iteration helpers every section shares."""
 
 from streamwright.core.jobs.fields import path_text
+from streamwright.core.jobs.grammar import public_path
 from streamwright.core.validation import Issue
 from streamwright.core.validation.checker import ERROR, WARNING
 
@@ -25,14 +26,18 @@ __all__ = ["Findings", "connections_of", "named_items"]
 
 
 class Findings:
-    def __init__(self, filename=None):
-        self.filename, self.issues = filename, []
+    def __init__(self, filename=None, public=None):
+        """`public`: the public manifest the checked (internal) job was translated from: paths are mapped back."""
+        self.filename, self.issues, self.public = filename, [], public
+
+    def _path(self, path):
+        return path_text(public_path(path, self.public) if self.public is not None else path)
 
     def error(self, code, path, message):
-        self.issues.append(Issue(ERROR, code, message, self.filename, path_text(path)))
+        self.issues.append(Issue(ERROR, code, message, self.filename, self._path(path)))
 
     def warning(self, code, path, message):
-        self.issues.append(Issue(WARNING, code, message, self.filename, path_text(path)))
+        self.issues.append(Issue(WARNING, code, message, self.filename, self._path(path)))
 
     def add(self, code, path, message, is_warning=False):
         (self.warning if is_warning else self.error)(code, path, message)

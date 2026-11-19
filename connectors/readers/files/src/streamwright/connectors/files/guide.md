@@ -23,7 +23,7 @@ roots: ["{{ config.data_root }}"]      # the only folders files can be read from
 
 files offers the shared file operations (`streamwright.core.sdk.operations.files`) and adds no argument of its own; the
 Engines column of each table says which engine takes an argument (each engine declares it once). A request names the
-service `object`: `sdk: files`, `service: object`, `method: read`.
+service `object`: `operation: {service: object, method: read, arguments: {...}}` (the source's `auth.provider` is `files`).
 
 - **`object.read`** reads a path, a glob (`*`, `?`, `[ab]`, `**` for any folders) or a list of them, in name order.
   `format: auto` takes each file's format from its extension (`.csv`, `.tsv`/`.tab`, `.json`, `.jsonl`/`.ndjson`,
@@ -59,6 +59,9 @@ written; parquet its values with decimals exact.
 - The source engine's DuckDB connection can only read inside the roots too (DuckDB's `allowed_directories`, which also
   refuses symbolic links that leave them), with external access off and its configuration locked. It loads no
   extension and sets no secret.
+- DuckDBJob checks a glob the same way: every file it matches (hidden entries too, as DuckDB's glob matches them) must
+  be inside a root once symbolic links are followed, otherwise the step fails with `resolves outside the
+  connection's roots`.
 
 ## Engines
 

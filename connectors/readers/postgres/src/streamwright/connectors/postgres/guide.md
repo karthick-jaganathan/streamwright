@@ -33,8 +33,13 @@ statement_timeout: 5min                # the server's statement_timeout (500ms, 
   top-level connection key is forwarded the same way.
 - Spark builds its JDBC URL from the resolved host, port and database - each checked first (a host name or IP
   address; letters, digits, `_`, `.`, `-` in a database name; a port 1-65535) - and passes user and password only as
-  JDBC properties, never in Spark's configuration. Undeclared connection keys and undeclared `database.*` operation
-  arguments become JDBC driver properties (e.g. `fetchsize`, `queryTimeout`, `sessionInitStatement`).
+  JDBC properties, never in Spark's configuration. The other libpq parameters (`sslmode`, `options`, a DSN's) become
+  pgjdbc properties (`connect_timeout` as `connectTimeout`, `application_name` as `ApplicationName`, `gssencmode` as
+  `gssEncMode`; the others by their own name). Undeclared connection keys and undeclared `database.*` operation
+  arguments become JDBC driver properties verbatim (e.g. `fetchsize`, `queryTimeout`, `sessionInitStatement`).
+- `statement_timeout` is the server's own, for every statement of every engine: libpq's `options`
+  (`-c statement_timeout=...`) of the source and DuckDBJob attach, the psycopg driver connection and the JDBC
+  `options` property.
 
 ## Operations
 

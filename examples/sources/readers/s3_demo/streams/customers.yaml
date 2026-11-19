@@ -22,13 +22,13 @@ incremental:
   window: 1d
 requests:
   - name: raw_customers
-    sdk: s3
-    service: object
-    method: read
-    arguments:
-      path: "customers/{{ window.start }}.jsonl"
-      format: jsonl
-      on_missing: skip
+    operation:
+      service: object
+      method: read
+      arguments:
+        path: "customers/{{ window.start }}.jsonl"
+        format: jsonl
+        on_missing: skip
 transform:
   mode: page
   steps:

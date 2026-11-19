@@ -1,7 +1,7 @@
 # StreamWright Google Ads connector
 
 The `google_ads` connector for [streamwright](../../../core/README.md): the `google_ads` auth provider builds a
-[google-ads](https://pypi.org/project/google-ads/) client, and `sdk: google_ads` requests run Google Ads Query
+[google-ads](https://pypi.org/project/google-ads/) client, and a source's request operations (calls) run Google Ads Query
 Language (GAQL) queries. Example: the source folder [examples/sources/ads/google_ads/](../../../examples/sources/ads/google_ads/).
 
 ## Install

@@ -1,0 +1,132 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# Creates offline (click) conversion actions in a Google Ads account from a list of names and categories: the
+# actions conversion_uploads.yaml uploads to. Actions that already exist (by name) are left alone and logged, so a
+# re-run creates only the new ones.
+#
+#   mkdir -p examples/google_ads/.streamwright                # once: the state folder (git-ignored)
+#   # a dry run: Google checks every action and creates nothing
+#   streamwright duckdb run examples/google_ads/jobs/conversion_actions/create.yaml \
+#     --input examples/google_ads/payloads/conversion_actions/create.json \
+#     --set customer_id=CUSTOMER_ID --set login_customer_id=MANAGER_ID --set validate_only=true \
+#     --secrets ~/.streamwright/google-ads-secrets.yaml --apply-state-migrations --summary
+#   # create them: drop validate_only; `streamwright duckdb state show JOB JOB_ID` lists each row's result
+kind: DuckDBJob
+version: 1
+name: google_ads_conversion_actions_create
+description: Offline click-conversion actions of a Google Ads account, created from a list of names and categories
+
+spec:
+  config:
+    customer_id: {type: string, required: true, pattern: "^[0-9]{10}$", description: "the account (10 digits)"}
+    login_customer_id: {type: string, required: true, pattern: "^[0-9]{10}$", description: "the manager account"}
+    validate_only: {type: boolean, default: false, description: "true: Google checks the actions and creates none"}
+  secrets:
+    developer_token: {type: string, required: true}
+    client_id: {type: string, required: true}
+    client_secret: {type: string, required: true}
+    refresh_token: {type: string, required: true}
+  input:
+    columns:
+      name: {type: string, required: true, max_length: 100}
+      category:
+        type: string
+        required: true
+        enum: [DEFAULT, PAGE_VIEW, PURCHASE, SIGNUP, DOWNLOAD, ADD_TO_CART, BEGIN_CHECKOUT, SUBSCRIBE_PAID,
+               PHONE_CALL_LEAD, IMPORTED_LEAD, SUBMIT_LEAD_FORM, BOOK_APPOINTMENT, REQUEST_QUOTE, GET_DIRECTIONS,
+               OUTBOUND_CLICK, CONTACT, ENGAGEMENT, STORE_VISIT, STORE_SALE, QUALIFIED_LEAD, CONVERTED_LEAD]
+      counting_type: {type: string, enum: [ONE_PER_CLICK, MANY_PER_CLICK]}      # default ONE_PER_CLICK
+      default_value: {type: number, minimum: 0}                                 # used when an upload has no value
+      currency_code: {type: string, pattern: "^[A-Z]{3}$"}
+      click_through_lookback_window_days: {type: integer, minimum: 1, maximum: 90}
+    max_rows: 100
+
+connections:
+  ads:
+    provider: google_ads
+    developer_token: "{{ secrets.developer_token }}"
+    client_id: "{{ secrets.client_id }}"
+    client_secret: "{{ secrets.client_secret }}"
+    refresh_token: "{{ secrets.refresh_token }}"
+    login_customer_id: "{{ config.login_customer_id }}"
+
+steps:
+  # the account's conversion actions, by name (a removed one keeps its name too)
+  - name: conversion_actions
+    connection: ads
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ config.customer_id }}"
+        query:
+          gaql:
+            select: [conversion_action.name, conversion_action.resource_name]
+            from: conversion_action
+    sql: |
+      SELECT record->>'$.conversion_action.name' AS name,
+             record->>'$.conversion_action.resource_name' AS resource_name
+      FROM records
+
+  # the input's actions the account already has: not created again, and said so in the log
+  - name: existing_actions
+    sql: |
+      SELECT i.name, e.resource_name
+      FROM input AS i
+      JOIN conversion_actions AS e USING (name)
+    log:
+      message: "conversion action {name} already exists ({resource_name}): not created"
+      max_rows: 50
+
+  # the actions to create; columns are ConversionAction field paths
+  - name: new_actions
+    sql: |
+      SELECT i.name                                     AS "conversion_action.name",
+             'UPLOAD_CLICKS'                            AS "conversion_action.type",
+             i.category                                 AS "conversion_action.category",
+             'ENABLED'                                  AS "conversion_action.status",
+             coalesce(i.counting_type, 'ONE_PER_CLICK') AS "conversion_action.counting_type",
+             i.click_through_lookback_window_days       AS "conversion_action.click_through_lookback_window_days",
+             i.default_value                            AS "conversion_action.value_settings.default_value",
+             i.currency_code                            AS "conversion_action.value_settings.default_currency_code"
+      FROM input AS i
+      ANTI JOIN conversion_actions AS e USING (name)
+
+outputs:
+  - name: create_actions
+    connection: ads
+    step: new_actions
+    operation:
+      service: ConversionActionService
+      method: mutate_conversion_actions
+      arguments:
+        customer_id: "{{ config.customer_id }}"
+        validate_only: "{{ config.validate_only }}"
+    apply:
+      nulls: skip_field           # an empty column leaves the field out (Google's default applies)
+      on_row_error: fail          # a rejected action fails the run, with Google's error code per row
+    log:                          # once sent: each new action's resource name, or why Google refused it
+      sql: |
+        SELECT "conversion_action.name" AS name, outcome.status AS status,
+               coalesce(outcome.result->>'$.resource_name', outcome.error_message, '') AS detail
+        FROM create_actions
+      message: "conversion action {name}: {status} {detail}"
+
+runtime:
+  state:
+    sqlite: ../../.streamwright/google_ads_conversion_actions_create.state.db
+    scope: "customer:{{ config.customer_id }}"

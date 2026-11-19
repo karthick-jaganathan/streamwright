@@ -20,7 +20,8 @@ cd streamwright
 python -m venv .venv && source .venv/bin/activate
 
 make install                # streamwright
-make install-connectors     # all seven connectors
+make install EXTRAS=serve   # with the serve extra (streamwright serve, worker)
+make install-connectors     # every connector (`make help` lists them)
 ```
 
 | Mode | Command | What it does |
@@ -28,6 +29,12 @@ make install-connectors     # all seven connectors
 | prod (default) | `make install` | `pip install .` |
 | dev | `make install MODE=dev` | `pip install -e .` (editable) |
 | dist | `make install MODE=dist` | builds the distributions into `/tmp/sdist/streamwright`, then installs from there |
+
+Options: `PYTHON=path/to/python` (default: the active environment's `python`), `FORCE_DEPS=true` (reinstall the
+dependencies), `EXTRAS=serve` (core's extras, comma-separated).
+
+A service (`streamwright serve` and `worker`) on a systemd host: `sudo streamwright systemd install` (or
+`sudo make install-systemd PYTHON=/opt/streamwright/venv/bin/python`) installs its units; see the serve docs.
 
 Without make:
 
@@ -39,7 +46,8 @@ pip install ./connectors/ads/google_ads ./connectors/ads/microsoft_ads ./connect
 
 ### Connectors
 
-Install only the connectors your sources use:
+Install only the connectors your sources use: `make install-<name>` (e.g. `make install-google-ads` or
+`make install-google_ads`); `make help` lists every connector the repository has. Some of them:
 
 | Connector | Make target | Package |
 |---|---|---|
@@ -93,10 +101,13 @@ orchestration, `streamwright-pipeline:local` (streamwright with the ad and reade
 ## Development setup
 
 ```bash
-make install MODE=dev && make install-connectors MODE=dev
-pip install pytest jsonschema "dlt[duckdb]"
-make test          # python -m pytest tests connectors -q
-make validate      # streamwright validate --strict configs
+make install MODE=dev EXTRAS=serve && make install-connectors MODE=dev
+pip install pytest jsonschema responses httpx "dlt[duckdb]" ruff
+make lint          # ruff + scripts/check_code_standards.py
+make test          # lint, then core, reader and http connector tests
+make test-all      # lint, then every test (the ad connectors too)
+make validate      # streamwright validate --strict examples
+make check         # what CI checks: test, check-vendored, check-contracts, validate
 ```
 
 Connector tests that need a vendor SDK are skipped when it is not installed.
@@ -105,7 +116,7 @@ Connector tests that need a vendor SDK are skipped when it is not installed.
 
 ```bash
 make uninstall     # streamwright and every connector
-make clean         # build artifacts, __pycache__, *.egg-info
+make clean         # build artifacts, __pycache__, *.egg-info, caches, spark-warehouse
 make clean-dist    # /tmp/sdist/streamwright
 ```
 

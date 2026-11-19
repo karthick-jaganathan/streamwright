@@ -44,8 +44,8 @@ from streamwright.core.runtime import components, logs, plugins
 from streamwright.core.runtime.components import ConnectorContext
 from streamwright.core.runtime.logs import LogSetup, RunMetrics, redaction
 from streamwright.core.runtime.logs.handlers import ScrubFilter
-from streamwright.core.runtime.testing import FakeClock, MemoryOutput, page_stream
 from streamwright.core.sdk.contract import ConnectorDefinition, Field, Operation
+from streamwright.core.sdk.testing import FakeClock, MemoryOutput, page_stream
 
 
 def test_nested_setups_close_out_of_order_without_restoring_active_factory():
@@ -138,9 +138,9 @@ NETWORK_DEBUG = ("--log", "streamwright.network=DEBUG")
 
 def items_stream(name="items", paginator=None, params=None, **stream):
     """A page-mode stream: GET /items (request `raw_items`, records at `data`), keyed on id."""
-    request = {"name": "raw_items", "http": {"path": "/items", "params": dict(params or {})}}
+    request = {"name": "raw_items", "operation": {"path": "/items", "params": dict(params or {})}}
     if paginator:
-        request["paginator"] = paginator
+        request["operation"]["paginator"] = paginator
     return page_stream(name, request, ID, records={"path": "data"}, primary_key=["id"], **stream)
 
 
@@ -149,10 +149,9 @@ def offset_paginator():
     return {"type": "offset", "offset_param": "o", "limit_param": "l", "page_size": 2}
 
 
-def http_source(api, *streams, **http):
-    return {"kind": "source", "name": "demo",
-            "http": dict({"base_url": api.url, "retry": {"codes": [429, 500], "max_attempts": 3, "max_delay": "0s"}},
-                         **http),
+def http_source(api, *streams, **policy):
+    return {"kind": "source", "name": "demo", "http": {"base_url": api.url},
+            "policy": dict({"retry": {"codes": [429, 500], "max_attempts": 3, "max_delay": "0s"}}, **policy),
             "streams": list(streams) or [items_stream()]}
 
 
@@ -639,8 +638,8 @@ def token_sdk(tmp_path, monkeypatch):
     handler = logging.StreamHandler(private)
     PRIVATE.addHandler(handler)
     PRIVATE.setLevel(logging.DEBUG)
-    stream = page_stream("rows", {"name": "raw_rows", "sdk": "token_sdk", "service": "Reports", "method": "list",
-                                  "arguments": {"day": "day {{ today }}"}},
+    stream = page_stream("rows", {"name": "raw_rows", "operation": {"service": "Reports", "method": "list",
+                                                             "arguments": {"day": "day {{ today }}"}}},
                          "SELECT (record->>'id')::BIGINT AS id FROM raw_rows", records={"path": "rows"})
     source = {"kind": "source", "name": "sdk_demo", "auth": {"provider": "token_sdk",
                                                              "api_secret": "{{ secrets.api_secret }}"},
@@ -714,7 +713,7 @@ def test_connectors_shows_the_connectors_as_pip_show_does(token_sdk, capsys, mon
                      "Package: (registered in-process)", "Version:", "Libraries:", "DuckDB-Extensions:",
                      "Loggers: token_sdk.wire"]  # the SDK's loggers, for --log
     broken = next(block for block in blocks if block[0] == "Name: metadata_only")
-    assert blocks[-1] == broken and "targets the pre-contract connector API" in broken[1]  # listed last
+    assert blocks[-1] == broken and "is not a ConnectorDefinition" in broken[1]  # listed last
     assert calls == ["loaded"]  # a connector's spec is imported to list it (nothing else is)
 
     assert cli.main(["connectors", "token_sdk"]) == 0  # installed names: only those, as `pip show NAME`
@@ -805,7 +804,8 @@ def test_metrics_count_requests_retries_pages_records_and_partitions(api, caplog
                          partitions=[{"name": "account", "values": ["a1", "a2"]}], on_partition_error="skip")
     daily = {"name": "daily", "partitions": [{"name": "account", "values": ["a1"]}],
              "incremental": {"cursor_field": "day", "start": "2026-10-01", "window": "1d"},
-             "requests": [{"name": "raw_daily", "http": {"path": "/daily", "params": {"day": "{{ window.start }}"}},
+             "requests": [{"name": "raw_daily", "operation": {"path": "/daily",
+                                                              "params": {"day": "{{ window.start }}"}},
                            "records": {"path": "data"}}],
              "transform": {"mode": "run", "steps": [{"name": "daily", "select": (
                  "SELECT (record->>'day')::DATE AS day, count(*) AS n FROM raw_daily GROUP BY 1")}]},

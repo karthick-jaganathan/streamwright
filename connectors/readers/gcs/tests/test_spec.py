@@ -24,7 +24,7 @@ from types import MappingProxyType
 import pytest
 
 from streamwright.connectors.gcs import CONNECTOR
-from streamwright.core.io.file_rules import DUCKDB_CAPABILITIES, ENGINE_CAPABILITIES, SOURCE_CAPABILITIES
+from streamwright.core.io.file_rules import FILE_DUCKDB_CAPABILITIES, FILE_ENGINE_CAPABILITIES, FILE_SOURCE_CAPABILITIES
 from streamwright.core.sdk.contract import (
     InvalidConnectionError,
     check_arguments,
@@ -75,17 +75,17 @@ def test_resolving_keeps_the_key_out_of_messages_and_takes_both_halves_or_none()
 def test_the_spec_uses_the_catalog_operations_and_each_engines_capabilities():
     assert [operation.name for operation in CONNECTOR.operations] == ["object.read", "object.write"]
     read, write = CONNECTOR.operation("object", "read"), CONNECTOR.operation("object", "write")
-    assert check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, SOURCE_CAPABILITIES) == []
-    assert codes(check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, DUCKDB_CAPABILITIES)) == [
+    assert check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, FILE_SOURCE_CAPABILITIES) == []
+    assert codes(check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, FILE_DUCKDB_CAPABILITIES)) == [
         ("unsupported-argument", "arguments.match")]
-    assert codes(check_arguments(CONNECTOR, write, {"path": "out/", "format": "csv"}, SOURCE_CAPABILITIES)) == [
+    assert codes(check_arguments(CONNECTOR, write, {"path": "out/", "format": "csv"}, FILE_SOURCE_CAPABILITIES)) == [
         ("unsupported-operation", "")]
     assert codes(check_arguments(CONNECTOR, write, {"path": "out/", "format": "csv", "mode": "append"},
-                                 DUCKDB_CAPABILITIES)) == [("unsupported-choice", "arguments.mode")]
+                                 FILE_DUCKDB_CAPABILITIES)) == [("unsupported-choice", "arguments.mode")]
 
 
 def test_the_guide_has_its_sections_and_tables_generated_from_the_spec():
-    text = guide_text(CONNECTOR, "streamwright.connectors.gcs", ENGINE_CAPABILITIES)
+    text = guide_text(CONNECTOR, "streamwright.connectors.gcs", FILE_ENGINE_CAPABILITIES)
     assert [line for line in text.splitlines() if line.startswith("## ")] == [
         "## Connection", "## Operations", "## Engines"]
     assert "| `key_id` | string | a `{{ secrets.NAME }}` reference |" in text

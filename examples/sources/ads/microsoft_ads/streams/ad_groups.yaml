@@ -19,13 +19,13 @@ partitions:
   - {from_stream: campaigns, fields: [account_id, campaign_id]}   # partition.account_id and partition.campaign_id
 requests:
   - name: raw_ad_groups
-    sdk: microsoft_ads
-    service: CampaignManagementService
-    method: GetAdGroupsByCampaignId
-    arguments:
-      account_id: "{{ partition.account_id }}"    # the request names only the campaign
-      request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
-    records: {path: AdGroup}
+    operation:
+      service: CampaignManagementService
+      method: GetAdGroupsByCampaignId
+      arguments:
+        account_id: "{{ partition.account_id }}"    # the request names only the campaign
+        request: {CampaignId: "{{ partition.campaign_id }}", ReturnAdditionalFields: [AdGroupType]}
+      records: {path: AdGroup}
 transform:
   mode: page
   steps:

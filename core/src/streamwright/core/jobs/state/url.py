@@ -34,7 +34,6 @@ import importlib.util
 import os
 import sqlite3
 import urllib.parse
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -48,14 +47,16 @@ from streamwright.core.jobs.state.dialects import (
     PostgresDialect,
     SqliteDialect,
 )
+from streamwright.core.jobs.state.memory import memory_connect
 from streamwright.core.jobs.state.migrations.runner import MigrationRunner
+from streamwright.core.jobs.state.protocol import StateError
 from streamwright.core.jobs.state.store import SqlStateStore
 from streamwright.core.jobs.state.target import describe_url
 
 ENV_STATE_URL = "STREAMWRIGHT_STATE_URL"
 
 __all__ = ["DRIVERS", "ENV_STATE_URL", "ResolvedStateUrl", "migration_runner_for_url", "missing_driver", "open_url",
-           "resolve_state_url"]
+           "resolve_state_url", "sqlite_connect"]
 
 _MEMORY = ("", ":memory:")
 _OUR_PARAMETERS = ("schema", "catalog")
@@ -110,17 +111,28 @@ def _file_path(parsed):
     return ":memory:" if path in _MEMORY else path
 
 
-def _sqlite(url, parsed, schema):
-    path = _file_path(parsed)
+def sqlite_connect(path, target):
+    """
+    connect() of a SQLite state database: ":memory:" is one in-memory database for the connect's life (memory_connect:
+    one connection lent to an operation at a time); a file's folder must exist (StateError names it, instead of
+    sqlite's 'unable to open').
+    """
     if path == ":memory:":
-        name = "file:streamwright_%s?mode=memory&cache=shared" % uuid.uuid4().hex
+        return memory_connect()
 
-        def connect():
-            return sqlite3.connect(name, uri=True, timeout=30, isolation_level=None)
+    def connect():
+        folder = os.path.dirname(os.path.abspath(path))
+        if not os.path.isdir(folder):
+            raise StateError("cannot open the state database %s: its folder %s does not exist (create it, or use "
+                             "another path)" % (target, folder))
+        return sqlite3.connect(path, timeout=30, isolation_level=None)
 
-        return ResolvedStateUrl(url, parsed.scheme, SqliteDialect(), connect, schema, keepalive=connect())
-    return ResolvedStateUrl(url, parsed.scheme, SqliteDialect(),
-                            lambda: sqlite3.connect(path, timeout=30, isolation_level=None), schema)
+    return connect
+
+
+def _sqlite(url, parsed, schema):
+    target = describe_url(url, SqliteDialect.name, schema, None)
+    return ResolvedStateUrl(url, parsed.scheme, SqliteDialect(), sqlite_connect(_file_path(parsed), target), schema)
 
 
 # the DB-API drivers a database connection opens with (optional dependencies), and how to install one
@@ -163,9 +175,12 @@ def _postgres(url, parsed, query, schema):
         [(key, value) for key, value in query if key not in _OUR_PARAMETERS])))
 
     def connect():
-        driver = _driver(*DRIVERS["postgres"][0])
-        connection = driver.connect(driver_url)
-        return connection if hasattr(connection, "execute") else _CursorConnection(connection)  # psycopg2
+        try:
+            psycopg = importlib.import_module("psycopg")
+        except ImportError:
+            return _CursorConnection(_driver("psycopg2").connect(driver_url))    # never prepares statements
+        # no server-side prepared statements: they break under PgBouncer's transaction pooling
+        return psycopg.connect(driver_url, prepare_threshold=None)
 
     return ResolvedStateUrl(url, parsed.scheme, PostgresDialect(), connect, schema or DEFAULT_SCHEMA)
 

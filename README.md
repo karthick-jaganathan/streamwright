@@ -40,7 +40,7 @@ See [connectors/README.md](connectors/README.md) for the connector layout and ho
 git clone https://github.com/karthick-jaganathan/streamwright.git
 cd streamwright
 make install                # streamwright: the `streamwright` command (run, validate, connectors)
-make install-connectors        # optional: all seven connectors (or e.g. make install-google-ads)
+make install-connectors        # optional: every connector (or e.g. make install-google-ads)
 streamwright connectors               # lists the installed connectors
 ```
 
@@ -106,10 +106,11 @@ pipeline node) is built in [streamwright-orchestration](https://github.com/karth
 ## Development
 
 ```bash
-make install MODE=dev && make install-connectors MODE=dev
-pip install pytest jsonschema
-make test                   # python -m pytest tests connectors -q
-make validate               # streamwright validate --strict configs
+make install MODE=dev EXTRAS=serve && make install-connectors MODE=dev
+pip install pytest jsonschema responses httpx ruff
+make test                   # lint, then core, reader and http connector tests (make test-all: every test)
+make validate               # streamwright validate --strict examples
+make check                  # what CI checks
 ```
 
 Adding a connector: see [connectors/README.md](connectors/README.md) and the

@@ -94,6 +94,15 @@ def test_a_dynamic_path_reads_the_files_an_earlier_step_lists_and_quotes_them(tm
     assert _rows(tmp_path)[1] == [(1,)]
 
 
+def test_a_dynamic_path_reference_may_be_written_without_spaces(tmp_path):
+    path = _write(tmp_path, "a.csv", "id\n1\n")
+    job = _job(tmp_path, {"read": "csv", "path": " {{arrivals.uri}} "})
+    job["steps"].insert(0, {"name": "arrivals", "sql": "SELECT '%s' AS uri" % path})
+    result = run_job(job)
+    assert result.exit_code == 0, result.error
+    assert _rows(tmp_path)[1] == [(1,)]
+
+
 def test_an_empty_dynamic_path_keeps_the_declared_shape(tmp_path):
     job = _job(tmp_path, {"read": "csv", "path": "{{ arrivals.uri }}", "row_index": "n",
                           "columns": [{"header": "Id", "canonical": "id", "type": "int"}]},

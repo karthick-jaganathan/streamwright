@@ -17,6 +17,7 @@
 
 import datetime
 import decimal
+import uuid
 
 import pytest
 
@@ -69,6 +70,12 @@ def test_substitute_renders_lists_and_constants_and_refuses_the_rest():
         substitute("{{ s.d }}", {("s", "d"): [1, 2]}, {}, 1)
     with pytest.raises(RefError, match="cannot resolve"):
         substitute("{{ other.x }}", {}, {}, 10)
+
+
+def test_a_uuid_or_time_value_is_pinned_as_text_usable_in_sql():
+    pinned = encode_value(uuid.UUID("12345678-1234-5678-1234-567812345678")), encode_value(datetime.time(1, 2, 3))
+    assert [sql_literal(decode_value(value)) for value in pinned] == [
+        "'12345678-1234-5678-1234-567812345678'", "'01:02:03'"]
 
 
 def test_pinned_values_round_trip_with_their_types():

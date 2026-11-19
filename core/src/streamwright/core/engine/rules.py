@@ -40,7 +40,9 @@ def valid_batch_size(value):
 def transport_problem(kind, transport, provider):
     """Describe a request/connector transport mismatch, or return None."""
     if kind == "sdk" and transport == "http":
-        return "%s is a REST API connector: use an http request (http: {path, method, ...}), not sdk" % provider
+        return "%s is a REST API connector: its operation is an HTTP request (path, method, params, ...), not a " \
+               "call (service, arguments)" % provider
     if kind == "http" and transport == "sdk":
-        return "http requests need a built-in `auth.type`; auth provider %r only authenticates sdk requests" % provider
+        return "an HTTP request needs a built-in `auth.type`; auth provider %r only takes calls (service, method, " \
+               "arguments)" % provider
     return None

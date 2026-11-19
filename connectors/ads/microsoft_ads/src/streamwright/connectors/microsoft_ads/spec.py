@@ -16,11 +16,15 @@
 # **************************************************************************/
 
 """
-What the microsoft_ads connector accepts: its connection fields and its read-only policy over the Microsoft
-Advertising SOAP API (pure data). The operations are families (contract v1.3 §6b): the `Get*`, `Search*` and `Find*`
-methods of any `*Service`, plus the two report operations. A call's `request` holds the SOAP request's fields (their
-names are the WSDL's); `account_id` and `customer_id` name the account and customer the SOAP headers carry. The
-installed bingads WSDL decides which services, methods and request fields exist; the connector never lists them.
+What the microsoft_ads connector accepts: its connection fields and its operations over the Microsoft Advertising
+SOAP API (pure data). Reads are families (contract v1.3 §6b): the `Get*`, `Search*` and `Find*` methods of any
+`*Service`, plus the two report operations. Apply operations (apply outputs): the `Add*` (create; not idempotent),
+`Update*` and `Delete*` (update, remove) methods of any `*Service`, a row per item of the request's one list, and the
+conversion uploads `ApplyOfflineConversions`, `ApplyOfflineConversionAdjustments` and
+`ApplyOnlineConversionAdjustments` (Microsoft rejects duplicates, so idempotent). A call's `request` holds the SOAP
+request's fields (their names are the WSDL's); `account_id` and `customer_id` name the account and customer the SOAP
+headers carry. The installed bingads WSDL decides which services, methods and request fields exist; the connector
+never lists them.
 """
 
 from streamwright.core.sdk.contract import ConnectorDefinition, Field, Operation, OperationKind
@@ -37,6 +41,21 @@ _ARGUMENTS = (
 
 def _read(service: str, method: str, description: str) -> Operation:
     return Operation(service=service, method=method, kind=OperationKind.READ, arguments=_ARGUMENTS,
+                     description=description)
+
+
+_APPLY_ARGUMENTS = (
+    Field("request", "mapping", description="the SOAP request's other fields (e.g. AccountId, CampaignId); the rows "
+                                            "fill its one list, an item each"),
+    *_ARGUMENTS[1:],
+)
+
+
+def _apply(method: str, action: str, description: str, *, idempotent: bool = True, max_chunk: int = 100,
+           service: str = "*Service") -> Operation:
+    return Operation(service=service, method=method, kind=OperationKind.APPLY, idempotent=idempotent,
+                     max_chunk=max_chunk, actions=(action,),
+                     destructive_actions=(action,) if action == "remove" else (), arguments=_APPLY_ARGUMENTS,
                      description=description)
 
 
@@ -63,6 +82,17 @@ CONNECTOR = ConnectorDefinition(
         _read("*Service", "Find*", "A lookup of any service (`Find<Entity>`)."),
         _read("ReportingService", "SubmitGenerateReport", "Submit a report request."),
         _read("ReportingService", "PollGenerateReport", "Poll a submitted report request."),
+        _apply("Add*", "create", "Create items of any service (`Add<Entity>s`), a row each (columns are the item's "
+                                 "fields; the response's ids are the rows' results).", idempotent=False),
+        _apply("Update*", "update", "Update items of any service (`Update<Entity>s`), a row each (with its `Id`)."),
+        _apply("Delete*", "remove", "Remove items of any service (`Delete<Entity>s`), a row each (e.g. one id "
+                                    "column for a list of ids)."),
+        # ApplyOfflineConversions, ApplyOfflineConversionAdjustments, ApplyOnlineConversionAdjustments: Microsoft
+        # rejects a duplicate, so a call cut short is sent again
+        _apply("Apply*Conversion*", "upload", "Upload offline conversions or conversion adjustments, a row each "
+                                              "(e.g. ApplyOfflineConversions: MicrosoftClickId, ConversionName, "
+                                              "ConversionTime, ...).", max_chunk=1000,
+               service="CampaignManagementService"),
     ),
     adapters={"source": "streamwright.connectors.microsoft_ads.engines.source:MicrosoftAdsSourceAdapter"},
     validator="streamwright.connectors.microsoft_ads.client:validate_connection",

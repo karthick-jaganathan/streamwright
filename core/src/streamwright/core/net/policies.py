@@ -19,6 +19,9 @@
 
 
 import collections
+import datetime
+import email.utils
+import math
 import time
 from types import MappingProxyType
 
@@ -87,8 +90,9 @@ class RetryPolicy:
         self.max_delay = parse_duration(retry["max_delay"]).total_seconds()
 
     def delay(self, attempt, retry_after=None):
+        """The seconds before the next attempt: the server's `retry_after` (finite, >= 0), else the backoff's."""
         delay = 2 ** (attempt - 1) if self.backoff == "exponential" else 1
-        if retry_after is not None:
+        if _seconds(retry_after) is not None:
             delay = retry_after
         return min(delay, self.max_delay)
 
@@ -105,9 +109,30 @@ class RetryPolicy:
         return None
 
 
-def parse_retry_after(response):
-    value = response.headers.get("Retry-After") if response is not None else None
-    try:
-        return float(value) if value is not None else None
-    except ValueError:
+def _seconds(value):
+    """`value` when it is a finite number of seconds >= 0, else None."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
+    return value if math.isfinite(value) and value >= 0 else None
+
+
+def parse_retry_after(response, now=None):
+    """
+    The Retry-After header's seconds: delay-seconds, or an HTTP-date (the seconds until then, 0 once past); None
+    when it is absent or invalid (the backoff applies). `now`: an aware datetime (default: the current time).
+    """
+    value = (response.headers.get("Retry-After") if response is not None else None) or ""
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        return _seconds(float(value))
+    except ValueError:
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when.tzinfo is None:                       # "-0000": UTC, as HTTP-dates are
+        when = when.replace(tzinfo=datetime.UTC)
+    return max(0.0, (when - (now or datetime.datetime.now(datetime.UTC))).total_seconds())

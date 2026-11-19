@@ -20,8 +20,9 @@
 import contextlib
 import re
 
+from streamwright.core.config.streams import exports_of
 from streamwright.core.engine.sql.list_parameters import compared_lists, quantified
-from streamwright.core.engine.sql.stream_plan import exports_of, mapping_entries, partition_fields
+from streamwright.core.engine.sql.stream_plan import mapping_entries, partition_fields
 from streamwright.core.engine.sql.tables import COLUMNS, SqlError, _column_problem, _sample
 from streamwright.core.engine.sql.types import _unnamed_struct
 

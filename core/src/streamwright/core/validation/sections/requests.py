@@ -27,6 +27,31 @@ from streamwright.core.validation.sections.stream_context import StreamContext
 class RequestSection(PartitionSection):
     """Request declarations."""
 
+    def check_request_kind(self, request, rpath, request_info):
+        """The request's operation (a call or an HTTP request) or async job."""
+        kinds = [kind for kind in spec.REQUEST_KINDS if kind in request]
+        if len(kinds) != 1:
+            if "call" not in request:                     # (`call:`: the grammar names its new place)
+                self.unknown_keys(request, spec.REQUEST_ITEM_KEYS, rpath, ERROR, "requests do not support it")
+                self.error("bad-value", rpath, "a request needs an `operation:` or an `async_job:`%s" % (
+                    ", not both" if kinds else ""), request)
+            return
+        request_info.request_kind = kinds[0]
+        allowed = {
+            "http": (*spec.REQUEST_ITEM_BASE_KEYS, "http"),
+            "sdk": spec.REQUEST_ITEM_BASE_KEYS + spec.SDK_REQUEST_KEYS,
+            "async_job": (*spec.REQUEST_ITEM_BASE_KEYS, "async_job"),
+        }[request_info.request_kind]
+        self.unknown_keys(request, allowed, rpath, ERROR, "requests do not support it")
+        if request_info.request_kind == "async_job":
+            self.check_async_job(request["async_job"], (*rpath, "async_job"), request, request_info)
+        elif request_info.request_kind == "http":
+            self.check_http_request(request["http"], (*rpath, "http"), request, self.scopes(request_info),
+                                    request_info)
+        else:
+            self.check_sdk_request(request, rpath, self.scopes(request_info), request_info,
+                                   extra_allowed=spec.REQUEST_ITEM_BASE_KEYS)
+
     def check_requests(self, requests, path, stream, info):
         if not self._expect(isinstance(requests, list) and len(requests) > 0, "a non-empty list of requests",
                             requests, path, container=stream, key="requests"):
@@ -45,27 +70,7 @@ class RequestSection(PartitionSection):
             if "partitions" in request:
                 self.check_request_partitions(request["partitions"], (*rpath, "partitions"), request, request_info,
                                               index=j, stream_info=info, stream=stream)
-            kinds = [kind for kind in spec.REQUEST_KINDS if kind in request]
-            if len(kinds) != 1:
-                self.unknown_keys(request, spec.REQUEST_ITEM_KEYS, rpath, ERROR, "requests do not support it")
-                self.error("bad-value", rpath, "a request needs exactly one of: http, sdk, async_job (found: %s)" %
-                           (", ".join(kinds) or "none"), request)
-            else:
-                request_info.request_kind = kinds[0]
-                allowed = {
-                    "http": (*spec.REQUEST_ITEM_BASE_KEYS, "http"),
-                    "sdk": spec.REQUEST_ITEM_BASE_KEYS + spec.SDK_REQUEST_KEYS,
-                    "async_job": (*spec.REQUEST_ITEM_BASE_KEYS, "async_job"),
-                }[request_info.request_kind]
-                self.unknown_keys(request, allowed, rpath, ERROR, "requests do not support it")
-                if request_info.request_kind == "async_job":
-                    self.check_async_job(request["async_job"], (*rpath, "async_job"), request, request_info)
-                elif request_info.request_kind == "http":
-                    self.check_http_request(request["http"], (*rpath, "http"), request, self.scopes(request_info),
-                                            request_info)
-                else:
-                    self.check_sdk_request(request, rpath, self.scopes(request_info), request_info,
-                                           extra_allowed=spec.REQUEST_ITEM_BASE_KEYS)
+            self.check_request_kind(request, rpath, request_info)
             if "paginator" in request:
                 self.check_paginator(request["paginator"], (*rpath, "paginator"), request, request_info)
             if "records" in request:

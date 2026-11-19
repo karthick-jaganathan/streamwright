@@ -84,13 +84,14 @@ def _job(tmp_path, **changes):
                "bus": {"provider": "fakebus"},
                "wh": {"provider": "duckdb", "path": str(tmp_path / "w.db")},
            },
-           "steps": [{"name": "orders", "connection": "bus", "service": "message", "method": "consume",
-                      "arguments": {"destination": "orders"},
+           "steps": [{"name": "orders", "connection": "bus",
+                      "operation": {"service": "message", "method": "consume", "arguments": {"destination": "orders"}},
                       "sql": "SELECT message_id, headers['source'] AS source, (body->>'$.order_id')::INT AS order_id "
                              "FROM input"}],
            "outputs": [{"name": "rows", "connection": "wh", "step": "orders", "table": "orders", "mode": "append"},
-                       {"name": "done", "connection": "bus", "service": "message", "method": "publish",
-                        "arguments": {"destination": "orders.done"},
+                       {"name": "done", "connection": "bus",
+                        "operation": {"service": "message", "method": "publish",
+                                      "arguments": {"destination": "orders.done"}},
                         "sql": "SELECT output, rows, batch_id FROM _commits"}],
            "runtime": {"state": {"sqlite": str(tmp_path / "state.db"), "apply_migrations": True}}}
     job.update(changes)
@@ -128,10 +129,11 @@ def test_broker_steps_and_outputs_are_checked(tmp_path, bus):
     assert any("one broker step" in p for p in problems(steps=[consume, dict(consume, name="again")]))
     publish = _job(tmp_path)["outputs"][1]
     for output, message in ((dict(publish, mode="append"), "takes no mode"),
-                            (dict(publish, retry={"max_attempts": 2}), "takes no retry"),
+                            (dict(publish, policy={"retry": {"max_attempts": 2}}), "takes no policy.retry"),
                             ({k: v for k, v in publish.items() if k != "sql"}, "needs `sql` or `step`"),
-                            (dict(publish, method="consume"), "it is a step, not an output"),
+                            (dict(publish, operation=dict(publish["operation"], method="consume")),
+                             "it is a step, not an output"),
                             ({k: v for k, v in _job(tmp_path)["outputs"][0].items() if k != "mode"}, "needs `mode`")):
         assert any(message in p for p in problems(outputs=[_job(tmp_path)["outputs"][0], output])), message
     assert any("it is an output, not a step" in p
-               for p in problems(steps=[dict(consume, method="publish")]))
+               for p in problems(steps=[dict(consume, operation=dict(consume["operation"], method="publish"))]))

@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from streamwright.connectors.mysql import client
+from streamwright.connectors.mysql.engines import driver
 from streamwright.core.io import databases
 from streamwright.core.sdk.contract import Operation, ResolvedConnection
 from streamwright.core.sdk.engines.duckdb import (
@@ -36,11 +37,6 @@ from streamwright.core.sdk.engines.duckdb import (
     WriteReceipt,
     open_store,
 )
-
-try:  # optional extra `state`: reads and writes work without it
-    import pymysql
-except ImportError:
-    pymysql = None
 
 __all__ = ["MySQLDuckDBAdapter"]
 
@@ -64,50 +60,6 @@ class MySQLDuckDBAdapter:
 
     def open_state(self, session: DuckDBSession, name: str, connection: ResolvedConnection,
                    schema: str) -> StateStore:
-        if pymysql is None:
+        if driver.pymysql is None:
             raise AdapterError("state in MySQL needs PyMySQL: pip install \"streamwright-mysql[state]\"")
-        values = dict(client.parameters(connection))
-        ssl_keys = {"ssl_ca": "ca", "ssl_capath": "capath", "ssl_cert": "cert", "ssl_cipher": "cipher",
-                    "ssl_crl": "crl", "ssl_key": "key"}
-        ssl = {target: values[key] for key, target in ssl_keys.items() if values.get(key)}
-
-        def connect():
-            arguments = {"host": values.get("host"), "port": int(values.get("port") or 3306),
-                         "database": values.get("database"), "user": values.get("user"),
-                         "password": values.get("password"), "connect_timeout": 15,
-                         "charset": "utf8mb4", "autocommit": False}
-            if values.get("socket"):
-                arguments["unix_socket"] = values["socket"]
-            sslmode = str(values.get("sslmode") or "disabled").lower()
-            if sslmode == "disabled":
-                arguments["ssl_disabled"] = True
-            else:
-                arguments["ssl"] = ssl
-                if sslmode in ("verify_ca", "verify_identity"):
-                    arguments["ssl_verify_cert"] = True
-                if sslmode == "verify_identity":
-                    arguments["ssl_verify_identity"] = True
-            return _PyMySQLConnection(pymysql.connect(**arguments))
-
-        return open_store(connect, "mysql", schema)
-
-
-class _PyMySQLConnection:
-    """Expose the small execute/transaction DB-API surface used by SqlStateStore."""
-
-    def __init__(self, connection):
-        self._connection = connection
-
-    def execute(self, statement, parameters=()):
-        cursor = self._connection.cursor()
-        cursor.execute(statement, parameters)
-        return cursor
-
-    def commit(self):
-        return self._connection.commit()
-
-    def rollback(self):
-        return self._connection.rollback()
-
-    def close(self):
-        return self._connection.close()
+        return open_store(lambda: driver.StateConnection(driver.connect(connection, "state")), "mysql", schema)

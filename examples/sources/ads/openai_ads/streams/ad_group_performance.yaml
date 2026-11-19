@@ -21,12 +21,13 @@ incremental:
   cursor_field: date
   start: "{{ config.start_date }}"
   window: 1d
-retry: {max_attempts: 3, max_delay: 2m}
+policy:
+  retry: {max_attempts: 3, max_delay: 2m}
 
 # HTTP requests: list ad groups, then request delivery insights for each ad group within the date window
 requests:
   - name: raw_ad_groups
-    http:
+    operation:
       path: /v1/ad_groups
       method: GET
       params:
@@ -35,7 +36,7 @@ requests:
   - name: raw_ad_group_insights
     partitions:
       - {from: ad_group_rows, fields: [account_id, ad_group_id]}
-    http:
+    operation:
       path: "/v1/ad_groups/{{ partition.ad_group_id }}/insights"
       method: GET
       params:

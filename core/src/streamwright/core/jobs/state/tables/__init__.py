@@ -33,6 +33,7 @@ from streamwright.core.jobs.state.tables.jobs import sw_jobs
 from streamwright.core.jobs.state.tables.leases import sw_leases
 from streamwright.core.jobs.state.tables.migrations import sw_migrations
 from streamwright.core.jobs.state.tables.receipts import sw_receipts
+from streamwright.core.jobs.state.tables.requests import sw_requests
 from streamwright.core.jobs.state.tables.sequences import sw_sequences
 from streamwright.core.jobs.state.tables.signatures import sw_signatures
 
@@ -59,6 +60,7 @@ __all__ = [
     "sw_leases",
     "sw_migrations",
     "sw_receipts",
+    "sw_requests",
     "sw_sequences",
     "sw_signatures",
 ]

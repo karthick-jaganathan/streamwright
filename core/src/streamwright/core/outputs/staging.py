@@ -34,13 +34,12 @@ import decimal
 import json
 import logging
 import os
-import re
 import shutil
 import tempfile
 from types import MappingProxyType
 
 from streamwright.core.runtime.templates import decimal_text, to_json, to_text
-from streamwright.core.sql.quote import sql_string
+from streamwright.core.sql.quote import IDENTIFIER, sql_string
 
 __all__ = [
     "Staging",
@@ -69,7 +68,6 @@ _SCHEMA_TYPES = MappingProxyType({"string": "VARCHAR", "integer": "BIGINT", "num
 # the types stored as they are (besides integers and floats)
 _KEPT_TYPES = frozenset({"BOOLEAN", "DATE", "TIME", "TIMESTAMP", "DECIMAL"})
 _SCHEMA_FORMATS = MappingProxyType({"date": "DATE", "date-time": "TIMESTAMP WITH TIME ZONE", "time": "TIME"})
-_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def quote(name):
@@ -78,7 +76,7 @@ def quote(name):
 
 
 def checked_name(name, what):
-    if not (isinstance(name, str) and _NAME.match(name)):
+    if not (isinstance(name, str) and IDENTIFIER.match(name)):
         raise ValueError("%s %r is not valid (use letters, digits and _, not starting with a digit)" % (what, name))
     return name
 

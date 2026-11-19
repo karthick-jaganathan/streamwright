@@ -24,6 +24,7 @@ import duckdb
 import pytest
 import yaml
 
+from streamwright.core.jobs.duckdb import steps
 from streamwright.core.jobs.duckdb.engine import run_job
 from streamwright.core.jobs.duckdb.steps import _load_records
 from streamwright.core.runtime import components
@@ -48,10 +49,10 @@ def test_a_call_step_flattens_records_and_partitions_by_an_earlier_step(tmp_path
         group = request["params"]["group"]
         return 200, {"data": [{"id": (group[0] if isinstance(group, list) else group) + "-1", "n": 1}]}
     api.routes[("GET", "/items")] = items
-    job = _job(tmp_path, {"name": "items", "connection": "api", "request": {
+    job = _job(tmp_path, {"name": "items", "connection": "api", "operation": {
         "path": "/items", "params": {"group": "{{ partition.group }}"}, "records": {"path": "data"}},
         "partitions": [{"from": "groups", "field": "g", "name": "group"}]}, "SELECT id, n FROM items")
-    job["connections"]["api"] = {"provider": "restapi", "base_url": api.url}
+    job["connections"]["api"] = {"provider": "restapi", "http": {"base_url": api.url}}
     job["steps"].insert(0, {"name": "groups", "sql": "SELECT unnest(['a', 'b']) AS g"})
     result = run_job(job)
     assert result.exit_code == 0, result.error
@@ -61,9 +62,9 @@ def test_a_call_step_flattens_records_and_partitions_by_an_earlier_step(tmp_path
 def test_a_call_step_with_sql_reads_records_and_keeps_its_shape_when_empty(tmp_path, api):
     api.routes[("GET", "/items")] = lambda request: (200, {"data": []})
     job = _job(tmp_path, {"name": "items", "connection": "api",
-                          "request": {"path": "/items", "records": {"path": "data"}},
+                          "operation": {"path": "/items", "records": {"path": "data"}},
                           "sql": "SELECT record->>'id' AS id FROM records"}, "SELECT id FROM items")
-    job["connections"]["api"] = {"provider": "restapi", "base_url": api.url}
+    job["connections"]["api"] = {"provider": "restapi", "http": {"base_url": api.url}}
     result = run_job(job)
     assert result.exit_code == 0, result.error
     assert _rows(tmp_path) == []
@@ -105,7 +106,7 @@ def vault_api():
 
 
 def test_a_call_step_connection_is_rendered_and_checked_like_a_source_auth_block(tmp_path, vault_api):
-    job = _job(tmp_path, {"name": "items", "connection": "vault", "service": "items", "method": "list"},
+    job = _job(tmp_path, {"name": "items", "connection": "vault", "operation": {"service": "items", "method": "list"}},
                "SELECT region, token_seen FROM items")
     job["spec"] = {"config": {"region": {"type": "string"}}, "secrets": {"token": {"type": "string"}}}
     job["connections"]["vault"] = {"provider": "vault_api", "token": "{{ secrets.token }}",
@@ -124,7 +125,7 @@ def test_a_relative_source_is_found_next_to_the_job_only(tmp_path, monkeypatch, 
     (source / "source.yaml").write_text(yaml.safe_dump({
         "kind": "source", "name": "demo", "auth": {"provider": "restapi"}, "http": {"base_url": api.url}}))
     (source / "streams" / "rows.yaml").write_text(yaml.safe_dump({
-        "requests": [{"name": "raw", "http": {"path": "/rows"}}],
+        "requests": [{"name": "raw", "operation": {"path": "/rows"}}],
         "transform": {"mode": "page", "steps": [{"name": "rows", "select": "SELECT record->>'id' AS id FROM raw"}]},
         "export": {"rows": {"step": "rows", "primary_key": ["id"]}}}))
     job = _job(tmp_path, {"name": "rows", "source": "sources/demo", "stream": "rows"}, "SELECT id FROM rows")
@@ -147,7 +148,7 @@ def test_source_without_rows_uses_declared_export_columns(tmp_path, api):
     (source / "source.yaml").write_text(yaml.safe_dump({
         "kind": "source", "name": "demo", "auth": {"provider": "restapi"}, "http": {"base_url": api.url}}))
     (source / "streams" / "rows.yaml").write_text(yaml.safe_dump({
-        "requests": [{"name": "raw", "http": {"path": "/rows"}}],
+        "requests": [{"name": "raw", "operation": {"path": "/rows"}}],
         "transform": {"mode": "page", "steps": [{"name": "rows", "select": "SELECT record->>'id' AS id FROM raw"}]},
         "export": {"rows": {"step": "rows"}}}))
     job = _job(tmp_path, {"name": "rows", "source": str(source), "stream": "rows"}, "SELECT id FROM rows")
@@ -196,3 +197,36 @@ def test_an_empty_message_read_keeps_the_columns_of_the_established_schema():
         _load_records(run, step, iter([]))                 # a batch that polled no messages
         empty = [row[0] for row in con.execute("DESCRIBE arrivals").fetchall()]
         assert empty == full and con.execute("SELECT COUNT(*) FROM arrivals").fetchone()[0] == 0
+
+
+def test_each_partition_of_a_source_step_resumes_from_its_own_bookmarks(tmp_path, monkeypatch):
+    started = []
+
+    class Collected(list):
+        partial = False
+
+        def __init__(self, state):
+            super().__init__()
+            self.state = state
+
+    class Runner:
+        def __init__(self, source, config, secrets, **kwargs):
+            self.account = config["account"]
+
+        def collect(self, stream, state=None):
+            started.append((self.account, state))
+            return Collected({"cursor": self.account})
+
+    monkeypatch.setattr(steps, "load_source", lambda path: {})
+    monkeypatch.setattr(steps, "plan_source", lambda source: SimpleNamespace(streams={}))
+    monkeypatch.setattr(steps, "source_inputs", lambda source, config, secrets: (config, {}))
+    monkeypatch.setattr(steps, "SourceRunner", Runner)
+    step = {"name": "rows", "source": str(tmp_path), "stream": "rows",
+            "partitions": [{"from": "accounts", "field": "a", "name": "account"}]}
+    with duckdb.connect() as con:
+        con.execute("CREATE TABLE accounts AS SELECT unnest(['A', 'B']) AS a")
+        run = SimpleNamespace(session=SimpleNamespace(con=con), carry={}, pinned={}, secrets={},
+                              allowed_connectors=None, base_dir=None)
+        for _ in range(2):
+            assert list(steps._collect(run, step, steps.SOURCE)) == []
+    assert started == [("A", None), ("B", None), ("A", {"cursor": "A"}), ("B", {"cursor": "B"})]

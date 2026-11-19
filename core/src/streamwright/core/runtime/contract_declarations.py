@@ -108,6 +108,9 @@ class Operation:
     A `service.method` a connector offers and its arguments. Shared operations come from the catalog
     (`streamwright.core.sdk.operations`); `with_arguments` adds a connector's own arguments, recorded in `extensions`
     (the connector's adapters take them on every engine they run on).
+    An `apply` operation also declares `max_chunk` (the most rows one call takes), `actions` (the values of a row's
+    `op` column, the first being the default) and `destructive_actions` (those an output must allow, e.g. remove);
+    `idempotent` says whether a call whose outcome is unknown (a crash mid-call) may be sent again.
     """
     service: str
     method: str
@@ -116,10 +119,15 @@ class Operation:
     idempotent: bool = True
     description: str = ""
     extensions: tuple[str, ...] = ()
+    max_chunk: int | None = None
+    actions: tuple[str, ...] = ()
+    destructive_actions: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "arguments", tuple(self.arguments))
         object.__setattr__(self, "extensions", tuple(self.extensions))
+        object.__setattr__(self, "actions", tuple(self.actions))
+        object.__setattr__(self, "destructive_actions", tuple(self.destructive_actions))
         try:
             object.__setattr__(self, "kind", OperationKind(self.kind))
         except ValueError:
@@ -131,6 +139,21 @@ class Operation:
             raise DefinitionError("operation %s: arguments are not credentials (no secret arguments)" % self.name)
         if not set(self.extensions) <= set(names):
             raise DefinitionError("operation %s: extensions name its arguments" % self.name)
+        self._check_apply()
+
+    def _check_apply(self) -> None:
+        declared = self.max_chunk is not None or self.actions or self.destructive_actions
+        if declared and self.kind != OperationKind.APPLY:
+            raise DefinitionError("operation %s: max_chunk and actions are for apply operations" % self.name)
+        if self.kind != OperationKind.APPLY:
+            return
+        chunk = self.max_chunk
+        if chunk is None or isinstance(chunk, bool) or not isinstance(chunk, int) or chunk < 1:
+            raise DefinitionError("operation %s: an apply operation declares max_chunk (a positive integer)" %
+                                  self.name)
+        if not self.actions or not set(self.destructive_actions) <= set(self.actions):
+            raise DefinitionError("operation %s: an apply operation declares its actions (destructive_actions "
+                                  "among them)" % self.name)
 
     @property
     def name(self) -> str:
@@ -176,7 +199,10 @@ class Operation:
         return {"name": self.name, "service": self.service, "method": self.method, "kind": self.kind.value,
                 "idempotent": self.idempotent, "description": self.description, "extensions": list(self.extensions),
                 "pattern": self.is_pattern,
-                "arguments": [dict(argument.describe(), name=argument.name) for argument in self.arguments]}
+                "arguments": [dict(argument.describe(), name=argument.name) for argument in self.arguments],
+                **({"max_chunk": self.max_chunk, "actions": list(self.actions),
+                    "destructive_actions": list(self.destructive_actions)} if self.kind == OperationKind.APPLY
+                   else {})}
 
 
 def _narrow(argument: Field, choices: tuple[Any, ...] | None) -> Field:

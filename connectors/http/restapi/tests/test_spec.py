@@ -29,9 +29,9 @@ def codes(issues):
     return [(issue.code, issue.path) for issue in issues]
 
 
-def test_the_connector_declares_http_requests_run_by_the_engine():
+def test_the_connector_declares_http_requests_and_sends_run_by_the_engine():
     assert select_transport(components.load("restapi")) == "http"
-    assert [operation.name for operation in CONNECTOR.operations] == ["http.request"]
+    assert [operation.name for operation in CONNECTOR.operations] == ["http.request", "http.send"]
 
 
 def test_every_credential_of_the_built_in_authentication_is_a_secret_reference():

@@ -23,7 +23,6 @@ declared surface check (called by `validate` when the library is importable); th
 resolve calls and to name a clear error with "did you mean" suggestions.
 """
 
-import difflib
 import importlib
 import pkgutil
 import re
@@ -32,8 +31,10 @@ from typing import Any
 
 from google.ads.googleads import client as library
 
-__all__ = ["default_version", "did_you_mean", "read_method_names", "sdk_version", "service_names",
-           "supported_versions", "surface"]
+from streamwright.core.sdk import suggest
+
+__all__ = ["default_version", "method_names", "read_method_names", "sdk_version", "service_names", "supported_versions",
+           "surface"]
 
 
 def supported_versions() -> list[str]:
@@ -55,16 +56,17 @@ def _snake(service: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", service).lower()
 
 
-def did_you_mean(value: str, candidates: list[str]) -> str:
-    matches = difflib.get_close_matches(value, candidates, n=3)
-    return "; did you mean %s?" % ", ".join(matches) if matches else ""
-
-
 def read_method_names(obj: Any) -> list[str]:
     """The read methods an object offers: `search`, `search_stream` and any `get_*`/`list_*`."""
     return sorted(name for name in dir(obj)
                   if (name in ("search", "search_stream") or name.startswith(("get_", "list_")))
                   and callable(getattr(obj, name, None)))
+
+
+def method_names(obj: Any) -> list[str]:
+    """The read methods and the apply methods (`mutate_*`, `upload_*`) an object offers."""
+    return sorted(set(read_method_names(obj)) | {name for name in dir(obj) if name.startswith(("mutate_", "upload_"))
+                                                 and callable(getattr(obj, name, None))})
 
 
 def _service_client_class(service: str, version_name: str) -> Any:
@@ -90,7 +92,7 @@ def service_names(version_name: str) -> list[str]:
 
 def surface(service: str, method: str) -> list[str]:
     """
-    Problems if `service.method` is not a readable service and method of the installed google-ads (§6b): a pure
+    Problems if `service.method` is not a service and method of the installed google-ads (§6b): a pure
     introspection (no network, no credentials) of the default API version's generated clients, with "did you mean"
     suggestions, so a typo is caught before a run.
     """
@@ -98,8 +100,8 @@ def surface(service: str, method: str) -> list[str]:
     client_class = _service_client_class(service, version_name)
     if client_class is None:
         return ["%s is not a service in %s%s" % (
-            service, sdk_version(), did_you_mean(service, service_names(version_name)))]
+            service, sdk_version(), suggest(service, service_names(version_name), style="list"))]
     if not callable(getattr(client_class, method, None)):
         return ["%s has no %s method in %s%s" % (
-            service, method, sdk_version(), did_you_mean(method, read_method_names(client_class)))]
+            service, method, sdk_version(), suggest(method, method_names(client_class), style="list"))]
     return []

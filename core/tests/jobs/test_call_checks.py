@@ -61,20 +61,22 @@ def test_every_rest_connector_guide_has_a_duckdb_job_that_validates_clean(name):
 
 @pytest.mark.skipif("openai_ads" not in REST, reason="the openai_ads connector is not installed")
 def test_a_rest_connector_rejects_sdk_calls_ignored_keys_and_a_relative_path_without_base_url():
-    absolute = {"request": {"path": "https://api.example.com/v1/campaigns"}}
+    absolute = {"operation": {"path": "https://api.example.com/v1/campaigns"}}
     assert not {code for code, _ in _codes(_job(absolute))} & {"bad-call", "unsupported-key", "bad-connection"}
-    assert ("bad-call", "steps[0]") in _codes(_job({"service": "CampaignService", "method": "list"}))
-    relative = _codes(_job({"request": {"path": "/v1/campaigns"}}, http={"base_url": "https://api.example.com"}))
-    assert {("unsupported-key", "connections.api"), ("bad-call", "steps[0]")} <= relative
-    assert ("bad-call", "steps[0]") not in _codes(_job({"request": {"path": "/v1/campaigns"}},
-                                                       base_url="https://api.example.com"))
+    assert ("bad-call", "steps[0]") in _codes(_job({"operation": {"service": "CampaignService", "method": "list"}}))
+    assert ("bad-call", "steps[0]") in _codes(_job({"operation": {"path": "/v1/campaigns"}}))    # relative, no base_url
+    assert ("unsupported-key", "connections.api") in _codes(_job(absolute, bogus=1))         # would be ignored
+    grouped = _codes(_job({"operation": {"path": "/v1/campaigns"}}, http={"base_url": "https://api.example.com"}))
+    assert ("bad-call", "steps[0]") not in grouped
+    flat = _codes(_job({"operation": {"path": "/v1/campaigns"}}, base_url="https://api.example.com"))
+    assert ("unknown-key", "connections.api.base_url") in flat
 
 
 def test_a_database_lookup_whose_driver_is_missing_warns_offline_and_stops_a_run(monkeypatch):
     if "postgres" not in components.available():
         pytest.skip("the postgres connector is not installed")
     monkeypatch.setattr(url, "DRIVERS", {"postgres": (("no_such_driver_module",), "pip install a-driver")})
-    job = _job({"request": {"path": "https://api.example.com/v1/campaigns"}})
+    job = _job({"operation": {"path": "https://api.example.com/v1/campaigns"}})
     job["connections"]["db"] = {"provider": "postgres", "host": "db.example.com", "database": "app", "user": "u",
                                 "password": "{{ secrets.tok }}"}
     job["spec"]["lookups"] = {"rows": {"type": "database", "connection": "db", "query": "SELECT 1 AS one"}}

@@ -20,17 +20,17 @@ DuckDBJob steps: one classification shared by the checker, the plan and the exec
 
   sql      no connection: `sql` over earlier steps                                 a TEMP VIEW or TABLE
   read     a connection and `read:`: the adapter compiles the read                 a TEMP VIEW or TABLE
-  call     a connection and a connector call (`service`/`method`, or `request`)    a TEMP TABLE of the records
+  call     a connection and an `operation:` of its connector                     a TEMP TABLE of the records
   source   `source:` a StreamWright source folder and its `stream`                 a TEMP TABLE of the records
   consume  a connection and its broker's consume call (`service: message`, `method: consume`)
            the batch's messages (the table `input`), or `sql` over them            a TEMP VIEW
 
 Call and source steps run through the source engine (`SourceRunner.collect`), keep their bookmarks in the batch
-manifest's `carry` (so incremental streams resume) and fail on a partial load. Their records land in DuckDB in
-batches as JSON. With `sql`, the step is that query over the table `records` (one JSON column `record`), which also
-gives an empty result its columns; without it, the records' top-level keys become columns. A message read
-(`service: message`) carries its discovered column structure in `carry`, so a batch that polls no messages keeps the
-same columns (zero rows) instead of collapsing to the lone `record` column.
+manifest's `carry` (so incremental streams resume; a partitioned source step per partition) and fail on a partial
+load. Their records land in DuckDB in batches as JSON. With `sql`, the step is that query over the table `records`
+(one JSON column `record`), which also gives an empty result its columns; without it, the records' top-level keys
+become columns. A message read (`service: message`) carries its discovered column structure in `carry`, so a batch
+that polls no messages keeps the same columns (zero rows) instead of collapsing to the lone `record` column.
 
 A consume step does not call anything: the runner polls the broker before the batch, pins the messages in its
 manifest (a replay sees the same ones) and acknowledges them only once the batch's outputs and outbox are committed.
@@ -45,8 +45,10 @@ from types import MappingProxyType
 from streamwright.core.config.loader import load_source
 from streamwright.core.engine.runner import SourceRunner
 from streamwright.core.engine.sql import plan_source
+from streamwright.core.engine.values import partition_key
 from streamwright.core.jobs.calls import ephemeral_source, partition_scopes, record_value, source_inputs
 from streamwright.core.jobs.refs import decode_value, encode_value
+from streamwright.core.jobs.step_log import LOG_KEY
 from streamwright.core.sql.quote import quote_ident, quote_literal
 
 __all__ = [
@@ -67,7 +69,7 @@ __all__ = [
 
 SQL, READ, CALL, SOURCE, CONSUME = "sql", "read", "call", "source", "consume"
 MESSAGES_TABLE = "input"
-_COMMON = ("name", "description")
+_COMMON = ("name", "description", LOG_KEY)
 STEP_KEYS = MappingProxyType({
     SQL: (*_COMMON, "sql", "materialize"),
     READ: (*_COMMON, "connection", "read", "materialize"),
@@ -94,9 +96,10 @@ def classify_step(step, connections):
         return None, "a step needs `sql`, a `connection` (with `read` or a connector call) or a `source`"
     if "read" in step:
         return READ, None
-    if any(key in step for key in ("service", "method", "request")):
+    # (`call` / `http`: an operation as written before it was one group; the grammar reports it, once)
+    if any(key in step for key in ("service", "method", "request", "call", "http")):
         return CALL, None
-    return None, "a step with a connection needs `read:`, or a connector call (`service`/`method`, or `request`)"
+    return None, "a step with a connection needs `read:`, or an `operation:` of its connector"
 
 
 def message_kind(item, connections, adapters):
@@ -192,9 +195,18 @@ def _source_path(run, step):
     return path
 
 
+def _carry_key(step, kind, scope):
+    """
+    Where a call/source step keeps its bookmarks in `carry`. A source step's partition scope is config, which its
+    bookmarks' keys do not include, so each scope resumes from its own; a call step's scope is a stream partition
+    (bookmarked per partition already), so its scopes share one state.
+    """
+    if kind == SOURCE and scope:
+        return "bookmarks:%s:%s" % (step["name"], partition_key(scope))
+    return "bookmarks:%s" % step["name"]
+
+
 def _collect(run, step, kind):
-    carry_key = "bookmarks:%s" % step["name"]
-    state = run.carry.get(carry_key)
     run.record_columns = None
     if kind == SOURCE:
         source, stream = load_source(_source_path(run, step)), step.get("stream")
@@ -205,6 +217,8 @@ def _collect(run, step, kind):
     else:
         source, stream, source_plan = None, step["name"], None
     for scope in _scopes(run, step):
+        carry_key = _carry_key(step, kind, scope)
+        state = run.carry.get(carry_key)
         if kind == SOURCE:
             config, secrets = source_inputs(source, dict(step.get("config") or {}, **scope), run.secrets)
             runner = SourceRunner(source, config, secrets, allowed_connectors=run.allowed_connectors, plan=source_plan)
@@ -220,8 +234,7 @@ def _collect(run, step, kind):
                 yield record_value(record)
         if collected.partial:
             raise StepError("step %s: stream %s was loaded partially" % (step["name"], stream))
-        state = collected.state
-    run.carry[carry_key] = state
+        run.carry[carry_key] = collected.state
 
 
 def _load_records(run, step, records, batch_size=_INSERT_BATCH):

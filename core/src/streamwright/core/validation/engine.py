@@ -42,9 +42,11 @@ import yaml
 from streamwright.core.config import loader as source_files
 from streamwright.core.engine import sql
 from streamwright.core.runtime import components
+from streamwright.core.runtime.issues import Issue
+from streamwright.core.runtime.text import suggest
+from streamwright.core.serve.check import is_serve_config, validate_service
 from streamwright.core.validation import schema
-from streamwright.core.validation.checker import ERROR, NON_STRICT_CODES, WARNING, suggest
-from streamwright.core.validation.issues import Issue
+from streamwright.core.validation.checker import ERROR, NON_STRICT_CODES, WARNING
 from streamwright.core.validation.job_manifests import FILE_UNIT, JOB_UNIT, validate_job_manifest, validation_units
 from streamwright.core.validation.marked_yaml import FolderLoaders, parse_yaml, read_file
 from streamwright.core.validation.source import SourceChecker
@@ -156,6 +158,7 @@ def validate_text(text, filename=None, kind=None, allowed_connectors=None, sourc
     try:
         checker = SourceChecker(filename, loader, options)
         if _check_kind(checker, data):
+            checker.translate(data)
             checker.check_document(data)
         return _sorted(checker.issues)
     finally:
@@ -199,6 +202,7 @@ def _validate_folder(layout, options):
                     source["kind"],), source, "kind")
                 return _sorted(issues + checker.issues, layout.files)
             checker.error("missing-key", (), "missing `kind: source`", source)
+        checker.translate(source)
         checker.check_document(source)
         return _sorted(issues + checker.issues, layout.files)
     finally:
@@ -236,7 +240,18 @@ def validate_file(path, kind=None, allowed_connectors=None, source_check=None):
     text, issues = read_file(path)
     if text is None:
         return issues
+    if kind is None and _serve_config(text):
+        problems, warnings = validate_service(path)
+        return ([Issue(ERROR, "serve-config", message, path) for message in problems] +
+                [Issue(WARNING, "serve-config", message, path) for message in warnings])
     return validate_text(text, path, kind, allowed_connectors, source_check)
+
+
+def _serve_config(text):
+    try:
+        return is_serve_config(yaml.safe_load(text))
+    except yaml.YAMLError:
+        return False                              # validate_text reports it
 
 
 def validate_paths(paths, kind=None, allowed_connectors=None, source_check=None):
@@ -297,7 +312,7 @@ def _parser(prog="streamwright validate"):
     parser.add_argument("--kind", choices=(schema.KIND,),
                         help="kind to assume for files that do not declare `kind`")
     parser.add_argument("--allow-connector", action="append", dest="allowed_connectors", metavar="NAME",
-                        help="sources: only allow these connectors in `auth.provider` and `sdk` (repeatable)")
+                        help="sources: only allow these connectors in `auth.provider` (repeatable)")
     parser.add_argument("--strict", action="store_true", help="exit with status 1 on warnings too")
     parser.add_argument("--format", choices=("text", "json", "github"), default="text",
                         help="output format; `github` prints GitHub Actions annotations")

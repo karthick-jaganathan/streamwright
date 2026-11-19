@@ -49,9 +49,6 @@
           "additionalProperties": false,
           "properties": {
             "<<": {},
-            "arguments": {
-              "type": "object"
-            },
             "done_when": {
               "$ref": "#/definitions/poll_condition"
             },
@@ -63,8 +60,21 @@
             "fail_when": {
               "$ref": "#/definitions/poll_condition"
             },
-            "method": {
-              "type": "string"
+            "operation": {
+              "additionalProperties": false,
+              "properties": {
+                "<<": {},
+                "arguments": {
+                  "type": "object"
+                },
+                "method": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "method"
+              ],
+              "type": "object"
             },
             "timeout": {
               "description": "e.g. 15s, 30m, 1h, 7d",
@@ -73,7 +83,7 @@
             }
           },
           "required": [
-            "method",
+            "operation",
             "every",
             "timeout",
             "done_when"
@@ -81,10 +91,10 @@
           "type": "object"
         },
         "results": {
-          "$ref": "#/definitions/sdk_request"
+          "$ref": "#/definitions/call_request"
         },
         "submit": {
-          "$ref": "#/definitions/sdk_request"
+          "$ref": "#/definitions/call_request"
         }
       },
       "required": [
@@ -263,6 +273,42 @@
       },
       "type": "object"
     },
+    "call": {
+      "additionalProperties": false,
+      "description": "A call of the auth.provider connector's client.",
+      "properties": {
+        "<<": {},
+        "arguments": {
+          "type": "object"
+        },
+        "method": {
+          "type": "string"
+        },
+        "records": {
+          "$ref": "#/definitions/records"
+        },
+        "service": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "method"
+      ],
+      "type": "object"
+    },
+    "call_request": {
+      "additionalProperties": false,
+      "properties": {
+        "<<": {},
+        "operation": {
+          "$ref": "#/definitions/call"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "type": "object"
+    },
     "export": {
       "additionalProperties": false,
       "properties": {
@@ -340,6 +386,9 @@
             "DELETE"
           ]
         },
+        "paginator": {
+          "$ref": "#/definitions/paginator"
+        },
         "params": {
           "type": "object"
         },
@@ -351,6 +400,9 @@
         },
         "path": {
           "type": "string"
+        },
+        "records": {
+          "$ref": "#/definitions/records"
         }
       },
       "required": [
@@ -371,7 +423,7 @@
           "type": "string"
         },
         "start": {
-          "pattern": "^(?:today|-?[0-9]+d|[0-9]{4}-[0-9]{2}-[0-9]{2}|\\{\\{.*\\}\\})$",
+          "pattern": "^(?:today|-?[0-9]+d|[0-9]{4}-[0-9]{2}-[0-9]{2}|.*\\{\\{.*\\}\\}.*)$",
           "type": "string"
         },
         "window": {
@@ -493,7 +545,7 @@
               "default": {
                 "anyOf": [
                   {
-                    "pattern": "^(?:today|-?[0-9]+d|[0-9]{4}-[0-9]{2}-[0-9]{2}|\\{\\{.*\\}\\})$",
+                    "pattern": "^(?:today|-?[0-9]+d|[0-9]{4}-[0-9]{2}-[0-9]{2}|.*\\{\\{.*\\}\\}.*)$",
                     "type": "string"
                   },
                   {
@@ -538,6 +590,11 @@
         "description": {
           "type": "string"
         },
+        "enum": {
+          "description": "The values it accepts (a list: each item).",
+          "minItems": 1,
+          "type": "array"
+        },
         "items": {
           "description": "Item type of a `list` input.",
           "enum": [
@@ -547,6 +604,21 @@
             "boolean",
             "date"
           ]
+        },
+        "max_length": {
+          "description": "The longest text value.",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum": {
+          "type": "number"
+        },
+        "minimum": {
+          "type": "number"
+        },
+        "pattern": {
+          "description": "A regular expression a text value matches in full.",
+          "type": "string"
         },
         "required": {
           "description": "Default true.",
@@ -579,6 +651,17 @@
       "type": [
         "object",
         "null"
+      ]
+    },
+    "operation": {
+      "description": "What the request invokes on the auth.provider connector, which decides the kind: a call (service, method, arguments) of an SDK connector, or an HTTP request (path, method, params, ...).",
+      "oneOf": [
+        {
+          "$ref": "#/definitions/call"
+        },
+        {
+          "$ref": "#/definitions/http_request"
+        }
       ]
     },
     "paginator": {
@@ -811,10 +894,16 @@
               "type": "string"
             },
             "values": {
-              "type": [
-                "array",
-                "string"
-              ]
+              "anyOf": [
+                {
+                  "type": "array"
+                },
+                {
+                  "pattern": "\\{\\{",
+                  "type": "string"
+                }
+              ],
+              "description": "A list, or a reference to one such as \"{{ config.ids }}\"."
             }
           },
           "required": [
@@ -923,39 +1012,33 @@
     },
     "request_item": {
       "additionalProperties": false,
+      "dependencies": {
+        "records": {
+          "properties": {
+            "async_job": {
+              "required": [
+                "download"
+              ]
+            }
+          },
+          "required": [
+            "async_job"
+          ]
+        }
+      },
       "oneOf": [
         {
           "not": {
             "anyOf": [
               {
                 "required": [
-                  "sdk"
-                ]
-              },
-              {
-                "required": [
-                  "service"
-                ]
-              },
-              {
-                "required": [
-                  "method"
-                ]
-              },
-              {
-                "required": [
-                  "arguments"
-                ]
-              },
-              {
-                "required": [
                   "async_job"
                 ]
               }
             ]
           },
           "required": [
-            "http"
+            "operation"
           ]
         },
         {
@@ -963,47 +1046,7 @@
             "anyOf": [
               {
                 "required": [
-                  "http"
-                ]
-              },
-              {
-                "required": [
-                  "async_job"
-                ]
-              }
-            ]
-          },
-          "required": [
-            "sdk",
-            "method"
-          ]
-        },
-        {
-          "not": {
-            "anyOf": [
-              {
-                "required": [
-                  "http"
-                ]
-              },
-              {
-                "required": [
-                  "sdk"
-                ]
-              },
-              {
-                "required": [
-                  "service"
-                ]
-              },
-              {
-                "required": [
-                  "method"
-                ]
-              },
-              {
-                "required": [
-                  "arguments"
+                  "operation"
                 ]
               }
             ]
@@ -1015,24 +1058,15 @@
       ],
       "properties": {
         "<<": {},
-        "arguments": {
-          "type": "object"
-        },
         "async_job": {
           "$ref": "#/definitions/async_job"
-        },
-        "http": {
-          "$ref": "#/definitions/http_request"
-        },
-        "method": {
-          "type": "string"
         },
         "name": {
           "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
           "type": "string"
         },
-        "paginator": {
-          "$ref": "#/definitions/paginator"
+        "operation": {
+          "$ref": "#/definitions/operation"
         },
         "partitions": {
           "items": {
@@ -1042,13 +1076,8 @@
           "type": "array"
         },
         "records": {
-          "$ref": "#/definitions/records"
-        },
-        "sdk": {
-          "type": "string"
-        },
-        "service": {
-          "type": "string"
+          "$ref": "#/definitions/records",
+          "description": "Where an async job's downloaded json holds its records."
         }
       },
       "required": [
@@ -1072,10 +1101,16 @@
               "type": "string"
             },
             "values": {
-              "type": [
-                "array",
-                "string"
-              ]
+              "anyOf": [
+                {
+                  "type": "array"
+                },
+                {
+                  "pattern": "\\{\\{",
+                  "type": "string"
+                }
+              ],
+              "description": "A list, or a reference to one such as \"{{ config.ids }}\"."
             }
           },
           "required": [
@@ -1178,29 +1213,6 @@
       },
       "type": "object"
     },
-    "sdk_request": {
-      "additionalProperties": false,
-      "properties": {
-        "<<": {},
-        "arguments": {
-          "type": "object"
-        },
-        "method": {
-          "type": "string"
-        },
-        "sdk": {
-          "type": "string"
-        },
-        "service": {
-          "type": "string"
-        }
-      },
-      "required": [
-        "sdk",
-        "method"
-      ],
-      "type": "object"
-    },
     "step": {
       "additionalProperties": false,
       "properties": {
@@ -1270,8 +1282,39 @@
           "minItems": 1,
           "type": "array"
         },
-        "rate_limit": {
-          "$ref": "#/definitions/rate_limit"
+        "policy": {
+          "additionalProperties": false,
+          "properties": {
+            "<<": {},
+            "on_error": {
+              "enum": [
+                "fail",
+                "skip",
+                "warn"
+              ]
+            },
+            "rate_limit": {
+              "$ref": "#/definitions/rate_limit"
+            },
+            "retry": {
+              "$ref": "#/definitions/retry"
+            },
+            "timeout": {
+              "anyOf": [
+                {
+                  "exclusiveMinimum": 0,
+                  "type": "number"
+                },
+                {
+                  "description": "e.g. 15s, 30m, 1h, 7d",
+                  "pattern": "^[0-9]+[smhd]$",
+                  "type": "string"
+                }
+              ],
+              "description": "Seconds (a positive number) or a duration such as 30s."
+            }
+          },
+          "type": "object"
         },
         "requests": {
           "description": "Named requests: the raw rows of each one are a table of the stream's SQL, named after it (columns record, partition, config, window_start, window_end, today).",
@@ -1280,9 +1323,6 @@
           },
           "minItems": 1,
           "type": "array"
-        },
-        "retry": {
-          "$ref": "#/definitions/retry"
         },
         "transform": {
           "$ref": "#/definitions/transform"
@@ -1368,14 +1408,8 @@
             "dotted"
           ]
         },
-        "rate_limit": {
-          "$ref": "#/definitions/rate_limit"
-        },
         "records": {
           "$ref": "#/definitions/records"
-        },
-        "retry": {
-          "$ref": "#/definitions/retry"
         }
       },
       "type": "object"
@@ -1386,6 +1420,20 @@
     "name": {
       "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
       "type": "string"
+    },
+    "policy": {
+      "additionalProperties": false,
+      "description": "Defaults of every request of the source (a stream's `policy` replaces them).",
+      "properties": {
+        "<<": {},
+        "rate_limit": {
+          "$ref": "#/definitions/rate_limit"
+        },
+        "retry": {
+          "$ref": "#/definitions/retry"
+        }
+      },
+      "type": "object"
     },
     "spec": {
       "additionalProperties": false,

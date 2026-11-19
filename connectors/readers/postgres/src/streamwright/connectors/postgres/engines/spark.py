@@ -61,7 +61,7 @@ def _target(connection: Mapping[str, Any]) -> jdbc.JdbcTarget:
 def _connect(url: str) -> Any:
     if psycopg is None:
         raise RuntimeError("the Spark driver needs psycopg: pip install \"streamwright-postgres[spark]\"")
-    return psycopg.connect(url, connect_timeout=CONNECT_TIMEOUT)
+    return psycopg.connect(url, connect_timeout=CONNECT_TIMEOUT, prepare_threshold=None)   # PgBouncer-safe
 
 
 def _driver(connection: Mapping[str, Any]) -> Callable[[], Any]:

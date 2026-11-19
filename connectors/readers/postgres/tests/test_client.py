@@ -60,6 +60,16 @@ def test_jdbc_values_come_from_a_dsn_too_and_the_spark_driver_requires_tls_by_de
                              default_sslmode="require").endswith("sslmode=disable")
 
 
+def test_structured_options_and_the_statement_timeout_reach_jdbc_and_the_driver():
+    connection = {"host": "db", "database": "shop", "user": "u", "sslmode": "verify-full", "statement_timeout": "5s",
+                  "options": {"connect_timeout": "10", "sslrootcert": "/ca.pem", "options": "-c search_path=x"}}
+    assert client.jdbc_values(connection)["properties"] == {
+        "sslmode": "verify-full", "connectTimeout": "10", "sslrootcert": "/ca.pem",
+        "options": "-c search_path=x -c statement_timeout=5000"}
+    assert "options=-c%20search_path%3Dx%20-c%20statement_timeout%3D5000" in client.driver_url(connection)
+    assert "options" not in client.driver_url(dict(connection, statement_timeout=None, options={}))
+
+
 def test_spark_statements():
     assert client.staging_statement('"s"."t"', '"s"."stg"') == (
         'CREATE UNLOGGED TABLE "s"."stg" (LIKE "s"."t" INCLUDING DEFAULTS EXCLUDING CONSTRAINTS EXCLUDING INDEXES)')

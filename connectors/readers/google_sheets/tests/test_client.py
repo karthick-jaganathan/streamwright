@@ -24,8 +24,8 @@ import pytest
 import responses
 
 from streamwright.connectors.google_sheets import client
-from streamwright.core.io.api_calls import make_caller, standalone_context
 from streamwright.core.sdk import ConnectorError, Redactor
+from streamwright.core.sdk.engines.source import make_caller, standalone_context
 from streamwright.core.sdk.network import HttpClient, HttpError
 
 BASE = client.SHEETS_API_BASE
@@ -105,6 +105,17 @@ def test_an_empty_sheet_has_no_pages_and_the_first_sheet_is_the_default():
                   json={"sheets": [{"properties": {"title": "Tab One"}}]})
     responses.add(responses.GET, values_url("s1", "Tab%20One"), status=200, json={"values": []})
     assert read("read", {"spreadsheet_id": "s1"}, api_key="k") == []
+
+
+@responses.activate
+@pytest.mark.parametrize("listed", [False, True])
+def test_a_quote_in_a_sheet_title_is_doubled_in_its_range(listed):
+    if listed:
+        responses.add(responses.GET, "%s/s1?fields=sheets.properties.title" % BASE, status=200,
+                      json={"sheets": [{"properties": {"title": "Bob's"}}]})
+    responses.add(responses.GET, values_url("s1", "Bob%27%27s"), status=200, json={"values": [["id"], ["1"]]})
+    arguments = {"spreadsheet_id": "s1"} if listed else {"spreadsheet_id": "s1", "sheet": "Bob's"}
+    assert read("read", arguments, api_key="k") == [[{"id": "1"}]]
 
 
 @responses.activate

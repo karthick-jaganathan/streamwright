@@ -21,8 +21,9 @@ Connector *call steps*, shared by every job engine (connector contract v1.2 §6a
 A call step runs a source connector through the source engine (`SourceRunner.collect`) on the driver and loads the
 records it returns. DuckDBJob and SparkJob use the SAME code here — the only difference is where the records land (a
 DuckDB table, a Spark DataFrame). The step shape is identical to a DuckDBJob call step: a `connection`, and either a
-connector call (`service`/`method` with `arguments`) or an HTTP `request`, optionally paged (`paginator`), throttled
-(`rate_limit`), retried (`retry`).
+connector call (internally `service`/`method` with `arguments`) or an HTTP request (internally `request`): a
+manifest's `operation:`, optionally paged (`paginator`), throttled (`rate_limit`), retried (`retry`); the
+manifest grammar is translated by streamwright.core.jobs.grammar.
 """
 
 import itertools
@@ -30,17 +31,18 @@ import json
 
 from streamwright.core.config.inputs import resolve_inputs
 from streamwright.core.engine.runner import SourceRunner
+from streamwright.core.jobs.grammar import CONNECTION_HTTP_KEYS, CONNECTION_POLICY_KEYS, public_connection_key
 from streamwright.core.runtime import components
 from streamwright.core.runtime.contract_validation import check_connection
 from streamwright.core.runtime.source_connectors import select_transport
-from streamwright.core.validation.checker import suggest
+from streamwright.core.runtime.text import suggest
 
 __all__ = ["HTTP_DEFAULT_KEYS", "PARTITION_KEYS", "call_problems", "call_records", "connection_problems",
            "ephemeral_source", "partition_dependencies", "partition_problems", "partition_scopes", "record_value",
            "source_inputs"]
 
-# a call step connection's HTTP defaults (a source's `http:` block), written directly on the connection
-HTTP_DEFAULT_KEYS = ("base_url", "headers", "params_encoding", "paginator", "records", "retry", "rate_limit")
+# a REST connection's request defaults, flat in the internal shape (a manifest's `http:` and `policy:` groups)
+HTTP_DEFAULT_KEYS = (*CONNECTION_HTTP_KEYS, *CONNECTION_POLICY_KEYS)
 _ABSOLUTE = ("http://", "https://", "{{")
 
 # a call step's `partitions: [{from, field, name}]`: one call per distinct `field` value of the earlier step `from`
@@ -140,29 +142,33 @@ def _definition(provider):
 
 def connection_problems(connection):
     """
-    What the call step connector of `connection` would reject or ignore, as [(code, message, is_warning)]: its keys
-    as the connector declares them and, for a REST connector (whose HTTP engine reads only its declared keys and the
-    HTTP defaults), any other key.
+    What the call step connector of `connection` (internal shape, streamwright.core.jobs.grammar) would reject or
+    ignore, as [(code, message, is_warning)]: its keys as the connector declares them; for a REST connector (whose HTTP
+    engine reads only its declared keys and its `http`/`policy` defaults) any other key; for an SDK connector, any
+    `http`/`policy` default.
     """
     definition = _definition(connection.get("provider"))
     if definition is None:
         return []
     declared = {k: v for k, v in connection.items() if k != "provider" and k not in HTTP_DEFAULT_KEYS}
+    defaults = sorted(public_connection_key(key) for key in connection if key in HTTP_DEFAULT_KEYS)
     is_http = select_transport(definition) == "http"
     # a REST connection without `type` calls the API unauthenticated, as the HTTP engine does
     issues = [] if is_http and "type" not in declared else check_connection(definition, declared)
     found = [("bad-connection", "%s: %s" % (issue.path, issue.message) if issue.path else issue.message,
               issue.severity != "error") for issue in issues if not (is_http and issue.code == "unknown-key")]
+    if not is_http and defaults:
+        found.append(("unsupported-key", "%s is an SDK connector: %s are the defaults of REST API connectors' "
+                                         "requests" % (definition.name, ", ".join(defaults)), False))
     if is_http:
         known = [name for item in definition.connection for name in (item.name, *item.aliases)]
         for key in declared:
-            if key in known:
-                continue
-            hint = (": write its keys (%s) directly on the connection" % ", ".join(HTTP_DEFAULT_KEYS)
-                    if key == "http" else suggest(key, known + list(HTTP_DEFAULT_KEYS)))
-            found.append(("unsupported-key", "%s is a REST API connector: `%s` would be ignored%s (keys: %s; HTTP "
-                          "defaults: %s)" % (definition.name, key, hint, ", ".join(known) or "none",
-                                             ", ".join(HTTP_DEFAULT_KEYS)), False))
+            if key not in known:
+                found.append(("unsupported-key", "%s is a REST API connector: `%s` would be ignored%s (keys: %s, "
+                                                 "http: {%s}, policy: {%s})" % (
+                                                     definition.name, key, suggest(key, known), ", ".join(known),
+                                                     ", ".join(CONNECTION_HTTP_KEYS),
+                                                     ", ".join(CONNECTION_POLICY_KEYS)), False))
     return found
 
 
@@ -178,17 +184,17 @@ def call_problems(step, connection):
     is_http = select_transport(definition) == "http"
     if "request" in step:
         if not is_http:
-            return [("bad-call", "%s is an SDK connector: a call step takes `service`/`method` with `arguments`, not "
-                                 "`request`" % definition.name, False)]
+            return [("bad-call", "%s is an SDK connector: its operation is a call (service, method, arguments), not "
+                                 "an HTTP request (path, ...)" % definition.name, False)]
         path = (step["request"] or {}).get("path") if isinstance(step["request"], dict) else None
         if isinstance(path, str) and not path.startswith(_ABSOLUTE) and not connection.get("base_url"):
-            return [("bad-call", "request.path %r is relative and the connection has no `base_url`: give an "
-                                 "absolute URL (https://...) or set the connection's base_url" % path, False)]
+            return [("bad-call", "operation.path %r is relative and the connection has no `http.base_url`: give an "
+                                 "absolute URL (https://...) or set the connection's http.base_url" % path, False)]
         return []
     if "service" not in step and "method" not in step:
         return []
     if is_http:
-        return [("bad-call", "%s is a REST API connector: a call step takes `request: {path, method, params, ...}`, "
-                             "not `service`/`method`" % definition.name, False)]
+        return [("bad-call", "%s is a REST API connector: its operation is an HTTP request (path, method, params, "
+                             "...), not a call (service, arguments)" % definition.name, False)]
     call = {key: step.get(key) for key in ("service", "method", "arguments")}
     return [("bad-call", problem, False) for problem in components.check_call(definition, call)]

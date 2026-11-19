@@ -15,21 +15,27 @@
 # * limitations under the License.
 # **************************************************************************/
 
-"""The google_ads connector on the `source` engine (streamwright run): GAQL reads through the Google Ads client."""
+"""
+The google_ads connector on the `source` engine (streamwright run, and job call steps and apply outputs): GAQL reads
+and apply operations (mutations, conversion uploads) through the Google Ads client.
+"""
 
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
-from streamwright.connectors.google_ads import client
-from streamwright.core.io.api_calls import make_caller, translate_errors, translate_pages
+from streamwright.connectors.google_ads import client, mutations
+from streamwright.core.sdk.apply import RowResult
 from streamwright.core.sdk.contract import Operation, ResolvedConnection, vendor_arguments
-from streamwright.core.sdk.engines.source import ConnectorContext
+from streamwright.core.sdk.engines.source import ConnectorContext, make_caller, translate_errors, translate_pages
 
 __all__ = ["GoogleAdsSession", "GoogleAdsSourceAdapter"]
 
 
 class GoogleAdsSession:
-    """Reads GAQL queries and the accessible customers; rate limits and retries come from the stream's context."""
+    """
+    Reads GAQL queries and the accessible customers, and applies rows (streamwright.core.sdk.apply); rate limits and
+    retries come from the stream's or output's context.
+    """
 
     def __init__(self, connection: client.GoogleAdsConnection):
         self.connection = connection
@@ -40,6 +46,13 @@ class GoogleAdsSession:
         pages = client.read_pages(self.connection, operation.service, operation.method, arguments, call,
                                   vendor=vendor_arguments(operation, arguments))
         return translate_pages(pages, client.translate_error)
+
+    def apply(self, operation: Operation, arguments: Mapping[str, Any], rows: Sequence[Mapping[str, Any]],
+              context: ConnectorContext) -> list[RowResult]:
+        call = make_caller(context, client.translate_error)
+        with translate_errors(client.translate_error):
+            return mutations.apply_rows(self.connection, operation.service, operation.method, arguments=arguments,
+                                        rows=rows, call=call, vendor=vendor_arguments(operation, arguments))
 
     def close(self) -> None:
         self.connection.services.clear()

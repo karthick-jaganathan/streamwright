@@ -21,9 +21,8 @@ from collections.abc import Iterator, Mapping
 from typing import Any
 
 from streamwright.connectors.google_sheets import client
-from streamwright.core.io.api_calls import make_caller, translate_pages
 from streamwright.core.sdk.contract import Operation, ResolvedConnection, vendor_arguments
-from streamwright.core.sdk.engines.source import ConnectorContext
+from streamwright.core.sdk.engines.source import ConnectorContext, make_caller, translate_pages
 
 __all__ = ["GoogleSheetsSession", "GoogleSheetsSourceAdapter"]
 

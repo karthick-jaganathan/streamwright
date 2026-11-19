@@ -30,7 +30,7 @@ from streamwright.core.config.inputs import parse_duration
 from streamwright.core.engine.errors import SourceError
 from streamwright.core.engine.responses import as_scope, first_response, lookup, matches, summarize
 from streamwright.core.engine.rules import transport_problem
-from streamwright.core.net import downloads
+from streamwright.core.io import downloads
 from streamwright.core.net.encoding import encode_params
 from streamwright.core.net.http import merge_headers, paginate
 from streamwright.core.net.paginators import set_dotted_path

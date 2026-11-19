@@ -29,11 +29,13 @@ from types import MappingProxyType
 
 from streamwright.core.config.inputs import InputError, resolve_inputs
 from streamwright.core.jobs.check import check_job
+from streamwright.core.jobs.grammar import to_internal
 from streamwright.core.jobs.inputs import declared_inputs
 from streamwright.core.jobs.locking import check_lock_source
 from streamwright.core.jobs.log_labels import check_log_labels
 from streamwright.core.jobs.lookups.rules import check_lookup_drivers, check_lookups
 from streamwright.core.jobs.manifest import JobError, load_job, load_job_text, merge_overlay
+from streamwright.core.jobs.payload import check_input
 from streamwright.core.jobs.plan import PlanError, build_plan
 from streamwright.core.jobs.refs import input_references, resolve
 from streamwright.core.validation import Issue
@@ -116,6 +118,7 @@ def _report(read, rules_for, config, strict, filename):
                  for path, text in check_lookups(raw)]
               + [Issue(ERROR, "driver-not-installed", text, filename, "spec." + ".".join(map(str, path)))
                  for path, text in check_lookup_drivers(raw)]
+              + [Issue(ERROR, "bad-input", text, filename, ".".join(map(str, path))) for path, text in check_input(raw)]
               + [Issue(ERROR, "bad-label", text, filename, ".".join(map(str, path)))
                  for path, text in check_log_labels(raw)]
               + check_job(job, rules, filename))
@@ -127,7 +130,7 @@ def _report(read, rules_for, config, strict, filename):
     report = JobReport(not errors, issues, job)
     if report.valid:
         try:
-            report.plan = build_plan(job, rules.dependencies_of).describe()
+            report.plan = build_plan(to_internal(job), rules.dependencies_of).describe()
         except PlanError as exc:
             report.issues.append(Issue(ERROR, "dependency", str(exc), filename))
             report.valid = False

@@ -1,0 +1,7 @@
+[
+  {"order_id": "EXAMPLE-ORDER-0001", "email": "customer1@example.com", "phone": "+1 555 0101", "purchased_at": "2026-01-31T09:07:00-05:00", "value": 42.5, "currency": "USD"},
+  {"order_id": "EXAMPLE-ORDER-0002", "email": " Customer2@Example.com ", "purchased_at": "2026-01-31T09:14:00-05:00", "value": 16.0, "currency": "USD"},
+  {"order_id": "EXAMPLE-ORDER-0003", "email": "customer3@example.com", "phone": "+1 555 0103", "purchased_at": "2026-01-31T10:21:00-05:00", "value": 120.0, "currency": "USD"},
+  {"order_id": "EXAMPLE-ORDER-0004", "email": "customer4@example.com", "purchased_at": "2026-01-31T11:02:00-05:00", "value": 8.75, "currency": "USD"},
+  {"order_id": "EXAMPLE-ORDER-0005", "email": "customer5@example.com", "phone": "+1 555 0105", "purchased_at": "2026-01-31T12:45:00-05:00", "value": 64.2, "currency": "USD"}
+]

@@ -26,9 +26,9 @@ CONNECTOR = ConnectorDefinition(
     name="amazon_ads",
     title="Amazon Ads",
     family="advertising",
-    summary="Amazon Advertising API profiles and Sponsored Products, declared in the source's `http:` block",
+    summary="Amazon Advertising API profiles and Sponsored Products: HTTP reads and writes (`operation:` requests)",
     connection=http.auth_fields(("oauth2_refresh_token", "bearer"), secrets=("client_id",)),
-    operations=(http.REQUEST,),
-    adapters={"source": "streamwright.core.io.http:HttpSourceAdapter"},
+    operations=(http.REQUEST, http.SEND),
+    adapters={"source": "streamwright.core.sdk.engines.source:HttpSourceAdapter"},
     loggers=("streamwright.network", "urllib3"),
 )

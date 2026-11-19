@@ -45,6 +45,7 @@ from streamwright.core.net.policies import DEFAULT_RETRY, TIMEOUT_SECONDS, Retry
 from streamwright.core.runtime.logs.context import bind
 
 __all__ = [
+    "APPLY_POLICY_KEYS",
     "DEFAULTS",
     "ON_ERROR",
     "OUTPUT_POLICY_KEYS",
@@ -62,6 +63,7 @@ ON_ERROR = ("fail", "skip", "warn")
 # the whole vocabulary; an engine's capabilities are a subset of this per surface
 STEP_POLICY_KEYS = ("retry", "rate_limit", "paginator", "page_size", "on_error", "timeout")
 OUTPUT_POLICY_KEYS = ("retry", "on_error", "timeout")
+APPLY_POLICY_KEYS = ("retry", "rate_limit")   # an apply output throttles and retries its connector calls
 # the one default, referenced (not copied) so every engine's defaults are literally identical
 DEFAULTS = MappingProxyType({"retry": DEFAULT_RETRY, "on_error": "fail", "timeout": TIMEOUT_SECONDS})
 
@@ -153,8 +155,12 @@ def check_policy(item, supported, engine, *, surface):
     return found
 
 
-def _with_timeout(work, seconds):
-    """Run `work()` with a per-call deadline; a unit that overruns raises TimeoutError (and is left behind)."""
+def _with_timeout(work, seconds, on_timeout=None):
+    """
+    Run `work()` with a per-call deadline; a unit that overruns raises TimeoutError. With `on_timeout` (e.g. the
+    session's `interrupt`), the overrun is cancelled and waited for first, so nothing keeps running on a shared
+    connection; it is called again until the work returns. Without it the unit is left behind.
+    """
     if not seconds:
         return work()
     done: list = []
@@ -170,24 +176,28 @@ def _with_timeout(work, seconds):
     thread.start()
     thread.join(seconds)
     if thread.is_alive():
+        while on_timeout is not None and thread.is_alive():
+            on_timeout()
+            thread.join(0.1)
         raise TimeoutError("timed out after %gs" % seconds)
     if failed:
         raise failed[0]
     return done[0]
 
 
-def guard(policy, work, *, classify, on_retry=None, on_tolerated=None):
+def guard(policy, work, *, classify, on_retry=None, on_tolerated=None, on_timeout=None):
     """
     Run `work()` under `policy` and return its value, or `SKIPPED` when `on_error` tolerated a failure.
 
     Transient errors retry through the ONE shared `RetryPolicy.run` (`classify(exc) -> (retryable, retry_after)`);
     `timeout` bounds each attempt; then `on_error` decides: `fail` re-raises, `skip`/`warn` return `SKIPPED` after
     calling `on_tolerated(exc, on_error)` (a warn logs; a skip also marks the batch partial — the caller's choice).
+    `on_timeout` cancels an attempt that overran its `timeout` (see `_with_timeout`).
     """
     retrier = RetryPolicy(policy.retry)
 
     def attempt(_number):
-        return _with_timeout(work, policy.timeout_seconds)
+        return _with_timeout(work, policy.timeout_seconds, on_timeout)
 
     try:
         return retrier.run(attempt, classify, on_retry or (lambda *args: None))

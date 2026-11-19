@@ -18,9 +18,9 @@
 """
 What the deltalake connector knows about Delta Lake tables and the storage they live in, shared by every engine
 adapter: the roots every table path must be inside (local folders and object storage URL prefixes; `..` refused), the
-object storage credentials as DuckDB secret parameters and delta-rs storage options, the query policy of the source
-engine's `table.query` (delta_scan only on a literal path inside the roots) and the rules a resolved connection must
-meet. No engine library is imported here.
+object storage credentials as DuckDB secret parameters (GCS: an HMAC key) and delta-rs storage options (GCS: a service
+account key file), the query policy of the source engine's `table.query` (delta_scan only on a literal path inside the
+roots) and the rules a resolved connection must meet. No engine library is imported here.
 """
 
 import functools
@@ -35,9 +35,9 @@ from typing import Any, Final
 from streamwright.core.io.queries import QueryPolicy, select_query
 from streamwright.core.sdk import quote_literal
 
-__all__ = ["AZURE_PARAMETERS", "S3_PARAMETERS", "VIEW", "StorageSecret", "gcs_settings", "masked_values",
-           "normalize_roots", "query_policy", "resolve_path", "scan_query", "storage_options", "storage_secrets",
-           "validate_connection"]
+__all__ = ["AZURE_PARAMETERS", "DUCKDB_UNSUPPORTED", "GCS_PARAMETERS", "S3_PARAMETERS", "VIEW", "StorageSecret",
+           "duckdb_problem", "masked_values", "normalize_roots", "query_policy", "resolve_path", "scan_query",
+           "storage_options", "storage_secrets", "validate_connection"]
 
 VIEW: Final = "delta_table"  # the view of a `table.query` call's `path`
 S3_PARAMETERS: Final = MappingProxyType({
@@ -46,14 +46,21 @@ S3_PARAMETERS: Final = MappingProxyType({
 AZURE_PARAMETERS: Final = MappingProxyType({
     "azure_connection_string": "CONNECTION_STRING", "azure_account_name": "ACCOUNT_NAME",
     "azure_account_key": "ACCOUNT_KEY"})
-GCS_SETTINGS: Final = ("gcs_key_file", "gcs_project_id")
+GCS_PARAMETERS: Final = MappingProxyType({"gcs_hmac_key_id": "KEY_ID", "gcs_hmac_secret": "SECRET"})
+# DuckDB's httpfs reads GCS with HMAC keys or a bearer token only, not a service account key file
+DUCKDB_UNSUPPORTED: Final = ("gcs_key_file",)
 S3_SCHEMES: Final = ("s3://",)
+GCS_SCHEMES: Final = ("gs://", "gcs://")
 AZURE_SCHEMES: Final = ("abfss://", "azure://", "wasb://")
 DELTA_RS_OPTIONS: Final = (
     ("aws_access_key_id", "AWS_ACCESS_KEY_ID"), ("aws_secret_access_key", "AWS_SECRET_ACCESS_KEY"),
     ("aws_session_token", "AWS_SESSION_TOKEN"), ("aws_region", "AWS_REGION"),
-    ("gcs_key_file", "GOOGLE_SERVICE_ACCOUNT"),
+    ("gcs_key_file", "GOOGLE_SERVICE_ACCOUNT"),  # delta-rs (object_store) has no GCS HMAC key: GCS_PARAMETERS stay out
     ("azure_account_name", "AZURE_STORAGE_ACCOUNT_NAME"), ("azure_account_key", "AZURE_STORAGE_ACCOUNT_KEY"))
+# the parts of an Azure connection string delta-rs takes (it has no connection-string option of its own)
+AZURE_CONNECTION_STRING_OPTIONS: Final = MappingProxyType({
+    "accountname": "AZURE_STORAGE_ACCOUNT_NAME", "accountkey": "AZURE_STORAGE_ACCOUNT_KEY",
+    "sharedaccesssignature": "AZURE_STORAGE_SAS_KEY", "blobendpoint": "AZURE_ENDPOINT"})
 
 
 @dataclass(frozen=True)
@@ -133,6 +140,7 @@ def storage_secrets(connection: Mapping[str, Any], roots: Sequence[str]) -> list
     """The DuckDB secrets of the connection's object storage keys, each scoped to the roots on its schemes."""
     secrets = []
     for secret_type, extension, keys, schemes in (("s3", "httpfs", S3_PARAMETERS, S3_SCHEMES),
+                                                  ("gcs", "httpfs", GCS_PARAMETERS, GCS_SCHEMES),
                                                   ("azure", "azure", AZURE_PARAMETERS, AZURE_SCHEMES)):
         if _given(connection, keys):
             parameters = tuple((parameter, connection[key]) for key, parameter in keys.items()
@@ -142,9 +150,29 @@ def storage_secrets(connection: Mapping[str, Any], roots: Sequence[str]) -> list
     return secrets
 
 
-def gcs_settings(connection: Mapping[str, Any]) -> list[tuple[str, str]]:
-    """The httpfs settings of Google Cloud Storage: a service account key file and a project."""
-    return [(key, str(connection[key])) for key in GCS_SETTINGS if connection.get(key) not in (None, "")]
+def duckdb_problem(connection: Mapping[str, Any]) -> str | None:
+    """
+    Why DuckDB (the source engine, DuckDBJob reads) cannot read with this connection's GCS keys, if it cannot: a
+    service account key file without the HMAC key DuckDB reads with.
+    """
+    given = [key for key in DUCKDB_UNSUPPORTED if connection.get(key) not in (None, "")]
+    if not given or _given(connection, GCS_PARAMETERS):
+        return None
+    return ("%s: DuckDB reads Google Cloud Storage only with an HMAC key (gcs_hmac_key_id and gcs_hmac_secret), not a "
+            "service account key file (DuckDBJob writes take it)" % ", ".join(given))
+
+
+def _connection_string_options(text: str) -> dict[str, str]:
+    """delta-rs storage options of an Azure connection string (AccountName, AccountKey, SAS, BlobEndpoint)."""
+    options = {}
+    for part in text.split(";"):
+        key, _, value = part.partition("=")
+        option = AZURE_CONNECTION_STRING_OPTIONS.get(key.strip().lower())
+        if option and value:
+            options[option] = value
+    if options.get("AZURE_ENDPOINT", "").startswith("http://"):
+        options["AZURE_ALLOW_HTTP"] = "true"
+    return options
 
 
 def masked_values(connection: Mapping[str, Any], secret_values: Iterable[Any]) -> list[str]:
@@ -155,7 +183,8 @@ def masked_values(connection: Mapping[str, Any], secret_values: Iterable[Any]) -
 
 def storage_options(connection: Mapping[str, Any]) -> dict[str, str]:
     """delta-rs storage options of a connection (credentials included: never logged); plain HTTP only if asked."""
-    options = {option: str(connection[key]) for key, option in DELTA_RS_OPTIONS if connection.get(key)}
+    options = _connection_string_options(str(connection.get("azure_connection_string") or ""))
+    options.update((option, str(connection[key])) for key, option in DELTA_RS_OPTIONS if connection.get(key))
     if connection.get("s3_endpoint"):
         plain = connection.get("s3_use_ssl") is False
         options["AWS_ENDPOINT_URL"] = ("http://" if plain else "https://") + str(connection["s3_endpoint"])
@@ -168,7 +197,10 @@ def storage_options(connection: Mapping[str, Any]) -> dict[str, str]:
 
 
 def validate_connection(connection: Mapping[str, Any]) -> list[str]:
-    """`roots`: a non-empty list of folders and URL prefixes (no `..`, no empty text): the sandbox is fail-closed."""
+    """
+    `roots`: a non-empty list of folders and URL prefixes (no `..`, no empty text): the sandbox is fail-closed;
+    `gcs_hmac_key_id` and `gcs_hmac_secret` together.
+    """
     roots = connection.get("roots") or []
     if not roots:
         return ["`roots` must name at least one folder or URL prefix"]
@@ -178,4 +210,6 @@ def validate_connection(connection: Mapping[str, Any]) -> list[str]:
             problems.append("roots[%d]: must be a folder or URL prefix (a non-empty text)" % index)
         elif ".." in str(root).replace("\\", "/").split("/"):
             problems.append("roots[%d]: %r goes up a folder (..)" % (index, root))
+    if sum(connection.get(key) not in (None, "") for key in GCS_PARAMETERS) == 1:
+        problems.append("gcs_hmac_key_id and gcs_hmac_secret go together (the HMAC key DuckDB reads GCS with)")
     return problems

@@ -19,15 +19,15 @@
 # Other objects there (e.g. _SUCCESS markers) are not read.
 requests:
   - name: raw_events
-    sdk: s3
-    service: object
-    method: read
-    arguments:
-      path: events/
-      match: 'day=\d{4}-\d{2}-\d{2}/part-\d+\.parquet'
-      recursive: true
-      format: parquet
-      options: {filename: true}
+    operation:
+      service: object
+      method: read
+      arguments:
+        path: events/
+        match: 'day=\d{4}-\d{2}-\d{2}/part-\d+\.parquet'
+        recursive: true
+        format: parquet
+        options: {filename: true}
 transform:
   mode: page
   steps:

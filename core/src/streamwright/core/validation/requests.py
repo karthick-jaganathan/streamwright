@@ -29,8 +29,8 @@ class HttpChecker(SectionChecker):
         if http is None:
             return
         if self.auth_provider is not None and self.auth_type is None:
-            self.error("bad-value", path, "http requests need a built-in `auth.type`; auth provider %r "
-                       "authenticates sdk requests only" % self.auth_provider, container, "http")
+            self.error("bad-value", path, "an HTTP request needs a built-in `auth.type`; auth provider %r "
+                       "takes calls (service, method, arguments) only" % self.auth_provider, container, "http")
         target = http.get("path")
         if "path" in http and self._expect(isinstance(target, str), "a path", target, (*path, "path"), container=http,
                                            key="path") \
@@ -70,20 +70,15 @@ class HttpChecker(SectionChecker):
 class RequestChecker(SectionChecker):
     def check_sdk(self, request, path, scopes, info, extra_allowed=()):
         self.unknown_keys(request, spec.SDK_REQUEST_KEYS + tuple(extra_allowed), path, "error",
-                          "sdk requests do not support it")
-        self.require_keys(request, ("method",), path, "an sdk request")
+                          "a call does not support it")
+        if "method" not in request:     # reported at the operation (where it is written: `sdk` is its translation)
+            self.error("missing-key", (*path, "sdk"), "a call needs `method`", request, "sdk")
         problem = rules.transport_problem("sdk", self.auth_transport, self.auth_provider)
         if problem:
             self.error("bad-value", path, problem, request, "sdk" if "sdk" in request else "method")
-        sdk = request.get("sdk")
-        if self._expect(isinstance(sdk, str), "a connector name", sdk, (*path, "sdk"), container=request, key="sdk"):
-            self.check_connector(sdk, (*path, "sdk"), request, "sdk")
-            if self.auth_provider is None:
-                self.error("bad-value", (*path, "sdk"), "sdk requests use the client built by a connector "
-                           "`auth.provider`; set `auth: {provider: %s, ...}`" % sdk, request, "sdk")
-            elif sdk != self.auth_provider:
-                self.error("bad-value", (*path, "sdk"), "sdk %r does not match auth.provider %r" % (
-                    sdk, self.auth_provider), request, "sdk")
+        if self.auth_provider is None:
+            self.error("bad-value", (*path, "sdk"), "an operation runs on the connector in `auth.provider`; set "
+                       "`auth: {provider: <connector>, ...}`", request, "sdk")
         for name in ("service", "method"):
             if name in request:
                 self._expect(isinstance(request[name], str), "a name", request[name], (*path, name), container=request,

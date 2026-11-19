@@ -36,7 +36,7 @@ class Field:
     One value's rule.
       kind         JSON type name, or a tuple of them (None: any value)
       required     the key must be present (in its parent mapping)
-      enum         allowed values;  pattern: regex for text;  minimum: for numbers;  min_items: for lists/mappings
+      enum         allowed values;  pattern: regex for text;  minimum, maximum: for numbers;  min_items: lists, mappings
       fields       {key: Field} of a mapping with known keys (unknown keys are errors unless open)
       values       Field of every value of a mapping keyed by names (connections, spec.config)
       items        Field of every list item
@@ -44,15 +44,15 @@ class Field:
       default      the value used when the key is absent: the JSON schema's `default` annotation (not checked)
     """
 
-    def __init__(self, kind=None, *, required=False, enum=None, pattern=None, minimum=None, min_items=None,
-                 fields=None, values=None, items=None, open=False, description="", discriminator=None,
+    def __init__(self, kind=None, *, required=False, enum=None, pattern=None, minimum=None, maximum=None,
+                 min_items=None, fields=None, values=None, items=None, open=False, description="", discriminator=None,
                  variants=None, default=None):
         self.kind = kind if kind is None or isinstance(kind, tuple) else (kind,)
         self.required, self.enum, self.pattern, self.minimum, self.min_items = (
             required, enum, pattern, minimum, min_items)
         self.fields, self.values, self.items, self.open = fields, values, items, open
         self.description, self.discriminator, self.variants = description, discriminator, variants or {}
-        self.default = default
+        self.default, self.maximum = default, maximum
 
 
 def path_text(path):
@@ -78,6 +78,8 @@ def check_field(value, field, path=()):
         found.append(("bad-value", path, "%r does not match %s" % (value, field.pattern)))
     if field.minimum is not None and isinstance(value, (int, float)) and value < field.minimum:
         found.append(("bad-value", path, "must be at least %s" % field.minimum))
+    if field.maximum is not None and isinstance(value, (int, float)) and value > field.maximum:
+        found.append(("bad-value", path, "must be at most %s" % field.maximum))
     if field.min_items is not None and isinstance(value, (list, dict)) and len(value) < field.min_items:
         found.append(("bad-value", path, "needs at least %d entr%s" % (
             field.min_items, "y" if field.min_items == 1 else "ies")))
@@ -135,6 +137,8 @@ def json_schema_of(field):
         schema["pattern"] = field.pattern
     if field.minimum is not None:
         schema["minimum"] = field.minimum
+    if field.maximum is not None:
+        schema["maximum"] = field.maximum
     if field.min_items is not None:
         schema["minItems" if field.kind == ("array",) else "minProperties"] = field.min_items
     if field.items is not None:

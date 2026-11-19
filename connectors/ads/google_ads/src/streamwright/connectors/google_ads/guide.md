@@ -69,19 +69,19 @@ incremental:
   lookback: 30d                      # conversions are restated: re-read the last 30 days each run
 requests:
   - name: raw_campaign_performance
-    sdk: google_ads
-    service: GoogleAdsService
-    method: search_stream
-    arguments:
-      customer_id: "{{ partition.customer_id }}"
-      query:
-        gaql:                        # the query builder (see Query builder); GAQL text also works for fixed queries
-          select: [customer.id, campaign.id, campaign.name, campaign.status, segments.date,
-                   metrics.impressions, metrics.clicks, metrics.cost_micros]
-          from: campaign
-          where:
-            - {field: segments.date, op: BETWEEN, type: date, value: ["{{ window.start }}", "{{ window.end }}"]}
-            - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ partition.customer_id }}"
+        query:
+          gaql:                        # the query builder (see Query builder); GAQL text also works for fixed queries
+            select: [customer.id, campaign.id, campaign.name, campaign.status, segments.date,
+                     metrics.impressions, metrics.clicks, metrics.cost_micros]
+            from: campaign
+            where:
+              - {field: segments.date, op: BETWEEN, type: date, value: ["{{ window.start }}", "{{ window.end }}"]}
+              - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
 
 transform:
   mode: page
@@ -161,6 +161,79 @@ query:
 
 Grammar: https://developers.google.com/google-ads/api/docs/query/grammar
 
+## Apply outputs (writes)
+
+A DuckDBJob or SparkJob output can write to Google Ads, a row per operation (the engine guide's Apply outputs
+section has the policies: chunks, unknown outcomes, `state resend|skip`):
+
+- `*Service.mutate_*` (any resource: `CampaignService.mutate_campaigns`, `AdGroupService.mutate_ad_groups`, ...):
+  columns are the resource's field paths, with or without its GAQL prefix (`campaign.name` or `name`,
+  `campaign.network_settings.target_google_search`); `op` is `create` (default), `update` (needs `resource_name`;
+  its update mask is the row's field columns, so with `nulls: clear` a NULL clears a field) or `remove` (reads
+  `resource_name`; needs `allow_remove: true`). Not idempotent: a call cut short is held for you (`on_unknown`).
+  At most 5000 rows per call.
+- `ConversionUploadService.upload_click_conversions` / `upload_call_conversions`,
+  `ConversionAdjustmentUploadService.upload_conversion_adjustments`: a row per conversion (`gclid`,
+  `conversion_action`, `conversion_date_time`, `conversion_value`, `currency_code`, ...). Google deduplicates
+  conversions, so a cut-short call is sent again. At most 2000 rows per call.
+- Arguments: `customer_id` (required), `partial_failure` (default true: a rejected row fails alone, with its Google
+  Ads error code, e.g. `DUPLICATE_CAMPAIGN_NAME`), `validate_only` (default false: true checks every row and changes
+  nothing - a dry run); any other argument is a request field (vendor argument, e.g. `response_content_type`).
+- Results: each applied row keeps what Google returned (`resource_name`; for uploads the conversion's `gclid`,
+  `conversion_action`, ...), shown by `state show`.
+
+```yaml
+kind: DuckDBJob
+version: 1
+name: google_ads_offline_conversions
+spec:
+  config:
+    customer_id: {type: string, required: true, pattern: "^[0-9-]{10,12}$"}
+    validate_only: {type: boolean, default: false}
+  secrets:
+    developer_token: {type: string, required: true}
+    client_id: {type: string, required: true}
+    client_secret: {type: string, required: true}
+    refresh_token: {type: string, required: true}
+  input:
+    columns:
+      gclid: {type: string, required: true}
+      conversion_action: {type: string, required: true}
+      conversion_date_time: {type: string, required: true}
+      conversion_value: {type: number, minimum: 0}
+      currency_code: {type: string, enum: [USD, EUR, GBP]}
+connections:
+  ads:
+    provider: google_ads
+    developer_token: "{{ secrets.developer_token }}"
+    client_id: "{{ secrets.client_id }}"
+    client_secret: "{{ secrets.client_secret }}"
+    refresh_token: "{{ secrets.refresh_token }}"
+steps:
+  - name: valid_conversions
+    sql: SELECT * FROM input WHERE conversion_value > 0
+outputs:
+  - name: upload
+    connection: ads
+    step: valid_conversions
+    operation:
+      service: ConversionUploadService
+      method: upload_click_conversions
+      arguments:
+        customer_id: "{{ config.customer_id }}"
+        validate_only: "{{ config.validate_only }}"
+    apply:
+      on_row_error: continue
+    policy:
+      retry: {max_attempts: 5, backoff: exponential}
+runtime:
+  state: {sqlite: state.db}
+```
+
+```bash
+streamwright duckdb run conversions.yaml --set customer_id=123-456-7890 --input conversions.json --set validate_only=true
+```
+
 ## Engines
 
 ### Execution & Behavior
@@ -178,6 +251,6 @@ Grammar: https://developers.google.com/google-ads/api/docs/query/grammar
   `INTERNAL_ERROR`, `TRANSIENT_ERROR`) are retried, honouring the API's retry delay. A stream's
   `retry: {codes: [...]}` replaces that list.
 
-| Engine | Adapter | Notes |
-|---|---|---|
+| Engine                                            | Adapter             | Notes                                                                                                    |
+|---------------------------------------------------|---------------------|----------------------------------------------------------------------------------------------------------|
 | source (`streamwright run`, DuckDBJob call steps) | `engines/source.py` | the Google Ads client (`google-ads`); GAQL reads through `GoogleAdsService` and the accessible customers |

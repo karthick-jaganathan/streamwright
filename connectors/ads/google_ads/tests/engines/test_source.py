@@ -36,7 +36,7 @@ from google.auth.exceptions import RefreshError
 
 from streamwright.connectors.google_ads import client
 from streamwright.core import cli
-from streamwright.core.sdk.testing import MemoryOutput, SourceError, SourceRunner, load_source, page_stream
+from streamwright.core.sdk.testing import MemoryOutput, SourceError, SourceRunner, load_source, page_stream, read_source
 
 VERSION = "v25"  # the version in examples/sources/ads/google_ads/source.yaml
 ads_types = importlib.import_module("google.ads.googleads.%s.services.types.google_ads_service" % VERSION)
@@ -596,9 +596,10 @@ def fresh_google_logger():
 
 def test_network_logs_show_the_client_logs_redacted(ads_server, tmp_path, capsys, monkeypatch):
     """`--log google.ads.googleads.client=DEBUG` is the old basicConfig + logger + stderr handler snippet, redacted."""
-    source = load_source(EXAMPLE)
+    source = read_source(EXAMPLE)
     source["streams"] = [stream_named(source, "campaign_performance")]
-    source["streams"][0]["requests"][0]["method"] = "search"  # (the client logs unary calls as they return)
+    # (the client logs unary calls as they return)
+    source["streams"][0]["requests"][0]["operation"]["method"] = "search"
     path = tmp_path / "source.yaml"
     path.write_text(json.dumps(source, default=str))
     ads_server.replies = [[row(clicks=3, impressions=4), row(campaign=11)]]

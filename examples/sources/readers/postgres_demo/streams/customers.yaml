@@ -18,15 +18,15 @@
 # the `where` values.
 requests:
   - name: raw_customers
-    sdk: postgres
-    service: database
-    method: table
-    arguments:
-      schema: public
-      table: customers
-      columns: [id, name, email, status, created_at]
-      where:
-        - {column: status, op: "=", value: "{{ config.customer_status }}"}
+    operation:
+      service: database
+      method: table
+      arguments:
+        schema: public
+        table: customers
+        columns: [id, name, email, status, created_at]
+        where:
+          - {column: status, op: "=", value: "{{ config.customer_status }}"}
 transform:
   mode: page
   steps:

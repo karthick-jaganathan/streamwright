@@ -34,7 +34,7 @@ import uuid
 from types import MappingProxyType
 
 from streamwright.core.config.inputs import as_date
-from streamwright.core.validation.schema import split_outside_quotes
+from streamwright.core.runtime.text import split_outside_quotes
 
 __all__ = [
     "TemplateError",

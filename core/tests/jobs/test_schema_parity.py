@@ -27,15 +27,16 @@ from types import MappingProxyType
 import pytest
 
 from streamwright.core.jobs.duckdb.engine import duckdb_rules, json_schema
+from streamwright.core.jobs.grammar import to_internal
 from streamwright.core.jobs.manifest import load_job
 from streamwright.core.jobs.validate import validate_job
 from streamwright.core.jobs.write_rules import OutputSpec, check_output
 
 jsonschema = pytest.importorskip("jsonschema")
 
-EXAMPLES_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "..", "examples", "jobs")
-# the job manifests (`<system>/<job>.yaml`); `<job>.<environment>.yaml` files are their overlays
-EXAMPLES = sorted(path for path in glob.glob(os.path.join(EXAMPLES_ROOT, "*", "*.yaml"))
+EXAMPLES_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "..", "examples")
+# the job manifests (`<system>/jobs/<resource>/<action>.yaml`); `<action>.<environment>.yaml` files are overlays
+EXAMPLES = sorted(path for path in glob.glob(os.path.join(EXAMPLES_ROOT, "*", "jobs", "*", "*.yaml"))
                   if "." not in os.path.basename(path).removesuffix(".yaml"))
 assert EXAMPLES, "no example jobs under %s" % EXAMPLES_ROOT
 
@@ -62,6 +63,9 @@ FIXTURES = MappingProxyType({
     "connection key of another provider": lambda j: j["connections"]["wh"].update(bucket="b"),
     "connection without its required key": lambda j: j["connections"]["wh"].pop("path"),
     "bad materialize": lambda j: j["steps"][0].update(materialize="disk"),
+    "step log over max_rows": lambda j: j["steps"][0].update(log={"message": "id {id}", "max_rows": 1001}),
+    "step log without message": lambda j: j["steps"][0].update(log={"level": "info"}),
+    "semantic only: log on a write output": lambda j: j["outputs"][0].update(log={"message": "id {id}"}),
     "bad runtime value": lambda j: j.update(runtime={"threads": 0}),
     "bad config definition": lambda j: j.update(spec={"config": {"x": {"type": "decimal"}}}),
     "semantic only: reserved name": lambda j: j["steps"][0].update(name="config"),
@@ -92,8 +96,9 @@ def test_every_example_passes_the_schema_the_checker_and_its_writers(path, schem
     assert [e.message for e in schema.iter_errors(job)] == []
     report = validate_job(path, duckdb_rules)
     assert report.valid, [str(i) for i in report.problems]
-    for output in report.job["outputs"]:
-        connection = report.job["connections"][output["connection"]]
+    internal = to_internal(report.job)                  # the writers read the engines' shape
+    for output in internal["outputs"]:
+        connection = internal["connections"][output["connection"]]
         target = rules.write_target(connection)
         if target is None:
             pytest.skip("no writer installed for %s" % connection["provider"])

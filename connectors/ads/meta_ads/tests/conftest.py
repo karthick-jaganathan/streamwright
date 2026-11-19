@@ -22,6 +22,6 @@ from streamwright.core.sdk.testing import FakeApi
 
 @pytest.fixture
 def api():
-    """A local fake HTTP API (streamwright.core.runtime.testing.FakeApi)."""
+    """A local fake HTTP API (streamwright.core.sdk.testing.FakeApi)."""
     with FakeApi() as server:
         yield server

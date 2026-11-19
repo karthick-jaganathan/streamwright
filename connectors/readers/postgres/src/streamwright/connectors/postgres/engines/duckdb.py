@@ -52,7 +52,11 @@ class PostgresDuckDBAdapter:
     """Reads (`read: query` runs on the server, `read: table`) and writes tables; holds the job's state."""
 
     def configure(self, session: DuckDBSession, name: str, connection: ResolvedConnection) -> None:
-        databases.configure_database(client.DIALECT, session, name, connection)
+        # databases.configure_database, with the server's statement_timeout in the attached connection's parameters
+        session.load_extension(client.DIALECT.extension)
+        secret = session.create_secret(name, client.DIALECT.extension,
+                                       client.DIALECT.secret_options(client.server_parameters(connection)))
+        session.attach(name, "", kind=client.DIALECT.extension, secret=secret, read_only=not session.is_writable(name))
 
     def read_sql(self, context: ReadContext, operation: Operation, arguments: Mapping[str, Any]) -> str:
         return databases.read_sql(client.DIALECT, context, operation, arguments, default_schema=DEFAULT_SCHEMA)
@@ -65,4 +69,5 @@ class PostgresDuckDBAdapter:
         if psycopg is None:
             raise AdapterError("state in PostgreSQL needs psycopg: pip install \"streamwright-postgres[state]\"")
         url = client.driver_url(connection)
-        return open_store(lambda: psycopg.connect(url, connect_timeout=CONNECT_TIMEOUT), "postgres", schema)
+        return open_store(lambda: psycopg.connect(url, connect_timeout=CONNECT_TIMEOUT, prepare_threshold=None),
+                          "postgres", schema)       # no server-side prepared statements: PgBouncer

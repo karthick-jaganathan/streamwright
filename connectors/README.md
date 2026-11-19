@@ -61,7 +61,7 @@ streamwright run examples/sources/ads/google_ads --set customer_ids=1112223333 -
 
 - `files` reads local csv, tsv, json, jsonl and parquet files only (no URLs, no `httpfs`, no credentials, external
   access always off): `auth: {provider: files, roots: [...]}` lists the local folders that can be read, and requests
-  are `sdk: files`, `service: object`, `method: read`, `arguments: {path, format, options, on_missing, match, recursive}` (DuckDBJob's `provider: files` is this connector too). `path` is a
+  are `operation: {service: object, method: read, arguments: {path, format, options, on_missing, match, recursive}}` (DuckDBJob's `provider: files` is this connector too). `path` is a
   file, a glob or a list; or, with `match` (a Python regex fully matched against each file's path relative to it), a
   folder, searched in its sub-folders too with `recursive: true`. Example:
   [examples/sources/readers/files_demo](../examples/sources/readers/files_demo/), which runs offline.
@@ -74,7 +74,7 @@ streamwright run examples/sources/ads/google_ads --set customer_ids=1112223333 -
   [examples/sources/readers/azure_blob_demo](../examples/sources/readers/azure_blob_demo/).
 - `postgres` runs read-only SELECT queries on a PostgreSQL database, attached `READ_ONLY` through DuckDB's postgres
   extension and a temporary DuckDB secret holding the DSN: `auth: {provider: postgres, dsn: "{{ secrets.pg_dsn }}"}`,
-  and requests are `sdk: postgres` with `method: query` (`{query, params}`: DuckDB SQL over the attached database,
+  and requests are calls (`operation:`) with `method: query` (`{query, params}`: DuckDB SQL over the attached database,
   with bound `$name` values; DuckDB's system and catalog views are refused) or `method: table`. Example:
   [examples/sources/readers/postgres_demo](../examples/sources/readers/postgres_demo/).
 
@@ -115,10 +115,11 @@ Example sources are the folders in [examples/sources/](../examples/sources/), wh
    read-only for sources) and the engine adapters; each session reads with the request's context (`context.call(...)`
    for rate limits and retries), raises `ConnectorError` for the vendor's errors, and passes tokens the connector
    obtains at run time to `context.secret(value)` (they are `***` in every log line and error).
-3. Test offline with `streamwright.core.runtime.testing` (`FakeApi`, `MemoryOutput`, `FakeClock`, and `page_stream` for a stream
+3. Test offline with `streamwright.core.sdk.testing` (`FakeApi`, `MemoryOutput`, `FakeClock`, and `page_stream` for a stream
    with one request, step and export), starting each test module with `pytest.importorskip("<sdk module>")` so the
    core CI job, which has no SDKs, skips it.
-4. Add the connector to `CONNECTORS` in the root Makefile and to the `connectors` job in `.github/workflows/ci.yml`, and add an
-   example source folder to `examples/sources/` and the design doc.
+4. The root Makefile and CI find the connector by its `pyproject.toml` (nothing to register there); add an example
+   source folder to `examples/sources/` and the design doc.
 
-Tests: `make test` runs everything; `python -m pytest connectors/<name>/tests` runs one connector's tests.
+Tests: `make test-all` runs everything (`make test`: core, readers and http); `make -C connectors/<kind>/<name> test`
+runs one connector's tests.

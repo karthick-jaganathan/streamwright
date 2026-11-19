@@ -18,20 +18,20 @@ description: MongoDB aggregation pipeline stream for order totals by category.
 
 requests:
   - name: raw_order_aggregates
-    service: collection
-    method: aggregate
-    sdk: mongodb
-    arguments:
-      collection: orders
-      pipeline:
-        - $match:
-            status: completed
-        - $group:
-            _id: "$category"
-            total_amount:
-              $sum: "$amount"
-            order_count:
-              $sum: 1
+    operation:
+      service: collection
+      method: aggregate
+      arguments:
+        collection: orders
+        pipeline:
+          - $match:
+              status: completed
+          - $group:
+              _id: "$category"
+              total_amount:
+                $sum: "$amount"
+              order_count:
+                $sum: 1
 
 transform:
   mode: page

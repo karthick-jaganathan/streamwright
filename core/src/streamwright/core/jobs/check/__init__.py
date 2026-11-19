@@ -27,21 +27,51 @@ structure section) and skipped by the others.
 from streamwright.core.jobs.check.findings import connections_of, named_items
 from streamwright.core.jobs.check.rules import JobRules, install_hint
 from streamwright.core.jobs.check.sections import SECTIONS, Findings
+from streamwright.core.jobs.check.structure import check_structure
+from streamwright.core.jobs.fields import path_text
+from streamwright.core.jobs.grammar import grammar_problems, to_internal
+from streamwright.core.runtime.issues import Issue
 from streamwright.core.validation.checker import ERROR
-from streamwright.core.validation.issues import Issue
 
 __all__ = ["SECTIONS", "JobRules", "check_job", "install_hint"]
 
+_KEY_CODES = ("unknown-key", "unsupported-key")
+
 
 def check_job(job, rules, filename=None):
-    """Every problem and warning of `job` (a mapping, with config already resolved) as Issue objects."""
+    """
+    Every problem and warning of `job` (a public manifest, config resolved) as Issue objects: its structure as
+    written (unknown keys refused; streamwright.core.jobs.grammar checks the operations), then
+    every other section on the engines' internal shape, with the paths mapped back to the manifest.
+    """
     findings = Findings(filename)
     if not isinstance(job, dict):
         findings.error("bad-type", (), "the job must be a mapping")
         return findings.issues
+    problems = grammar_problems(job)
+    structure = Findings(filename)
+    check_structure(job, rules, structure)
+    replaced = {path_text(path) for _, path, _ in problems}
+    mixed = {path_text(path) for code, path, _ in problems if code == "bad-value" and path[-1] == "operation"}
+    findings.issues = [issue for issue in structure.issues
+                       if issue.path not in replaced and not _under(issue.path, mixed)]
+    for code, path, message in problems:
+        findings.error(code, path, message)
+    internal = to_internal(job)
+    sections = Findings(filename, public=job)
     for section in SECTIONS:
-        section(job, rules, findings)
-    return _not_installed(job, rules, findings.issues)
+        if section is not check_structure:
+            section(internal, rules, sections)
+    # a key the structure refused is reported once: the internal sections' findings drop it, and every finding at
+    # or under a form the grammar refused (fixing that form comes first)
+    refused = {issue.path for issue in findings.issues if issue.code == "unknown-key"}
+    return _not_installed(internal, rules, findings.issues + [
+        issue for issue in sections.issues
+        if not (issue.path in refused and issue.code in _KEY_CODES) and not _under(issue.path, replaced)])
+
+
+def _under(path, paths):
+    return any(path == other or path.startswith((other + ".", other + "[")) for other in paths)
 
 
 def _not_installed(job, rules, issues):

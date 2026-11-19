@@ -32,6 +32,7 @@ streamwright validate examples/sources/readers/deltalake_demo      # static chec
 
 - **Roots.** Every table path is checked against the connection's `roots` first; the source engine's DuckDB sandbox reads only inside them (allowed_directories, external access off, configuration locked) and `delta_scan` in a query takes only a literal path inside them.
 - **Credentials** come from secrets only, are redacted everywhere (the account key inside an Azure connection string too) and reach DuckDB as bound parameters of secrets scoped to the roots. Spark takes credentials from the `storage` connection, never Spark's configuration.
+- **Google Cloud Storage** credentials differ per engine: DuckDB (source engine, DuckDBJob reads) reads with the HMAC key `gcs_hmac_key_id` + `gcs_hmac_secret` (a `gcs` secret per `gs://` root); delta-rs (DuckDBJob writes) writes with `gcs_key_file` (it has no HMAC option); SparkJob uses the `gcs` connection named by `storage`. See the guide.
 - **Replay safety.** Every write carries an application transaction (`<job>:<output>`, the batch sequence): replaying a committed batch writes nothing twice.
 
 ## Tests

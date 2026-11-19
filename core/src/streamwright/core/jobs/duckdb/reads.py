@@ -34,7 +34,7 @@ from types import MappingProxyType
 
 from streamwright.core.io.file_formats import duckdb_option_name
 from streamwright.core.jobs import ingest
-from streamwright.core.jobs.refs import step_columns_used
+from streamwright.core.jobs.refs import MOUSTACHE, step_columns_used
 from streamwright.core.sql.quote import quote_ident, quote_literal
 
 __all__ = [
@@ -180,7 +180,7 @@ def _paths(context, step, locate):
     path = step["path"]
     used = step_columns_used(path)
     if used:
-        if path.strip() != "{{ %s.%s }}" % used[0]:
+        if len(used) != 1 or MOUSTACHE.fullmatch(path.strip()) is None:
             raise ingest.IngestError("a dynamic path is exactly one {{ step.column }} reference")
         values = [v for v in context.values(*used[0]) if v is not None]
     else:

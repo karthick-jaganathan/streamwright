@@ -29,6 +29,7 @@ http:
   base_url: "{{ config.base_url }}"
   headers:
     Accept: "application/json"
+policy:
   rate_limit: {requests: 10, per: 1s}
   retry: {codes: [429, 500, 502, 503], max_attempts: 5, backoff: exponential}
 ```
@@ -41,28 +42,29 @@ http:
 
 ## Operations
 
-The connector offers one operation, `http.request`: each `requests:` item of a stream is an `http:` request, run by the
-engine's HTTP reader with the source's `http:` defaults (base URL, headers, paginator, records, retry, rate limit).
+The connector offers one operation, `http.request`: the `operation:` of each `requests:` item of a stream is an HTTP
+request, run by the engine's HTTP reader with the source's `http:` defaults (base URL, headers, paginator, records,
+retry, rate limit).
 
 ### `streams/<stream>.yaml` contract
 
 ```yaml
 requests:
   - name: list_items
-    http:
+    operation:
       path: "/items"            # Appended to http.base_url
       method: GET               # GET | POST | PUT | PATCH | DELETE
       params:
         status: "active"
-    records:
-      path: "data.items"        # Object with 'path' (or 'explode')
-    paginator:
-      type: cursor              # "cursor" | "offset" | "page_number" | "link_header"
-      param: "starting_after"
-      token_path: "meta.next_cursor"
-      # For page_number: {type: page_number, page_param: "page", page_size: 100, size_param: "limit"}
-      # For offset:      {type: offset, offset_param: "offset", limit_param: "limit", page_size: 100}
-      # For link_header: {type: link_header}
+      records:
+        path: "data.items"        # Object with 'path' (or 'explode')
+      paginator:
+        type: cursor              # "cursor" | "offset" | "page_number" | "link_header"
+        param: "starting_after"
+        token_path: "meta.next_cursor"
+        # For page_number: {type: page_number, page_param: "page", page_size: 100, size_param: "limit"}
+        # For offset:      {type: offset, offset_param: "offset", limit_param: "limit", page_size: 100}
+        # For link_header: {type: link_header}
 
 transform:
   mode: page                    # "page" | "run"
@@ -90,7 +92,7 @@ export:
 
 ### Vendor arguments
 
-Any key in an `http` request's `params` block is a query parameter forwarded verbatim to the API; the paths and
+Any key in an HTTP `operation:`'s `params` block is a query parameter forwarded verbatim to the API; the paths and
 parameters you call are whatever the API exposes, never a closed list in the connector (contract v1.3 §6b). For
 example `params: {statusFilter: ENABLED}` reaches the request URL unchanged; pagination cursors the paginator
 injects take precedence.
@@ -114,9 +116,11 @@ connections:
     provider: restapi
     type: bearer
     token: "{{ secrets.api_token }}"
-    base_url: "{{ config.base_url }}"
-    headers: {Accept: application/json}
-    rate_limit: {requests: 10, per: 1s}
+    http:
+      base_url: "{{ config.base_url }}"
+      headers: {Accept: application/json}
+    policy:
+      rate_limit: {requests: 10, per: 1s}
   out:
     provider: files
     roots: [output]
@@ -124,13 +128,14 @@ connections:
 steps:
   - name: items
     connection: rest_api
-    request:
+    operation:
       path: /items
       method: GET
       params: {status: active}
       records: {path: data.items}
-    paginator: {type: cursor, param: starting_after, token_path: meta.next_cursor}
-    retry: {codes: [429, 500, 502, 503], max_attempts: 5, backoff: exponential}
+      paginator: {type: cursor, param: starting_after, token_path: meta.next_cursor}
+    policy:
+      retry: {codes: [429, 500, 502, 503], max_attempts: 5, backoff: exponential}
     sql: |
       SELECT record->>'id' AS item_id,
              record->>'name' AS name,
@@ -146,12 +151,13 @@ outputs:
     format: parquet
 ```
 
-- **Connection**: the authentication keys and the HTTP defaults (`base_url`, `headers`, `params_encoding`,
-  `paginator`, `records`, `retry`, `rate_limit`) written directly on it. There is no `http:` block (that is a
-  source manifest's): `validate` rejects keys the connector would ignore.
-- **Step**: `request: {path, method, params, headers, json, records}`, plus `paginator`, `retry`, `rate_limit`.
-  `path` is relative to the connection's `base_url`, or an absolute `https://` URL. This is a REST API connector:
-  a step takes `request`, never `service`/`method` (those are SDK connectors' calls).
+- **Connection**: the authentication keys, the HTTP defaults in `http: {base_url, headers, params_encoding,
+  paginator, records}` and the default `policy: {retry, rate_limit}`. `validate` rejects keys the connector would
+  ignore.
+- **Step**: `operation: {path, method, params, headers, json, records, paginator}`, plus `policy: {retry,
+  rate_limit, timeout, on_error}`. `path` is relative to the connection's `http.base_url`, or an absolute `https://`
+  URL. This is a REST API connector: a step's operation is an HTTP request, never a call (`service`, `arguments`:
+  an SDK connector's).
 - **SQL**: the step's `sql` reads the table `records`, one JSON column `record`; extract with `->>`.
 
 ```bash
@@ -168,4 +174,4 @@ STREAMWRIGHT_SECRET_API_TOKEN=... streamwright duckdb run items.yaml
 
 | Engine | Adapter | Notes |
 |---|---|---|
-| source (`streamwright run`, DuckDBJob call steps) | `streamwright.core.io.http` | the engine's HTTP reader runs the source's `http:` requests: the connector declares the authentication it takes, the source declares the API |
+| source (`streamwright run`, DuckDBJob call steps) | `streamwright.core.sdk.engines.source` (HttpSourceAdapter) | the engine's HTTP reader runs each request's `operation:` with the source's `http:` defaults: the connector declares the authentication it takes, the source declares the API |

@@ -31,7 +31,7 @@ from streamwright.core.engine import sql
 from streamwright.core.outputs.ducklake import load_ducklake
 from streamwright.core.outputs.output import open_output
 from streamwright.core.outputs.warehouse import DuckDBOutput
-from streamwright.core.runtime.testing import page_stream
+from streamwright.core.sdk.testing import page_stream
 
 TODAY = datetime.date.today()
 DAYS = tuple([(TODAY - datetime.timedelta(days=n)).isoformat() for n in (2, 1, 0)])
@@ -47,12 +47,13 @@ INCREMENTAL = MappingProxyType({"cursor_field": "day", "start": "-2d", "window":
 def _source(api, *, key=True, incremental=True, transform=False, extra=None, raw=False, raw_key=False,
             transform_key=True):
     params = {"day": "{{ window.start }}"} if incremental else {"day": DAYS[0]}
-    stream = page_stream("orders", {"http": {"path": "/orders", "params": params}}, ORDERS % (extra or "", "records"),
+    stream = page_stream("orders", {"operation": {"path": "/orders", "params": params}},
+                         ORDERS % (extra or "", "records"),
                          records={"path": "data"}, primary_key=["id"] if key else None)
     if incremental:
         stream["incremental"] = dict(INCREMENTAL)
     if raw:  # records as returned: one JSON column (keyed on a column taken from them)
-        stream = page_stream("raw_events", {"http": {"path": "/raw"}}, "SELECT %srecord FROM records" % (
+        stream = page_stream("raw_events", {"operation": {"path": "/raw"}}, "SELECT %srecord FROM records" % (
             "record->>'id' AS id, " if raw_key else ""), records={"path": "data"},
             primary_key=["id"] if raw_key else None)
     source = {"kind": "source", "name": "shop", "http": {"base_url": api.url}, "streams": [stream]}
@@ -62,8 +63,9 @@ def _source(api, *, key=True, incremental=True, transform=False, extra=None, raw
             del export["primary_key"]
         source["streams"].append({
             "name": "sales_reports", "incremental": dict(INCREMENTAL),
-            "requests": [{"name": "raw_orders", "records": {"path": "data"},
-                          "http": {"path": "/orders", "params": {"day": "{{ window.start }}"}}}],
+            "requests": [{"name": "raw_orders", "operation": {"path": "/orders",
+                                                              "params": {"day": "{{ window.start }}"},
+                                                              "records": {"path": "data"}}}],
             "transform": {"mode": "run", "steps": [
                 {"name": "order_rows", "select": ORDERS % ("", "raw_orders")},
                 {"name": "daily_sales_rows",
@@ -216,7 +218,7 @@ def test_transform_two_exports_load_to_duckdb_and_merge_on_second_run(api, tmp_p
     path = tmp_path / "shop.yaml"
     source = {"kind": "source", "name": "shop", "http": {"base_url": api.url}, "streams": [{
         "name": "reports",
-        "requests": [{"name": "order_raw", "http": {"path": "/orders"}, "records": {"path": "data"}}],
+        "requests": [{"name": "order_raw", "operation": {"path": "/orders", "records": {"path": "data"}}}],
         "transform": {"mode": "run", "steps": [
             {"name": "orders", "select": "SELECT (record->>'id')::BIGINT AS id, "
                                         "(record->>'day')::DATE AS day, record->>'name' AS name, "
@@ -318,7 +320,7 @@ def test_partial_replace_stream_keeps_last_complete_rows(api, tmp_path, monkeypa
     (tmp_path / "stage").mkdir()
     monkeypatch.setattr("tempfile.tempdir", str(tmp_path / "stage"))
     source = {"kind": "source", "name": "shop", "http": {"base_url": api.url}, "streams": [page_stream(
-        "orders", {"http": {"path": "/orders", "params": {"account": "{{ partition.account }}"}}},
+        "orders", {"operation": {"path": "/orders", "params": {"account": "{{ partition.account }}"}}},
         "SELECT partition->>'account' AS account, record->>'id' AS id FROM records", records={"path": "data"},
         partitions=[{"name": "account", "values": ["a", "b"]}], on_partition_error="skip")]}
     path = tmp_path / "shop.yaml"
@@ -684,22 +686,3 @@ def test_ducklake_state_read_errors_mask_credentials(lake_env, tmp_path):
         output.initial_state()
     assert KEY_ID not in str(error.value) and SECRET not in str(error.value) and "***" in str(error.value)
     assert error.value.__suppress_context__
-
-
-def test_state_falls_back_to_the_pre_rename_state_table(tmp_path):
-    """A warehouse written before the StreamWright rename keeps its state in _adapt_state: a run resumes from it."""
-    path = tmp_path / "w.duckdb"
-    with duckdb.connect(str(path)) as connection:
-        connection.execute("CREATE SCHEMA client_a")
-        connection.execute("CREATE TABLE client_a._adapt_state (source VARCHAR, state JSON, "
-                           "loaded_at TIMESTAMP WITH TIME ZONE)")
-        connection.execute("INSERT INTO client_a._adapt_state VALUES ('shop', '{\"orders\": {\"day\": \"old\"}}', "
-                           "now())")
-    output = "duckdb:%s:client_a" % path
-    assert open_output(output, source=shop_source()).initial_state() == {"orders": {"day": "old"}}
-    with duckdb.connect(str(path)) as connection:
-        connection.execute("CREATE TABLE client_a._streamwright_state (source VARCHAR, state JSON, "
-                           "loaded_at TIMESTAMP WITH TIME ZONE)")
-        connection.execute("INSERT INTO client_a._streamwright_state VALUES "
-                           "('shop', '{\"orders\": {\"day\": \"new\"}}', now())")
-    assert open_output(output, source=shop_source()).initial_state() == {"orders": {"day": "new"}}

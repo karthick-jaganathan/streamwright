@@ -29,7 +29,8 @@ the connector's client) and a FileLocation (a connection's roots), or over a Loc
   and `write_files` (COPY: csv, tsv, json, jsonl, parquet; `file_name` and `layout`, the templates of
   `streamwright.core.jobs.naming`, name the file - or with `split_by` one file per split - inside the folder `path`;
   `partition_by` writes Hive-style folders; mode `overwrite` replaces, `error` refuses to write over a file).
-- what each engine supports of the file operations: SOURCE_CAPABILITIES and DUCKDB_CAPABILITIES (`file_rules`).
+- what each engine supports of the file operations: FILE_SOURCE_CAPABILITIES and FILE_DUCKDB_CAPABILITIES
+  (`file_rules`).
 
 Records are JSON: decimals stay exact (decimal.Decimal), dates and timestamps are text, and csv/tsv values are the
 file's text (all_varchar, empty cells null) unless the `columns` option types them.
@@ -48,9 +49,9 @@ import duckdb
 
 from streamwright.core.io.file_formats import AccessError, MissingError, ReadError, format_of
 from streamwright.core.io.file_rules import (
-    DUCKDB_CAPABILITIES,
-    ENGINE_CAPABILITIES,
-    SOURCE_CAPABILITIES,
+    FILE_DUCKDB_CAPABILITIES,
+    FILE_ENGINE_CAPABILITIES,
+    FILE_SOURCE_CAPABILITIES,
     check_read,
     check_write,
 )
@@ -87,9 +88,9 @@ from streamwright.core.runtime.contract import Operation, ResolvedConnection
 from streamwright.core.sql.quote import quote_ident, quote_literal
 
 __all__ = [
-    "DUCKDB_CAPABILITIES",
-    "ENGINE_CAPABILITIES",
-    "SOURCE_CAPABILITIES",
+    "FILE_DUCKDB_CAPABILITIES",
+    "FILE_ENGINE_CAPABILITIES",
+    "FILE_SOURCE_CAPABILITIES",
     "AccessError",
     "FileLocation",
     "FileSession",

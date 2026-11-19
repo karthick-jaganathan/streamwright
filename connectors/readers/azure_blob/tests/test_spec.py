@@ -24,7 +24,7 @@ from types import MappingProxyType
 import pytest
 
 from streamwright.connectors.azure_blob import CONNECTOR
-from streamwright.core.io.file_rules import DUCKDB_CAPABILITIES, ENGINE_CAPABILITIES, SOURCE_CAPABILITIES
+from streamwright.core.io.file_rules import FILE_DUCKDB_CAPABILITIES, FILE_ENGINE_CAPABILITIES, FILE_SOURCE_CAPABILITIES
 from streamwright.core.sdk.contract import (
     InvalidConnectionError,
     check_arguments,
@@ -35,7 +35,7 @@ from streamwright.core.sdk.contract import (
 from streamwright.core.sdk.testing import certify
 from streamwright.spark.io.file_rules import CAPABILITIES as SPARK_CAPABILITIES
 
-TestCertification = certify(CONNECTOR, (*ENGINE_CAPABILITIES, SPARK_CAPABILITIES))
+TestCertification = certify(CONNECTOR, (*FILE_ENGINE_CAPABILITIES, SPARK_CAPABILITIES))
 
 DECLARED = MappingProxyType({"roots": ["{{ config.container_root }}"], "account_name": "{{ config.account }}",
                              "account_key": "{{ secrets.key }}"})
@@ -85,26 +85,26 @@ def test_the_credential_combinations_resolve_and_never_show_a_secret():
 def test_duckdb_only_reads_which_the_spec_declares_once():
     assert [(limit.engine, limit.operation, dict(limit.choices)) for limit in CONNECTOR.engine_limits] == [
         ("duckdb", "object.write", {})]
-    assert [item.name for item in CONNECTOR.operations_for(DUCKDB_CAPABILITIES)] == ["object.read"]
+    assert [item.name for item in CONNECTOR.operations_for(FILE_DUCKDB_CAPABILITIES)] == ["object.read"]
     assert [item.name for item in CONNECTOR.operations_for(SPARK_CAPABILITIES)] == ["object.read", "object.write"]
     write = CONNECTOR.operation("object", "write")
-    assert codes(check_arguments(CONNECTOR, write, {"path": "out/", "format": "csv"}, DUCKDB_CAPABILITIES)) == [
+    assert codes(check_arguments(CONNECTOR, write, {"path": "out/", "format": "csv"}, FILE_DUCKDB_CAPABILITIES)) == [
         ("unsupported-operation", "")]
     assert check_arguments(CONNECTOR, write, {"path": "out/", "format": "csv"}, SPARK_CAPABILITIES) == []
-    assert "object.write" not in CONNECTOR.describe(*ENGINE_CAPABILITIES)["capabilities"]["duckdb"]
+    assert "object.write" not in CONNECTOR.describe(*FILE_ENGINE_CAPABILITIES)["capabilities"]["duckdb"]
 
 
 def test_each_engine_takes_the_arguments_it_supports():
     read = CONNECTOR.operation("object", "read")
-    assert check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, SOURCE_CAPABILITIES) == []
-    assert codes(check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, DUCKDB_CAPABILITIES)) == [
+    assert check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, FILE_SOURCE_CAPABILITIES) == []
+    assert codes(check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, FILE_DUCKDB_CAPABILITIES)) == [
         ("unsupported-argument", "arguments.match")]
     options = {"null_padding": True, "nullstr": ["", "NA"], "dateformat": "%Y-%m-%d", "ignore_errors": True}
-    assert check_arguments(CONNECTOR, read, {"path": "a.csv", "options": options}, SOURCE_CAPABILITIES) == []
+    assert check_arguments(CONNECTOR, read, {"path": "a.csv", "options": options}, FILE_SOURCE_CAPABILITIES) == []
 
 
 def test_the_guide_shows_duckdb_for_reads_only():
-    text = guide_text(CONNECTOR, "streamwright.connectors.azure_blob", (*ENGINE_CAPABILITIES, SPARK_CAPABILITIES))
+    text = guide_text(CONNECTOR, "streamwright.connectors.azure_blob", (*FILE_ENGINE_CAPABILITIES, SPARK_CAPABILITIES))
     assert [line for line in text.splitlines() if line.startswith("## ")] == [
         "## Connection", "## Operations", "## Engines"]
     assert "### `object.read` (read; engines: source, duckdb, spark)" in text

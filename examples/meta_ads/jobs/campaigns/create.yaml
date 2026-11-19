@@ -1,0 +1,104 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# Creates campaigns (paused) in a Meta ad account from --input rows; a campaign whose name the account already has is
+# skipped (a warning each). One request per row: a campaign Meta rejects fails alone, with Meta's reason.
+#
+#   streamwright duckdb run examples/meta_ads/jobs/campaigns/create.yaml \
+#     --input examples/meta_ads/payloads/campaigns/create.json \
+#     --set account_id=ACCOUNT_ID --secrets ~/.streamwright/meta-ads-secrets.yaml --apply-state-migrations
+kind: DuckDBJob
+version: 1
+name: meta_ads_campaigns_create
+description: Campaigns created (paused) in a Meta ad account; existing names skipped
+
+spec:
+  config:
+    account_id: {type: string, required: true, pattern: "^[0-9]+$", description: "the ad account id (no act_)"}
+  secrets:
+    access_token: {type: string, required: true}
+    app_secret: {type: string, description: "enables appsecret_proof"}
+  input:
+    columns:
+      name: {type: string, required: true, max_length: 400}
+      objective:
+        type: string
+        required: true
+        enum: [OUTCOME_AWARENESS, OUTCOME_TRAFFIC, OUTCOME_ENGAGEMENT, OUTCOME_LEADS, OUTCOME_SALES,
+               OUTCOME_APP_PROMOTION]
+      status: {type: string, enum: [PAUSED, ACTIVE], description: "default PAUSED"}
+      daily_budget: {type: integer, minimum: 1, description: "a campaign budget, in the account currency's minor units"}
+    max_rows: 100
+
+connections:
+  meta:
+    provider: meta_ads
+    access_token: "{{ secrets.access_token }}"
+    app_secret: "{{ secrets.app_secret }}"
+
+steps:
+  - name: existing
+    connection: meta
+    operation:
+      service: AdAccount
+      method: get_campaigns
+      arguments: {id: "act_{{ config.account_id }}", fields: [id, name]}
+    sql: SELECT record->>'$.name' AS name, record->>'$.id' AS id FROM records
+
+  - name: skipped
+    sql: SELECT i.name, e.id FROM input AS i JOIN existing AS e USING (name)
+    log:
+      message: "skipped campaign {name}: the account already has it (id {id})"
+      level: warning
+
+  # the new campaigns; columns are the Graph API's campaign parameters
+  - name: campaigns
+    sql: |
+      SELECT i.name, i.objective,
+             coalesce(i.status, 'PAUSED') AS status,
+             CAST([] AS VARCHAR[]) AS special_ad_categories,
+             i.daily_budget,
+             -- without a campaign budget, Meta asks whether ad sets share theirs
+             CASE WHEN i.daily_budget IS NULL THEN false END AS is_adset_budget_sharing_enabled
+      FROM input AS i
+      ANTI JOIN existing AS e USING (name)
+      ORDER BY i.name
+
+outputs:
+  - name: create
+    connection: meta
+    step: campaigns
+    operation:
+      service: AdAccount
+      method: create_campaign
+      arguments:
+        id: "act_{{ config.account_id }}"
+    apply:
+      nulls: skip_field           # no budget: the parameter is left out
+      on_row_error: continue
+    log:
+      sql: |
+        SELECT name,
+               CASE WHEN outcome.status = 'applied' THEN 'created, id ' || (outcome.result->>'id')
+                    ELSE 'rejected: ' || outcome.error_code || ': ' || outcome.error_message END AS what
+        FROM "create"
+        ORDER BY outcome.row
+      message: "campaign {name}: {what}"
+
+runtime:
+  state:
+    sqlite: ../../.streamwright/meta_ads_campaigns_create.state.db
+    scope: "account:{{ config.account_id }}"

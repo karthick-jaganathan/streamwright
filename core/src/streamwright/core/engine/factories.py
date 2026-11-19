@@ -51,7 +51,10 @@ class AuthFactory:
     def render_http(source, scopes, secrets):
         source_http = dict(source.get("http") or {})
         headers = source_http.pop("headers", None)
+        paginator = source_http.pop("paginator", None)
         http = render(source_http, scopes)
+        if paginator is not None:
+            http["paginator"] = paginator  # rendered per response, with `response` in scope
         if headers is not None:
             values = render(headers, dict(scopes, secrets=secrets))
             http["headers"] = {key: value for key, value in values.items() if value not in ("", None)} \

@@ -26,9 +26,9 @@ CONNECTOR = ConnectorDefinition(
     name="openai_ads",
     title="OpenAI Ads",
     family="advertising",
-    summary="OpenAI Advertising API performance and metadata, declared in the source's `http:` block",
+    summary="OpenAI Advertising API performance and metadata: HTTP reads and writes (`operation:` requests)",
     connection=http.auth_fields(("bearer",)),
-    operations=(http.REQUEST,),
-    adapters={"source": "streamwright.core.io.http:HttpSourceAdapter"},
+    operations=(http.REQUEST, http.SEND),
+    adapters={"source": "streamwright.core.sdk.engines.source:HttpSourceAdapter"},
     loggers=("streamwright.network", "urllib3"),
 )

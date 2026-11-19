@@ -31,6 +31,7 @@ import datetime
 import decimal
 import math
 import re
+import uuid
 
 from streamwright.core.sql.quote import quote_literal
 
@@ -182,7 +183,14 @@ def sql_list(values, limit, quote_text=quote_literal):
 
 
 def encode_value(value):
-    """A JSON-safe, type-tagged form of a value for the batch manifest."""
+    """
+    A JSON-safe, type-tagged form of a value for the batch manifest; a UUID or a time of day is its text (as a replay,
+    which reads it back from the manifest, sees it).
+    """
+    if isinstance(value, uuid.UUID):
+        return str(value)
+    if isinstance(value, datetime.time):
+        return value.isoformat()
     if isinstance(value, datetime.datetime):
         return {"$ts": value.isoformat()}
     if isinstance(value, datetime.date):

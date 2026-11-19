@@ -46,7 +46,7 @@ def test_source_validation_with_restapi():
                 "requests": [
                     {
                         "name": "raw_items",
-                        "http": {
+                        "operation": {
                             "path": "/v1/items",
                             "method": "GET",
                         },
@@ -88,8 +88,7 @@ def test_restapi_rejects_sdk_requests():
                 "requests": [
                     {
                         "name": "raw_items",
-                        "sdk": "restapi",
-                        "method": "list",
+                        "operation": {"method": "list"},
                     },
                 ],
                 "transform": {
@@ -111,7 +110,8 @@ def test_restapi_rejects_sdk_requests():
     }
     issues = validate_text(yaml.safe_dump(source, sort_keys=False), "source.yaml")
     errors = [i for i in issues if i.severity == ERROR]
-    assert any("restapi is a REST API connector: use an http request" in str(e) for e in errors)
+    assert any("restapi is a REST API connector: its operation is an HTTP request (path, method, params, ...)" in str(e)
+               for e in errors)
 
 
 def test_restapi_runner_execution(monkeypatch):
@@ -133,7 +133,7 @@ def test_restapi_runner_execution(monkeypatch):
                 "requests": [
                     {
                         "name": "raw_users",
-                        "http": {
+                        "operation": {
                             "path": "/users",
                         },
                     },
@@ -192,7 +192,7 @@ def test_arbitrary_query_params_reach_the_request(monkeypatch):
         "http": {"base_url": "https://api.example.com", "records": {"path": "data"}},
         "streams": [{
             "name": "items",
-            "requests": [{"name": "raw", "http": {"path": "/items",
+            "requests": [{"name": "raw", "operation": {"path": "/items",
                          "params": {"vendor_filter": "enabled", "page_size": 250}}}],
             "transform": {"mode": "page", "steps": [{"name": "items",
                          "select": "SELECT (record->>'id')::INT AS id FROM raw"}]},

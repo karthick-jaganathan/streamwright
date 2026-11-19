@@ -15,7 +15,7 @@
 # * limitations under the License.
 # **************************************************************************/
 
-"""The `streams` section: stream identities, removed or missing keys and exports."""
+"""The `streams` section: stream identities, missing keys and exports."""
 
 from types import MappingProxyType
 
@@ -25,24 +25,6 @@ from streamwright.core.validation.sections.spec import SpecSection
 from streamwright.core.validation.sections.stream_context import NAME, StreamContext, lower_name
 from streamwright.core.validation.streams import StreamChecker
 
-_RECORDS_AS_RETURNED = "use `transform` steps; for records as returned: `SELECT record FROM <request>`"
-# stream keys of earlier formats, each with what replaced it (the last versions are the git tags fields-dsl and
-# transform-cross-stream)
-_REMOVED_STREAM_KEYS = MappingProxyType({
-    "fields": "`fields` was replaced by SQL: `transform` steps (DuckDB SELECTs over the stream's requests) shape the "
-              "records (see docs/design/source-format.md)",
-    "on_record_error": "`on_record_error` was removed with `fields`: use TRY_CAST in a step's `select` for values "
-                       "that may not convert",
-    "request": "`request` was removed: use `requests` with one named item",
-    "select": "a stream-level `select` was removed: " + _RECORDS_AS_RETURNED,
-    "raw": "`raw` was removed: " + _RECORDS_AS_RETURNED,
-    "primary_key": "a stream-level `primary_key` was removed: put `primary_key` on the export",
-    "transform_mode": "`transform_mode` was removed: use `transform.mode`",
-    "paginator": "a stream-level `paginator` was removed: put `paginator` on the request item",
-    "records": "a stream-level `records` was removed: put `records` on the request item",
-})
-# removed keys that stand for a key the stream misses: that one is not reported as missing on top
-_REPLACED_BY = MappingProxyType({"requests": ("request",), "transform": ("select", "raw", "fields")})
 _MISSING_STREAM_KEYS = MappingProxyType({
     "requests": "a stream needs `requests`: streams read only their own requests",
     "transform": "a stream needs `transform`: {mode: page or run, steps: [{name, select}, ...]}",
@@ -134,8 +116,7 @@ class StreamsSection(SpecSection):
         if "incremental" in stream:
             StreamChecker(self, info).check_incremental(stream, path)
         for key in spec.REQUIRED_STREAM_KEYS:
-            if key in _MISSING_STREAM_KEYS and key not in stream and \
-                    not any(old in stream for old in _REPLACED_BY.get(key, ())):
+            if key in _MISSING_STREAM_KEYS and key not in stream:
                 self.error("missing-key", path, _MISSING_STREAM_KEYS[key], stream)
         self.collect_tables(stream, path, info)
         if "requests" in stream:
@@ -148,11 +129,7 @@ class StreamsSection(SpecSection):
 
     def _check_stream_header(self, stream, path):
         """The keys, kind and name of a stream; returns its StreamContext."""
-        self.unknown_keys(stream, spec.STREAM_KEYS + tuple(_REMOVED_STREAM_KEYS), path, ERROR,
-                          "streams do not support it")
-        for key in stream:
-            if key in _REMOVED_STREAM_KEYS:
-                self.error("removed-key", (*path, key), _REMOVED_STREAM_KEYS[key], stream, key)
+        self.unknown_keys(stream, spec.STREAM_KEYS, path, ERROR, "streams do not support it")
         if "kind" in stream and stream["kind"] != "stream":
             self.error("bad-value", (*path, "kind"), "a stream has `kind: stream`, got %r" % stream["kind"],
                        stream, "kind")

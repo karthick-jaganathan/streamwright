@@ -19,7 +19,7 @@ description: Amazon Advertising profiles and marketplace configurations.
 # HTTP GET request to list profiles (returns JSON array directly)
 requests:
   - name: raw_profiles
-    http:
+    operation:
       path: /v2/profiles
       method: GET
 

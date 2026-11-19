@@ -54,6 +54,9 @@ class MongoDBSession:
         # undeclared arguments are pymongo find/aggregate kwargs (vendor arguments): hint, max_time_ms, ...
         extras = {key: value for key, value in vendor_arguments(operation, arguments).items() if key != "options"}
         if operation.method == "aggregate":
+            stage = client.write_stage(arguments["pipeline"])
+            if stage:
+                raise ConnectorError("mongodb: aggregate is read-only; the pipeline has a %s stage" % stage)
             return collection.aggregate(list(arguments["pipeline"]), **extras)
         cursor = collection.find(dict(arguments.get("filter") or {}), projection=arguments.get("projection"),
                                  **extras)

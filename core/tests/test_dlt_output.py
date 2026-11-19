@@ -30,7 +30,7 @@ from streamwright.core import cli
 from streamwright.core.engine import sql
 from streamwright.core.outputs import output
 from streamwright.core.outputs.dlt_columns import column_hints, decimal_types
-from streamwright.core.runtime.testing import page_stream
+from streamwright.core.sdk.testing import page_stream
 
 needs_dlt = pytest.mark.skipif(importlib.util.find_spec("dlt") is None or importlib.util.find_spec("duckdb") is None,
                                reason="needs dlt and duckdb (pip install 'streamwright[dlt]' 'dlt[duckdb]')")
@@ -96,11 +96,11 @@ def test_import_dlt_does_not_change_process_environment(monkeypatch):
 
 
 def shop(api, orders_key=True, transform=False, transform_key=True):
-    orders = page_stream("orders", {"http": {"path": "/orders", "params": {"day": "{{ window.start }}"}}},
+    orders = page_stream("orders", {"operation": {"path": "/orders", "params": {"day": "{{ window.start }}"}}},
                          ORDERS % "records", records={"path": "data"}, primary_key=["id"] if orders_key else None,
                          incremental=dict(INCREMENTAL))
     # JSON values (record->'meta'): dlt makes columns of their fields
-    events = page_stream("events", {"http": {"path": "/events"}},
+    events = page_stream("events", {"operation": {"path": "/events"}},
                          "SELECT (record->>'id')::BIGINT AS id, record->'meta' AS meta FROM records",
                          records={"path": "data"})
     source = {"kind": "source", "name": "shop", "spec": {"secrets": {"token": {"type": "string"}}},
@@ -112,8 +112,9 @@ def shop(api, orders_key=True, transform=False, transform_key=True):
             del export["primary_key"]
         source["streams"].append({
             "name": "sales_reports", "incremental": dict(INCREMENTAL),
-            "requests": [{"name": "raw_orders", "records": {"path": "data"},
-                          "http": {"path": "/orders", "params": {"day": "{{ window.start }}"}}}],
+            "requests": [{"name": "raw_orders", "operation": {"path": "/orders",
+                                                              "params": {"day": "{{ window.start }}"},
+                                                              "records": {"path": "data"}}}],
             "transform": {"mode": "run", "steps": [
                 {"name": "order_rows", "select": ORDERS % "raw_orders"},
                 {"name": "daily_sales_rows", "select": "SELECT day, sum(amount) AS amount, count(*) AS orders "
@@ -270,7 +271,7 @@ def test_partial_replace_streams_are_omitted_from_dlt_load(api, tmp_path, monkey
     (tmp_path / "tmp").mkdir()
     monkeypatch.setattr("tempfile.tempdir", str(tmp_path / "tmp"))
     source = {"kind": "source", "name": "shop", "http": {"base_url": api.url}, "streams": [page_stream(
-        "orders", {"http": {"path": "/orders", "params": {"account": "{{ partition.account }}"}}},
+        "orders", {"operation": {"path": "/orders", "params": {"account": "{{ partition.account }}"}}},
         "SELECT partition->>'account' AS account, record->>'id' AS id FROM records", records={"path": "data"},
         partitions=[{"name": "account", "values": ["a", "b"]}], on_partition_error="skip")]}
     path = tmp_path / "shop.yaml"

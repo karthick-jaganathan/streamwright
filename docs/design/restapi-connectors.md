@@ -1,6 +1,10 @@
 # REST API connectors: one declarative engine — implementation plan
 
-**Status:** approved design, ready to implement. **Implementer:** read this whole document before changing code.
+**Status:** implemented. Since then a request item's `http:` (and `call:`) is written `operation:`, its kind decided
+by the connector ([source-format.md](source-format.md)); the examples below keep the grammar of their time. The REST
+connectors also write now: they declare the catalog's `http.send` next to `http.request`, and a job's apply output
+sends rows as requests (see [connector-contract.md](connector-contract.md) §4).
+**Original status:** approved design, ready to implement. **Implementer:** read this whole document before changing code.
 Every decision in §2 is final; do not re-open them. If something here is impossible, stop and report it — do not
 work around it with per-network code.
 
@@ -128,8 +132,8 @@ of the same name, case-insensitively):
 ### 4.3 Request item
 
 Unchanged shape (`HTTP_REQUEST_KEYS = path, method, params, headers, json`) plus `params_encoding`. For a source
-whose provider has `transport = "http"`, request items **must** use `http:`; an `sdk:` item is a validation error:
-`"openai_ads is a REST API connector: use an http request (http: {path, method, …}), not sdk"`.
+whose provider has `transport = "http"`, request items **must** use `http:`; a `call:` item is a validation error:
+`"openai_ads is a REST API connector: use an `http: {path, method, ...}` request, not `call:`"`.
 
 ### 4.4 Paginators (`net/paginators.py`) — complete specification
 
@@ -206,7 +210,7 @@ that relied on the silent behavior and note it in the changelog of the commit).
 In `runtime/components.py`, class `Connector`:
 
 ```python
-    transport = "sdk"   # "sdk": the connector's connect()/request() run its requests (sdk: items).
+    transport = "sdk"   # "sdk": the connector's connect()/request() run its requests (`call:` items).
                         # "http": core's HTTP engine runs the source's http: requests; the connector only
                         # registers its name (install, --allow-connector, catalog) and is never connect()ed.
 ```
@@ -253,7 +257,7 @@ That is all: no base class, no hooks, no call object. A placeholder connector (�
   "type only with an `http`-transport provider" when the connector is installed; when it is not installed keep today's
   `connector-not-installed` warning and skip the check).
 - The check at `source.py` (~line 1057, "authenticates sdk requests only") must allow `http:` requests when the
-  provider is a REST API connector, and reject `sdk:` requests for it (§4.3).
+  provider is a REST API connector, and reject `call:` requests for it (§4.3).
 - Templates: allow `secrets` scope in `http.headers` (source and request), nowhere else.
 - Regenerate `docs/schemas/*.json` with `streamwright-validate --export-schema docs/schemas`
   (`core/tests/test_validation.py` asserts they match).
@@ -292,6 +296,7 @@ http:
   base_url: https://api.ads.openai.com
   paginator: {type: cursor, token_path: last_id, param: after, has_more_path: has_more}
   records: {path: data}
+policy:
   retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential, max_delay: 2m}
 ```
 ```yaml
@@ -424,7 +429,7 @@ Write tests **before** migrating each network and keep them green after; they de
   present in log output (assert with caplog at DEBUG on `streamwright.network`);
 - records: path, dict → one record, missing path → error;
 - `transport: http` provider mode: `auth.provider` + `type` builds the right `Authenticator`; `connect()` is never
-  called; an `sdk:` item is rejected (validation and runtime); `streamwright connectors` still lists the connector;
+  called; a `call:` item is rejected (validation and runtime); `streamwright connectors` still lists the connector;
 - validation: provider+type allowed for an `http`-transport connector, rejected for an SDK connector, an `http` provider without
   `type` rejected; JSON Schemas regenerated;
 - **unchanged**: every existing core test for `http:` sources passes without edits (except the deliberate
@@ -454,8 +459,7 @@ dotted params + 429 retry; Apple body offset + `result`/`result.rows`/`data` + `
 | 9 | Amazon (5 streams). | same |
 | 10 | Docs (§9), final sweep (§11). | all of §11 |
 
-Commit per step with a clear message (`git -c user.email=kjaganathan.sde@gmail.com -c user.name="Karthick
-Jaganathan" commit …`, no AI co-author trailers). Stage files by explicit path; never stage `.claude/`,
+Commit per step with a clear message (as the maintainer, no AI co-author trailers). Stage files by explicit path; never stage `.claude/`,
 `.scout/`, `AGENTS.md`, `CLAUDE.md`. **Do not push, publish, or bump versions** — the maintainer releases.
 
 ## 9. Docs

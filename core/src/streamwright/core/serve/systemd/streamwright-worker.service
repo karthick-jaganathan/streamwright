@@ -1,0 +1,29 @@
+# StreamWright worker: runs the runs serve queues (installed by `streamwright systemd install`)
+[Unit]
+Description=StreamWright worker
+Documentation=https://streamwright.web.app/docs/jobs/serve
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=streamwright
+Group=streamwright
+WorkingDirectory=@CONFIG_DIR@
+EnvironmentFile=@CONFIG_DIR@/common.env
+EnvironmentFile=@CONFIG_DIR@/worker.env
+ExecStart=@STREAMWRIGHT@ worker @CONFIG_DIR@/serve.yaml --processes 8 --log-format json
+Restart=on-failure
+RestartSec=5
+# a stop lets the runs under way finish: keep it above the jobs' limits.timeout
+TimeoutStopSec=2h
+KillMode=control-group
+StateDirectory=streamwright
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# other folders the jobs write to (output files, a local runtime.state elsewhere), if any:
+# ReadWritePaths=/data/streamwright
+
+[Install]
+WantedBy=multi-user.target

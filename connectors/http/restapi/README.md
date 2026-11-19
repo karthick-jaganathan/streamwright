@@ -32,7 +32,7 @@ streams:
   - name: stargazers
     requests:
       - name: raw_stargazers
-        http:
+        operation:
           path: /repos/org/repo/stargazers
     transform:
       mode: page

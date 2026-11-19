@@ -19,6 +19,7 @@
 
 import json
 import pathlib
+import re
 import sqlite3
 import sys
 import threading
@@ -210,7 +211,9 @@ def test_each_pass_tags_its_own_lines_with_the_job_its_labels_and_its_account(tm
     assert main(["run", path, "--set", "client_id=c1", "--allow-lookup-exec", "--fan-out-concurrency", "2"]) == 0
     tags = {line.split(": ", 1)[0].split("streamwright.duckdb", 1)[1] for line in capsys.readouterr().err.splitlines()
             if "output o: 1 rows" in line}
-    assert tags == {" [per_account client=c1 account=a1 output=o]", " [per_account client=c1 account=a2 output=o]"}
+    assert {re.sub(r" req=sw_[A-Za-z0-9_-]{22}]$", "]", tag) for tag in tags} == {
+        " [per_account client=c1 account=a1 output=o]", " [per_account client=c1 account=a2 output=o]"}
+    assert len({tag.rsplit(" req=", 1)[1] for tag in tags}) == 1              # one run: one request id
     assert main(["run", path, "--set", "account_ids=a3", "--allow-lookup-exec", "--log-format", "json"]) == 0
     lines = [json.loads(line) for line in capsys.readouterr().err.splitlines() if line.startswith("{")]
     output = next(line for line in lines if line["message"].startswith("output o: 1 rows"))

@@ -1,0 +1,7 @@
+[
+  {"name": "Search - Brand", "status": "PAUSED", "advertising_channel_type": "SEARCH",
+   "campaign_budget": "customers/1234567890/campaignBudgets/1111111111", "bidding_strategy": "MANUAL_CPC"},
+  {"name": "Search - Generic", "status": "PAUSED", "advertising_channel_type": "SEARCH",
+   "campaign_budget": "customers/1234567890/campaignBudgets/2222222222", "bidding_strategy": "MAXIMIZE_CLICKS",
+   "max_cpc_micros": 2000000, "target_search_network": true}
+]

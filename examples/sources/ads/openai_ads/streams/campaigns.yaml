@@ -18,12 +18,13 @@
 # Partition by account_id from runtime configuration
 partitions:
   - {name: account_id, values: "{{ config.account_ids }}"}
-retry: {max_attempts: 3, max_delay: 2m}
+policy:
+  retry: {max_attempts: 3, max_delay: 2m}
 
 # HTTP request: list campaigns for each account
 requests:
   - name: raw_campaigns
-    http:
+    operation:
       path: /v1/campaigns
       method: GET
       params:

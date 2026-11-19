@@ -17,9 +17,8 @@
 
 """Lazy query-builder loading for rendered source requests."""
 
-from streamwright.core.engine import queries
 from streamwright.core.engine.errors import SourceError
-from streamwright.core.runtime import components
+from streamwright.core.runtime import components, queries
 from streamwright.core.runtime.components import ComponentLoadError
 
 

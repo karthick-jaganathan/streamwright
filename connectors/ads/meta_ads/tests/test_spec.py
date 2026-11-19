@@ -15,7 +15,7 @@
 # * limitations under the License.
 # **************************************************************************/
 
-"""The meta_ads spec: certified, read-only, and the connection it takes."""
+"""The meta_ads spec: certified, reads and apply operations, and the connection it takes."""
 
 import pytest
 from facebook_business.exceptions import FacebookRequestError
@@ -45,9 +45,10 @@ def test_the_secrets_are_secret_references():
 
 def test_reads_are_families_and_the_installed_sdk_decides_which_objects_exist():
     names = [operation.name for operation in CONNECTOR.operations]
-    assert names == ["*.api_get", "*.get_*"]  # the vendor's surface is never enumerated (§6b)
+    # the vendor's surface is never enumerated (§6b); the Conversions API is the one exact operation
+    assert names == ["*.api_get", "*.get_*", "*.create_*", "*.api_update", "*.api_delete", "AdsPixel.create_event"]
     connector = components.load("meta_ads")
-    # a write method matches no read family, so it is refused before the SDK is even consulted
+    # a write method is an apply operation, never a request's read: refused before the SDK is even consulted
     (problem,) = check_call(connector, {"service": "AdAccount", "method": "create_campaign",
                                         "arguments": {"id": "act_1"}})
     assert problem.startswith("meta_ads: AdAccount.create_campaign is not supported (supported: *.api_get, *.get_*")

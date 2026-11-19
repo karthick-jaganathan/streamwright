@@ -33,8 +33,7 @@ it may use. Nothing is imported before the allow-list admits it.
 
 import importlib.util
 
-from streamwright.core.engine import queries
-from streamwright.core.runtime import plugins, source_connectors
+from streamwright.core.runtime import plugins, queries, source_connectors
 from streamwright.core.runtime.connector_types import ComponentLoadError, ConnectorContext, ConnectorError, QueryBuilder
 from streamwright.core.runtime.contract import AdapterLoadError, ConnectorDefinition
 from streamwright.core.runtime.contract_guide import guide_text
@@ -275,11 +274,11 @@ def check_call(definition, call, builders=None, registry=None):
     """
     Problems with an unrendered call of connector `definition`: the source engine's checks of its operation and
     arguments, which see the calls of query builders (`builders`: names; default: those of the usable connectors) as
-    BuiltQuery values. Per-request values are arguments: sdk requests take no `headers`.
+    BuiltQuery values. Per-request values are arguments: a call takes no `headers`.
     """
     problems = []
     if call.get("headers") is not None:
-        problems.append("%s: %s.%s: sdk requests take no `headers`; per-request values are the operation's "
+        problems.append("%s: %s.%s: a call takes no `headers`; per-request values are the operation's "
                         "`arguments`" % (definition.name, call.get("service"), call.get("method")))
     names = set(query_builders(registry=registry) if builders is None else builders)
     call = queries.replace_calls({key: value for key, value in call.items() if key != "headers"}, names,

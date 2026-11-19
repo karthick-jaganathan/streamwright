@@ -1,0 +1,97 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# Updates Google Ads campaigns (name, status, budget) from a list given with --input: a row names its campaign by id
+# or resource name and gives only the fields to change (an empty one is left as it is).
+#
+#   mkdir -p examples/google_ads/.streamwright                # once: the state folder (git-ignored)
+#   streamwright duckdb run examples/google_ads/jobs/campaigns/update.yaml \
+#     --input examples/google_ads/payloads/campaigns/update.json \
+#     --set customer_id=CUSTOMER_ID --set login_customer_id=MANAGER_ID --set validate_only=true \
+#     --secrets ~/.streamwright/google-ads-secrets.yaml --apply-state-migrations --summary
+kind: DuckDBJob
+version: 1
+name: google_ads_campaigns_update
+description: Google Ads campaigns updated from a list (name, status, budget), by campaign id or resource name
+
+spec:
+  config:
+    customer_id: {type: string, required: true, pattern: "^[0-9]{10}$", description: "the account (10 digits)"}
+    login_customer_id: {type: string, required: true, pattern: "^[0-9]{10}$", description: "the manager account"}
+    validate_only: {type: boolean, default: false, description: "true: Google checks the changes, makes none"}
+  secrets:
+    developer_token: {type: string, required: true}
+    client_id: {type: string, required: true}
+    client_secret: {type: string, required: true}
+    refresh_token: {type: string, required: true}
+  input:
+    columns:
+      campaign_id: {type: string, pattern: "^[0-9]+$"}
+      resource_name: {type: string, pattern: "^customers/[0-9]+/campaigns/[0-9]+$"}
+      name: {type: string, max_length: 255}
+      status: {type: string, enum: [ENABLED, PAUSED]}
+      campaign_budget: {type: string, pattern: "^customers/[0-9]+/campaignBudgets/[0-9]+$"}
+    max_rows: 1000
+
+connections:
+  ads:
+    provider: google_ads
+    developer_token: "{{ secrets.developer_token }}"
+    client_id: "{{ secrets.client_id }}"
+    client_secret: "{{ secrets.client_secret }}"
+    refresh_token: "{{ secrets.refresh_token }}"
+    login_customer_id: "{{ config.login_customer_id }}"
+
+steps:
+  # the changes: the campaign's resource name, the fields to set, `op: update`
+  - name: updates
+    sql: |
+      SELECT coalesce(i.resource_name,
+                      'customers/{{ config.customer_id }}/campaigns/' || i.campaign_id) AS resource_name,
+             i.name                                                                    AS "campaign.name",
+             i.status                                                                  AS "campaign.status",
+             i.campaign_budget                                                         AS "campaign.campaign_budget",
+             'update'                                                                  AS op
+      FROM input AS i
+      WHERE i.resource_name IS NOT NULL OR i.campaign_id IS NOT NULL
+    log:
+      message: "campaign {resource_name}: name {campaign.name}, status {campaign.status}"
+      max_rows: 50
+
+outputs:
+  - name: update_campaigns
+    connection: ads
+    step: updates
+    operation:
+      service: CampaignService
+      method: mutate_campaigns
+      arguments:
+        customer_id: "{{ config.customer_id }}"
+        validate_only: "{{ config.validate_only }}"
+        partial_failure: true
+    apply:
+      nulls: skip_field           # an empty field is left as it is
+      on_row_error: fail
+    log:
+      sql: |
+        SELECT resource_name, outcome.status AS status, coalesce(outcome.error_message, '') AS detail
+        FROM update_campaigns
+      message: "campaign {resource_name}: {status} {detail}"
+
+runtime:
+  state:
+    sqlite: ../../.streamwright/google_ads_campaigns_update.state.db
+    scope: "customer:{{ config.customer_id }}"

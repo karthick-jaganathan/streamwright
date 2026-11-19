@@ -33,7 +33,8 @@ from streamwright.core.jobs.fields import Field
 from streamwright.core.jobs.state import open_sqlite
 from streamwright.core.sql.quote import sql_string
 
-EXAMPLE = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "examples", "jobs", "files", "orders.yaml")
+EXAMPLE = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "examples", "files", "jobs", "orders",
+                       "sync.yaml")
 SECRET = "pa'ss-SECRET-123"
 
 
@@ -47,7 +48,7 @@ def _overlay(tmp_path, **runtime):
 
 
 def test_the_example_runs_twice_with_its_state_in_its_own_warehouse(tmp_path):
-    for expected in ("files_orders-00000001", "files_orders-00000002"):
+    for expected in ("files_orders_sync-00000001", "files_orders_sync-00000002"):
         result = run_job(EXAMPLE, overlays=[_overlay(tmp_path)], config={"min_amount_usd": "20"})
         assert result.exit_code == 0, result.error
         assert result.batches == [expected]

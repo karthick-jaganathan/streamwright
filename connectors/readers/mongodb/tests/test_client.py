@@ -42,6 +42,13 @@ def test_a_find_becomes_a_pipeline():
         {"$match": {"a": 1}}, {"$project": {"x": 1}}, {"$sort": {"x": -1, "y": 1}}, {"$limit": 5}]
 
 
+def test_write_stages_are_found_at_any_depth():
+    assert client.write_stage([{"$match": {"a": 1}}, {"$out": "copy"}]) == "$out"
+    assert client.write_stage([{"$facet": {"x": [{"$merge": {"into": "t"}}]}}]) == "$merge"
+    assert client.write_stage([{"$lookup": {"from": "o", "pipeline": [{"$out": "t"}], "as": "o"}}]) == "$out"
+    assert client.write_stage([{"$match": {"name": "$out"}}, {"$project": {"x": 1}}]) is None
+
+
 def test_bson_values_become_json():
     document = {"_id": bson.ObjectId("65f000000000000000000001"), "at": datetime.datetime(2026, 1, 2, 3, 4),
                 "n": bson.Decimal128("1.5"), "b": b"\x00\x01", "list": [{"d": datetime.date(2026, 1, 2)}]}

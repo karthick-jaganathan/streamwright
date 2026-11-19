@@ -19,7 +19,7 @@ description: Apple Ads campaigns and budget configurations.
 # HTTP POST query for campaigns (uses body pagination from source.yaml)
 requests:
   - name: raw_campaigns
-    http:
+    operation:
       path: /v1/campaigns/query
       method: POST
       json:

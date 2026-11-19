@@ -21,9 +21,8 @@ from streamwright.core.engine import sql
 
 
 class ExportWriter:
-    def __init__(self, output, partition_value):
+    def __init__(self, output):
         self.output = output
-        self.partition_value = partition_value
 
     def write_schema(self, export, columns, keys, stats=None):
         self.output.write_columns(export, columns)
@@ -38,7 +37,7 @@ class ExportWriter:
                 self.output.write_record(export, record)
                 written += 1
                 for fields, rows in wanted.items():
-                    row = tuple(self.partition_value(record.get(field)) for field in fields)
+                    row = tuple(record.get(field) for field in fields)
                     if all(value is not None for value in row):
                         rows.add(row)
         finally:

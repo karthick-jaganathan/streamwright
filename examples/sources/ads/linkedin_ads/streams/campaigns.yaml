@@ -17,12 +17,13 @@
 # Campaigns of each sponsored ad account.
 partitions:
   - {name: account_id, values: "{{ config.account_ids }}"}
-retry: {max_attempts: 3, max_delay: 2m}
+policy:
+  retry: {max_attempts: 3, max_delay: 2m}
 
 # HTTP request to list campaigns for each ad account
 requests:
   - name: raw_campaigns
-    http:
+    operation:
       path: /rest/adCampaigns
       method: GET
       params:

@@ -22,6 +22,7 @@ runs after the streams its `from_stream` partitions come from, which run too and
 """
 
 import contextlib
+import copy
 import datetime
 import logging
 import queue
@@ -31,6 +32,7 @@ from dataclasses import dataclass, field
 
 import requests
 
+from streamwright.core.config import grammar
 from streamwright.core.engine import sql
 from streamwright.core.engine.bookmarks import BookmarkStore
 from streamwright.core.engine.builders import QueryBuilders
@@ -40,10 +42,10 @@ from streamwright.core.engine.factories import AuthFactory, ClientFactory
 from streamwright.core.engine.partitions import PartitionPlanner
 from streamwright.core.engine.planning import prepare_run
 from streamwright.core.engine.session import ConnectorSession
-from streamwright.core.engine.values import legacy_partition_key, partition_key, partition_value
+from streamwright.core.engine.values import partition_key
 from streamwright.core.engine.writers import ExportWriter
 from streamwright.core.net.http import Redactor
-from streamwright.core.outputs.output import BaseOutput
+from streamwright.core.outputs.base import BaseOutput
 from streamwright.core.runtime import components, logs
 from streamwright.core.runtime.connector_types import ConnectorContext
 from streamwright.core.runtime.logs import RunMetrics
@@ -58,10 +60,8 @@ LOG = logging.getLogger("streamwright.source")
 
 @dataclass(frozen=True)
 class RunContext:
-    source: dict
-    config: dict
-    secrets: dict
-    today: datetime.date
+    """What a run's HTTP clients share: its clock, sleep, redaction and metrics."""
+
     clock: object
     sleep: object
     redact: Redactor
@@ -163,13 +163,14 @@ class _CollectOutput(BaseOutput):
 
 class SourceRunner:
     """
-    Runs a source's streams into `output`. `metrics` (logs.RunMetrics; by default one of its own) gets the run's
-    counts and timings and logs its progress.
+    Runs a source's streams into `output`. `source` is written in the source grammar (its `operation:` and
+    `policy:` groups, see config.grammar); the runner reads a translated copy. `metrics` (logs.RunMetrics; by default
+    one of its own) gets the run's counts and timings and logs its progress.
     """
 
     def __init__(self, source, config, secrets, state=None, output=None, today=None, session=None,  # noqa: PLR0917 (public API)
                  clock=time.monotonic, sleep=time.sleep, redact=None, allowed_connectors=None, metrics=None, plan=None):
-        self.source = source
+        self.source = source = grammar.to_internal(copy.deepcopy(source))
         self.config = config
         self.secrets = secrets
         self.output = output
@@ -181,11 +182,10 @@ class SourceRunner:
         self.clock = clock
         self.sleep = sleep
         self.metrics = metrics if metrics is not None else RunMetrics(clock=clock)
-        self.context = RunContext(source, config, secrets, self.today, clock, sleep, self.redact, self.metrics)
-        self.bookmarks = BookmarkStore(state, output, self.metrics, self.today, key=partition_key,
-                                       legacy_key=legacy_partition_key)
+        self.context = RunContext(clock, sleep, self.redact, self.metrics)
+        self.bookmarks = BookmarkStore(state, output, self.metrics, self.today, key=partition_key)
         self.state = self.bookmarks.state
-        self.writer = ExportWriter(output, partition_value)
+        self.writer = ExportWriter(output)
         if self.metrics.source is None:
             self.metrics.source = source.get("name")
         self.streams = {}
@@ -212,7 +212,6 @@ class SourceRunner:
         self.query_builders = QueryBuilders(self.allowed_connectors)
         self.http = AuthFactory.render_http(source, self._scopes(), secrets)
         self.clients = ClientFactory(self.context, self.session, self.authenticator, self.http)
-        self.shared_limiter = self.clients.shared_limiter
 
     def _scopes(self, partition=None, window=None):
         scopes = {"config": self.config, "today": self.today}

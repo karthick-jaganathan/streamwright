@@ -20,7 +20,7 @@ Discovery of connector definitions: the `streamwright.connectors` entry points, 
 `CONNECTOR` (rule 1 of docs/design/connector-contract.md). Importing a definition imports only the connector's `spec`
 (guarantee G3), so engines can list what each connector supports; adapters and query builders load later, through
 `ConnectorDefinition.load_adapter(engine)` / `.load_query_builder(name)`. A plug-in whose target is not a definition
-was written for the pre-contract connector API and is refused with a message that says so.
+is refused.
 """
 
 from collections.abc import Callable, Collection
@@ -55,8 +55,8 @@ def load_definition(name: str, *, allowed: Collection[str] | None = None,
     """The connector's definition (allow-list and SDK compatibility checked before the import); PluginError."""
     definition = plugins.load_plugin(plugins.CONNECTORS, name, allowed=allowed, entry_points=entry_points)
     if not isinstance(definition, ConnectorDefinition):
-        raise plugins.PluginError("%s (%s) targets the pre-contract connector API; it needs an update to connector "
-                                  "contract v1 (%s)" % (name, _distribution(name, entry_points), CONTRACT_DOCUMENT))
+        raise plugins.PluginError("%s (%s) is not a ConnectorDefinition: a connector package's entry point names "
+                                  "its CONNECTOR (%s)" % (name, _distribution(name, entry_points), CONTRACT_DOCUMENT))
     if definition.name != name:
         raise plugins.PluginError("%s %r defines the connector %r" % (plugins.CONNECTORS, name, definition.name))
     return definition

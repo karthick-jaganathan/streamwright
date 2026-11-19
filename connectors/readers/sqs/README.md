@@ -12,13 +12,13 @@ auth:
   region: us-east-1
 requests:
   - name: peek
-    sdk: sqs
-    service: message
-    method: read
-    arguments:
-      destination: https://sqs.us-east-1.amazonaws.com/123456789012/arrivals
-      max_messages: 10
-      max_wait: 5s
+    operation:
+      service: message
+      method: read
+      arguments:
+        destination: https://sqs.us-east-1.amazonaws.com/123456789012/arrivals
+        max_messages: 10
+        max_wait: 5s
 ```
 
 SparkJob `message.consume` and `message.publish` share `destination`; consume accepts `max_messages` and

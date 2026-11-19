@@ -20,17 +20,18 @@ The base of the validation checks: severities, issue reporting with YAML locatio
 the section checkers share.
 """
 
+import copy
 import datetime
-import difflib
 import re
 
 import yaml
 
+from streamwright.core.config import grammar
+from streamwright.core.runtime.issues import Issue
+from streamwright.core.runtime.text import suggest
 from streamwright.core.validation import vocabulary
-from streamwright.core.validation.issues import Issue
 
-__all__ = ["DURATION", "ERROR", "NON_STRICT_CODES", "WARNING", "Checker", "describe", "is_date", "render_path",
-           "suggest"]
+__all__ = ["DURATION", "ERROR", "NON_STRICT_CODES", "WARNING", "Checker", "describe", "is_date", "render_path"]
 
 ERROR = "error"
 WARNING = "warning"
@@ -73,13 +74,6 @@ def describe(value):
     return type(value).__name__
 
 
-def suggest(word, candidates):
-    if not isinstance(word, str):
-        return ""
-    match = difflib.get_close_matches(word, [c for c in candidates if isinstance(c, str)], n=1, cutoff=0.6)
-    return " (did you mean %r?)" % match[0] if match else ""
-
-
 class Checker:
     """Reporting and generic checks; the checks of `kind: source` are in validation.source.SourceChecker."""
 
@@ -93,24 +87,76 @@ class Checker:
         self.folder = None
         self.files = frozenset()
         self.stream_files = {}
+        # the source as written (its public grammar) and the document checked (translated in place, see `translate`)
+        self.public = None
+        self.root = None
+        self.refused = frozenset()    # the paths the grammar reported: no other key issue at or under them
+        self.halted = frozenset()     # operations that mix a call's and a request's keys: no other issue under them
+
+    def translate(self, document):
+        """Reports the grammar problems of a public source and translates it into the shape the checks read."""
+        if not isinstance(document, dict):
+            return
+        problems = grammar.problems(document)
+        for code, path, container, key, message in problems:
+            self.error(code, path, message, container, key)
+        self.refused = frozenset(path for _, path, _, _, _ in problems)
+        self.halted = frozenset(path for code, path, _, _, _ in problems
+                                if code == "bad-value" and path and path[-1] == "operation")
+        self.public, self.root = copy.deepcopy(document), document
+        grammar.to_internal(document)
 
     # reporting -------------------------------------------------------------
 
-    def _mark(self, container, key):
-        node = self.nodes.get(id(container)) if container is not None else None
-        if node is None:
-            return None
+    @staticmethod
+    def _key_mark(node, key):
         if isinstance(node, yaml.MappingNode) and key is not None:
             for key_node, _ in reversed(node.value):
                 if isinstance(key_node, yaml.ScalarNode) and key_node.value == str(key):
                     return key_node.start_mark
         if isinstance(node, yaml.SequenceNode) and isinstance(key, int) and 0 <= key < len(node.value):
             return node.value[key].start_mark
-        return node.start_mark
+        return None
+
+    def _walk(self, path):
+        """The mark of `path` (public) in the source as written, or None."""
+        node = self.nodes.get(id(self.root)) if self.root is not None else None
+        mark = None
+        for position, key in enumerate(path):
+            child = None
+            if isinstance(node, yaml.MappingNode):
+                child = next((value for key_node, value in reversed(node.value)
+                              if isinstance(key_node, yaml.ScalarNode) and key_node.value == str(key)), None)
+                if child is None and position == 0 and isinstance(self.root.get(key), list):
+                    child = self.nodes.get(id(self.root[key]))       # a source folder's streams
+            mark = self._key_mark(node, key) or mark
+            if isinstance(node, yaml.SequenceNode) and isinstance(key, int) and 0 <= key < len(node.value):
+                child = node.value[key]
+            if child is None:
+                return mark if position == len(path) - 1 else None
+            node = child
+        return mark
+
+    def _mark(self, container, key, path=()):
+        node = self.nodes.get(id(container)) if container is not None else None
+        exact = self._key_mark(node, key)
+        if exact is not None:
+            return exact
+        # a key the translation of the grammar moved (or a mapping it made): find it where it is written
+        walked = self._walk(path) if key is not None or node is None else None
+        if walked is not None:
+            return walked
+        return node.start_mark if node is not None else None
 
     def _add(self, severity, code, path, message, *, container=None, key=None, mark=None, file=None):
-        mark = mark or self._mark(container, key)
         path = tuple(path)
+        if self.public is not None:
+            path = grammar.public_path(path, self.public)
+            if code == "unknown-key" and any(path[:len(refused)] == refused for refused in self.refused):
+                return
+            if any(path[:len(halted)] == halted for halted in self.halted):
+                return
+        mark = mark or self._mark(container, key, path)
         if file is None:
             file = self.file
             part_files = {"streams": self.stream_files}.get(path[0] if path else None)

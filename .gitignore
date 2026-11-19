@@ -165,8 +165,11 @@ AGENTS.md
 CLAUDE.md
 
 # run output of the example jobs (tables they write next to themselves)
-examples/jobs/deltalake/data/
+examples/deltalake/data/
+examples/kafka/data/
 
 # local review notes and agent tooling (not part of the project)
 CODE_REVIEW.md
 .agentic-devx/
+# the run queue streamwright serve makes beside a serve.yaml without `state`
+**/queue.db

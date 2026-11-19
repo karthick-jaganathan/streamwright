@@ -38,7 +38,7 @@ from streamwright.core.engine.runner import SourceRunner
 from streamwright.core.outputs.ducklake import load_ducklake
 from streamwright.core.outputs.output import open_output
 from streamwright.core.runtime.templates import decimal_text, render, to_json, to_text
-from streamwright.core.runtime.testing import MemoryOutput, page_stream
+from streamwright.core.sdk.testing import MemoryOutput, page_stream
 
 needs_dlt = pytest.mark.skipif(importlib.util.find_spec("dlt") is None,
                                reason="needs dlt (pip install 'streamwright[dlt]' 'dlt[duckdb]')")
@@ -160,7 +160,8 @@ def exact_source(api, huge=True):
     if not huge:
         items = items.replace("(record->>'huge')::HUGEINT AS huge, ", "")
         totals = totals.replace(", sum(huge) AS huge", "")
-    stream = page_stream("items", {"http": {"path": "/items"}}, items, records={"path": "data"}, primary_key=["id"])
+    stream = page_stream("items", {"operation": {"path": "/items"}}, items, records={"path": "data"},
+                         primary_key=["id"])
     stream["transform"]["steps"].append({"name": "totals", "select": totals})
     stream["export"]["totals"] = {"step": "totals"}
     return {"kind": "source", "name": "shop", "http": {"base_url": api.url}, "streams": [stream]}
@@ -338,7 +339,7 @@ def money_source(api):
     """Typical money values, as DECIMAL (`money`) and as DOUBLE (`approx`)."""
     api.routes[("GET", "/money")] = lambda request: (200, {"data": [
         {"v": value} for value in ("2.60", "0.10", "12.34", "1234567.89", "0.01", "-3.75")]})
-    stream = page_stream("money", {"http": {"path": "/money"}}, "SELECT (record->>'v')::DECIMAL(12, 2) AS money, "
+    stream = page_stream("money", {"operation": {"path": "/money"}}, "SELECT (record->>'v')::DECIMAL(12, 2) AS money, "
                          "(record->>'v')::DOUBLE AS approx FROM records", records={"path": "data"})
     return {"kind": "source", "name": "shop", "http": {"base_url": api.url}, "streams": [stream]}
 
@@ -367,24 +368,24 @@ def test_partitions_from_decimal_columns_render_as_their_plain_text(api):
     """`from_stream` values from a DECIMAL column, and request partitions from a step's DECIMAL column."""
     api.routes[("GET", "/tiers")] = lambda request: (200, {"data": [
         {"amount": value} for value in ("2.60", "100", "12345678901234567890.123456", "2.6")]})
-    for path in ("/prices/2.6", "/prices/100.0", "/prices/12345678901234567890.123456"):
+    for path in ("/prices/2.6", "/prices/100", "/prices/12345678901234567890.123456"):
         for method in ("GET", "POST"):
             api.routes[(method, path)] = lambda request: (200, {"data": [{"price": "1.10"}]})
-    tiers = page_stream("tiers", {"http": {"path": "/tiers"}},
+    tiers = page_stream("tiers", {"operation": {"path": "/tiers"}},
                         "SELECT DISTINCT (record->>'amount')::DECIMAL(38, 6) AS amount FROM records ORDER BY 1",
                         records={"path": "data"})
     prices = page_stream(
-        "prices", {"http": {"method": "POST", "path": "/prices/{{ partition.amount }}",
-                            "params": {"amount": "{{ partition.amount }}", "text": "a{{ partition.amount }}"},
-                            "json": {"amount": "{{ partition.amount }}"}}},
+        "prices", {"operation": {"method": "POST", "path": "/prices/{{ partition.amount }}",
+                                 "params": {"amount": "{{ partition.amount }}", "text": "a{{ partition.amount }}"},
+                                 "json": {"amount": "{{ partition.amount }}"}}},
         "SELECT partition->>'amount' AS amount, window_start AS day, (record->>'price')::DECIMAL(9, 2) AS price "
         "FROM records", records={"path": "data"},
         partitions=[{"name": "amount", "from_stream": "tiers", "field": "amount"}],
         incremental={"cursor_field": "day", "start": TODAY.isoformat(), "window": "1d"})
     report = {"name": "report", "requests": [
-        {"name": "raw_tiers", "http": {"path": "/tiers"}, "records": {"path": "data"}},
+        {"name": "raw_tiers", "operation": {"path": "/tiers", "records": {"path": "data"}}},
         {"name": "raw_prices", "partitions": [{"name": "tier", "from": "tier_rows", "field": "amount"}],
-         "http": {"path": "/prices/{{ partition.tier }}"}, "records": {"path": "data"}}],
+         "operation": {"path": "/prices/{{ partition.tier }}", "records": {"path": "data"}}}],
         "transform": {"mode": "run", "steps": [
             {"name": "tier_rows", "select": "SELECT (record->>'amount')::DECIMAL(38, 6) AS amount FROM raw_tiers"},
             {"name": "price_rows", "select": "SELECT partition->>'tier' AS tier, "
@@ -393,62 +394,21 @@ def test_partitions_from_decimal_columns_render_as_their_plain_text(api):
     source = {"kind": "source", "name": "shop", "http": {"base_url": api.url}, "streams": [tiers, prices, report]}
     output = MemoryOutput()
     SourceRunner(source, {}, {}, output=output, today=TODAY, sleep=lambda seconds: None).run()
-    paths = ["/prices/2.6", "/prices/100.0", "/prices/12345678901234567890.123456"]
-    # a partition value from a DECIMAL column is the double it was before decimals were exact when that double is
-    # exact (2.6, 100.0: requests, steps and bookmarks keep their text), else the exact decimal, which a double
-    # rounded; exactly one reference is a JSON number
+    paths = ["/prices/2.6", "/prices/100", "/prices/12345678901234567890.123456"]
+    # a partition value from a DECIMAL column is the exact decimal, written as its plain text (2.60 is 2.6, 100 is
+    # 100); exactly one reference is a JSON number
     posts = [request for request in api.requests if request["method"] == "POST"]
     assert [request["path"] for request in posts] == paths
-    assert [request["params"]["text"] for request in posts] == ["a2.6", "a100.0", "a12345678901234567890.123456"]
-    assert [request["params"]["amount"] for request in posts[:2]] == ["2.6", "100.0"]
-    assert [request["body"] for request in posts[:2]] == ['{"amount": 2.6}', '{"amount": 100.0}']
+    assert [request["params"]["text"] for request in posts] == ["a2.6", "a100", "a12345678901234567890.123456"]
+    assert [request["params"]["amount"] for request in posts[:2]] == ["2.6", "100"]
+    assert [request["body"] for request in posts[:2]] == ['{"amount": 2.6}', '{"amount": 100}']
     # request partitions from a step: distinct values, in order
     assert [request["path"] for request in api.requests if request["method"] == "GET" and request["path"] in paths] \
         == paths
-    # steps read a partition's values as JSON numbers, with the text they had (merge keys made of them stay)
-    assert [record["amount"] for export, record in output.records if export == "prices"][:2] == ["2.6", "100.0"]
-    assert [record["tier"] for export, record in output.records if export == "report"][:2] == ["2.6", "100.0"]
+    # steps read a partition's values as JSON numbers, with their plain text
+    assert [record["amount"] for export, record in output.records if export == "prices"][:2] == ["2.6", "100"]
+    assert [record["tier"] for export, record in output.records if export == "report"][:2] == ["2.6", "100"]
     assert [record["price"] for export, record in output.records if export == "prices"] == [Decimal("1.10")] * 3
-    # bookmarks are keyed by the partitions as JSON: typical values have the keys they had; a value a double rounded
-    # has its exact number
+    # bookmarks are keyed by the partitions as JSON, with exact numbers
     assert sorted(output.states[-1]["bookmarks"]["prices"]) == sorted([
-        '{"amount": 2.6}', '{"amount": 100.0}', '{"amount": 12345678901234567890.123456}'])
-
-
-def test_bookmarks_saved_with_decimal_partitions_as_doubles_still_resume(api):
-    """
-    Before DECIMAL values were exact, a `from_stream` partition's DECIMAL values were doubles, and its bookmarks were
-    keyed so ({"amount": 1.2345678901234567e+19}): a state saved then resumes, its keys moved to the exact ones.
-    """
-    amounts = ("2.60", "100", "12345678901234567890.123456")
-    api.routes[("GET", "/tiers")] = lambda request: (200, {"data": [{"amount": value} for value in amounts]})
-    for value in ("2.6", "100.0", "12345678901234567890.123456"):
-        api.routes[("GET", "/prices/" + value)] = lambda request: (200, {"data": [{"price": "1.10"}]})
-    tiers = page_stream("tiers", {"http": {"path": "/tiers"}},
-                        "SELECT (record->>'amount')::DECIMAL(38, 6) AS amount FROM records ORDER BY 1",
-                        records={"path": "data"})
-    prices = page_stream(
-        "prices", {"http": {"path": "/prices/{{ partition.amount }}", "params": {"day": "{{ window.start }}"}}},
-        "SELECT partition->>'amount' AS amount, window_start AS day, (record->>'price')::DECIMAL(9, 2) AS price "
-        "FROM records", records={"path": "data"},
-        partitions=[{"name": "amount", "from_stream": "tiers", "field": "amount"}],
-        incremental={"cursor_field": "day", "start": (TODAY - datetime.timedelta(days=5)).isoformat(),
-                     "window": "1d"})
-    source = {"kind": "source", "name": "shop", "http": {"base_url": api.url}, "streams": [tiers, prices]}
-    yesterday = (TODAY - datetime.timedelta(days=1)).isoformat()
-    # the keys the commit before exact decimals saved: json.dumps of the partition, its decimals as doubles
-    legacy = {json.dumps({"amount": float(Decimal(value))}, sort_keys=True): yesterday for value in amounts}
-    assert '{"amount": 1.2345678901234567e+19}' in legacy and '{"amount": 100.0}' in legacy
-    state = {"bookmarks": {"prices": dict(legacy, **{'{"amount": 7.5}': "2026-01-01"})}}
-    output = MemoryOutput()
-    SourceRunner(source, {}, {}, state=state, output=output, today=TODAY, sleep=lambda seconds: None).run()
-    days = [(request["path"][len("/prices/"):], request["params"]["day"]) for request in api.requests
-            if request["path"].startswith("/prices/")]
-    # each partition resumes the day after its bookmark: only today is read
-    assert days == [("2.6", TODAY.isoformat()), ("100.0", TODAY.isoformat()),
-                    ("12345678901234567890.123456", TODAY.isoformat())]
-    assert output.states[-1]["bookmarks"]["prices"] == {
-        '{"amount": 2.6}': yesterday, '{"amount": 100.0}': yesterday,
-        '{"amount": 12345678901234567890.123456}': yesterday,  # moved from the double's key
-        '{"amount": 7.5}': "2026-01-01"}  # (other partitions' bookmarks stay)
-    assert state["bookmarks"]["prices"]['{"amount": 1.2345678901234567e+19}'] == yesterday  # (the caller's state)
+        '{"amount": 2.6}', '{"amount": 100}', '{"amount": 12345678901234567890.123456}'])

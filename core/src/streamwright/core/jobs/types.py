@@ -29,6 +29,7 @@ from typing import Any, Protocol, runtime_checkable
 
 __all__ = [
     "CONTRACT_VERSION",
+    "ERROR_TEXT_LIMIT",
     "BatchContext",
     "Broker",
     "ExecutionHooks",
@@ -42,6 +43,7 @@ __all__ = [
 ]
 
 CONTRACT_VERSION = "1"
+ERROR_TEXT_LIMIT = 2000                              # the longest error text the state store keeps
 
 
 @dataclass(frozen=True)

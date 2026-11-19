@@ -28,9 +28,9 @@ from pyspark.sql import DataFrame
 from pyspark.sql.types import StructType
 
 from streamwright.connectors.google_sheets import client
-from streamwright.core.io.api_calls import make_caller, standalone_context, translate_pages
 from streamwright.core.sdk import ConnectorError
-from streamwright.core.sdk.contract import Operation, ResolvedConnection
+from streamwright.core.sdk.contract import Operation, ResolvedConnection, vendor_arguments
+from streamwright.core.sdk.engines.source import make_caller, standalone_context, translate_pages
 from streamwright.spark.sdk import SparkContext, WriteReceipt
 
 __all__ = ["GoogleSheetsSparkAdapter"]
@@ -41,7 +41,8 @@ def _fetch(connection: ResolvedConnection, operation: Operation, arguments: Mapp
     context = standalone_context(connection.redactor)
     sheets = client.connect(connection, context.secret, context.redact)
     try:
-        pages = client.read_pages(sheets, operation.method, arguments, make_caller(context, client.translate_error))
+        pages = client.read_pages(sheets, operation.method, arguments, make_caller(context, client.translate_error),
+                                  vendor_arguments(operation, arguments))
         return [record for page in translate_pages(pages, client.translate_error) for record in page]
     finally:
         sheets.http.session.close()

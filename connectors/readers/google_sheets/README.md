@@ -38,15 +38,15 @@ Extracts rows from a specific sheet tab or A1 cell range.
 ```yaml
 requests:
   - name: raw_sheet
-    sdk: google_sheets
-    service: spreadsheet
-    method: read
-    arguments:
-      spreadsheet_id: "{{ config.spreadsheet_id }}"
-      sheet: "Budgets"              # or range: "Budgets!A1:G1000"
-      header_row: 1                 # 1-indexed (default: 1; 0 for generated col_1, col_2...)
-      batch_size: 1000              # streaming chunk size
-      value_render_option: "FORMATTED_VALUE"  # or "UNFORMATTED_VALUE"
+    operation:
+      service: spreadsheet
+      method: read
+      arguments:
+        spreadsheet_id: "{{ config.spreadsheet_id }}"
+        sheet: "Budgets"              # or range: "Budgets!A1:G1000"
+        header_row: 1                 # 1-indexed (default: 1; 0 for generated col_1, col_2...)
+        batch_size: 1000              # streaming chunk size
+        value_render_option: "FORMATTED_VALUE"  # or "UNFORMATTED_VALUE"
 ```
 
 ### `list_sheets`
@@ -55,11 +55,11 @@ Lists metadata for all tabs/sheets inside a spreadsheet workbook.
 ```yaml
 requests:
   - name: workbook_tabs
-    sdk: google_sheets
-    service: spreadsheet
-    method: list_sheets
-    arguments:
-      spreadsheet_id: "{{ config.spreadsheet_id }}"
+    operation:
+      service: spreadsheet
+      method: list_sheets
+      arguments:
+        spreadsheet_id: "{{ config.spreadsheet_id }}"
 ```
 
 ## Engines

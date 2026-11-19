@@ -26,9 +26,9 @@ CONNECTOR = ConnectorDefinition(
     name="restapi",
     title="REST API",
     family="http",
-    summary="Declarative HTTP extraction for any REST API: the source's `auth:` and `http:` blocks declare it",
+    summary="Declarative HTTP reads and writes for any REST API: each request's `operation:` (source `http:` defaults)",
     connection=http.auth_fields(),
-    operations=(http.REQUEST,),
-    adapters={"source": "streamwright.core.io.http:HttpSourceAdapter"},
+    operations=(http.REQUEST, http.SEND),
+    adapters={"source": "streamwright.core.sdk.engines.source:HttpSourceAdapter"},
     loggers=("streamwright.network", "urllib3"),
 )

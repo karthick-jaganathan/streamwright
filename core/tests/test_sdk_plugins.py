@@ -64,7 +64,7 @@ def test_sdk_pins_released_paths():
         "ConnectorContext", "ConnectorError", "QueryBuilder",
         "BuiltQuery", "QueryError", "InputError", "as_date", "Redactor", "quote_ident",
         "quote_literal", "sql_string", "PAGE_SIZE", "SDK_VERSION", "ConnectorDefinition", "Field", "Operation",
-        "ResolvedConnection", "check_arguments", "check_connection", "resolve_connection",
+        "ResolvedConnection", "check_arguments", "check_connection", "resolve_connection", "suggest",
     }
 
 
@@ -110,9 +110,8 @@ def test_core_requirement_handshake_rejects_incompatible_distribution(monkeypatc
 def test_a_pre_contract_connector_is_refused_with_what_it_needs(monkeypatch):
     entry, calls = fake_entry("old_style")
     monkeypatch.setattr(components, "_entry_points", lambda: [entry])
-    with pytest.raises(components.ComponentLoadError, match=r"old_style \(streamwright-example\) targets the "
-                                                            r"pre-contract connector API; it needs an update to "
-                                                            r"connector contract v1"):
+    with pytest.raises(components.ComponentLoadError, match=r"old_style \(streamwright-example\) is not a "
+                                                            r"ConnectorDefinition"):
         components.ComponentRegistry().load("old_style")
     assert calls == ["old_style"]
 
@@ -177,3 +176,12 @@ def test_describe_uses_the_declared_contract_without_connecting():
     assert metadata["required_keys"] == ["token"] and metadata["secret_keys"] == ["token"]
     assert metadata["capabilities"]["source"] == {"reports.list": {"limit": None}}
     assert components.describe("described", allowed=["other"], registry=registry) is None
+
+
+def test_suggest_inline_and_list_styles():
+    assert sdk.suggest("nmae", ["name", "type"]) == " (did you mean 'name'?)"
+    assert sdk.suggest(3, ["name"]) == "" and sdk.suggest("zzz", ["name"]) == ""
+    assert sdk.suggest("get_campaign", ["get_campaigns", "get_campaign_ids", "list_ads"], style="list") == \
+        "; did you mean get_campaigns, get_campaign_ids?"
+    with pytest.raises(ValueError, match="style"):
+        sdk.suggest("name", ["name"], style="quoted")

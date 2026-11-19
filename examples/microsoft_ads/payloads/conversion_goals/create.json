@@ -1,0 +1,4 @@
+[
+  {"name": "Offline purchase", "category": "Purchase", "currency": "USD"},
+  {"name": "Offline qualified lead", "category": "SubmitLeadForm", "value": 5, "currency": "USD", "window_days": 60}
+]

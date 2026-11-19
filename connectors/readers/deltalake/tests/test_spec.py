@@ -55,6 +55,17 @@ def test_credentials_are_secret_references_and_roots_are_required():
     assert codes(check_connection(CONNECTOR, {"aws_region": "us-east-1"})) == [("missing-key", "roots")]
 
 
+def test_gcs_takes_an_hmac_key_as_secret_references_and_no_project():
+    declared = {"roots": ["gs://lake/"], "gcs_hmac_key_id": "{{ secrets.id }}", "gcs_hmac_secret": "{{ secrets.s }}",
+                "gcs_key_file": "/keys/sa.json"}
+    assert check_connection(CONNECTOR, declared) == []
+    assert codes(check_connection(CONNECTOR, dict(declared, gcs_hmac_secret="literal"))) == [
+        ("literal-secret", "gcs_hmac_secret")]
+    assert "gcs_project_id" not in {field.name for field in CONNECTOR.connection}
+    resolved = resolve_values(CONNECTOR, {"roots": ["gs://lake/"], "gcs_project_id": "p"})
+    assert dict(resolved.vendor) == {"gcs_project_id": "p"}       # unknown: an undeclared delta-rs storage option
+
+
 @pytest.mark.parametrize(("roots", "problem"), [
     ([], "`roots` must name at least one"), (["/data/../etc"], "goes up a folder"), ([" "], "a non-empty text")])
 def test_resolved_roots_keep_the_sandbox_fail_closed(roots, problem):

@@ -15,8 +15,12 @@
 # **************************************************************************/
 
 # StreamWright Makefile - Compact & Auto-Discovering
+# The Python whose environment the targets use (an active pyenv / virtualenv by default)
+PYTHON ?= python
 MODE ?= prod
 FORCE_DEPS ?= false
+# Optional extras of the core package, comma-separated (e.g. EXTRAS=serve)
+EXTRAS ?=
 CORE_DIR = core
 DIST_BASE = /tmp/sdist/streamwright
 
@@ -30,26 +34,28 @@ CONNECTOR_DIRS := $(READER_DIRS) $(ADS_DIRS) $(HTTP_DIRS)
 CONNECTOR_PKGS := $(addprefix streamwright-,$(subst _,-,$(notdir $(CONNECTOR_DIRS))))
 ALL_PKGS       := streamwright $(CONNECTOR_PKGS)
 
-.PHONY: help check-contracts lint check-vendored install install-all install-core install-connectors install-readers \
-	build build-all clean clean-dist verify verify-connectors uninstall \
+.PHONY: help check check-contracts lint check-vendored install install-all install-core install-connectors \
+	install-readers install-systemd build build-all clean clean-dist verify verify-connectors uninstall \
 	test test-all validate _show-packages
 
 # Default target: show help and discovered inventory
 help:
 	@echo "StreamWright - Available commands:"
 	@echo ""
-	@echo "  make install [MODE=dev|prod|dist]    - Install streamwright core (default: prod)"
+	@echo "  make install [MODE=dev|prod|dist]    - Install streamwright core (default: prod; EXTRAS=serve)"
 	@echo "  make install-connectors [MODE=...]   - Install all $(words $(CONNECTOR_DIRS)) connectors"
 	@echo "  make install-readers [MODE=...]      - Install all $(words $(READER_DIRS)) reader connectors"
 	@echo "  make install-<name> [MODE=...]       - Install specific connector (e.g. install-postgres, install-s3)"
+	@echo "  sudo make install-systemd PYTHON=... - Install the systemd units of serve/worker (streamwright systemd install)"
 	@echo "  make build                           - Build distributions for core and all connectors"
 	@echo "  make uninstall                       - Uninstall streamwright and all connectors"
 	@echo "  make clean                           - Clean build and test artifacts"
 	@echo "  make clean-dist                      - Clean distribution directory"
 	@echo "  make verify                          - Verify core installation"
 	@echo "  make verify-connectors               - Verify all connector installations"
-	@echo "  make test                            - Lint, then run core and reader tests (pytest)"
-	@echo "  make test-all                        - Lint, then run all tests including ads and http"
+	@echo "  make test                            - Lint, then run core, reader and http tests (pytest)"
+	@echo "  make test-all                        - Lint, then run all tests including ads"
+	@echo "  make check                           - What CI checks: test, check-vendored, check-contracts, validate"
 	@echo "  make validate                        - Validate examples/ with streamwright validate --strict"
 	@echo "  make check-contracts                 - Check G1/G2 plug-in boundaries and connector packaging"
 	@echo "  make lint                            - Check the code standards: ruff (ruff.toml) + scripts/check_code_standards.py"
@@ -57,6 +63,7 @@ help:
 	@echo ""
 
 	@echo "Installation modes: MODE=prod (pip install .), MODE=dev (pip install -e .), MODE=dist"
+	@echo "Options: PYTHON=path/to/python, RUFF=path/to/ruff, FORCE_DEPS=true, EXTRAS=serve (core)"
 	@echo ""
 	@echo "Auto-discovered connectors ($(words $(CONNECTOR_DIRS)) total):"
 	@echo "  Readers ($(words $(READER_DIRS))): $(notdir $(READER_DIRS))"
@@ -64,14 +71,14 @@ help:
 	@echo "  HTTP    ($(words $(HTTP_DIRS))): $(notdir $(HTTP_DIRS))"
 
 check-contracts:
-	@python3 scripts/check_plugin_contract.py
-	@python3 scripts/check_connectors.py
+	@$(PYTHON) scripts/check_plugin_contract.py
+	@$(PYTHON) scripts/check_connectors.py
 
 # The code standards (docs/design/connector-contract.md section 7); blocking. RUFF=path/to/ruff
 RUFF ?= ruff
 lint:
 	$(RUFF) check .
-	python3 scripts/check_code_standards.py --strict
+	$(PYTHON) scripts/check_code_standards.py --strict
 
 # streamwright-spark and streamwright-mcp vendor scripts/check_code_standards.py: their copies must stay identical.
 # COMPANIONS: the folders of their checkouts (one that is missing is skipped).
@@ -93,19 +100,19 @@ install-all: install-core
 
 install-core:
 	@echo "Installing streamwright in $(MODE) mode..."
-	@$(MAKE) -C $(CORE_DIR) install MODE=$(MODE) FORCE_DEPS=$(FORCE_DEPS)
+	@$(MAKE) -C $(CORE_DIR) install MODE=$(MODE) FORCE_DEPS=$(FORCE_DEPS) EXTRAS=$(EXTRAS) PYTHON=$(PYTHON)
 
 install-connectors:
 	@for dir in $(CONNECTOR_DIRS); do \
 		echo "Installing $$dir..."; \
-		$(MAKE) -C $$dir install MODE=$(MODE) FORCE_DEPS=$(FORCE_DEPS) || exit 1; \
+		$(MAKE) -C $$dir install MODE=$(MODE) FORCE_DEPS=$(FORCE_DEPS) PYTHON=$(PYTHON) || exit 1; \
 	done
 	@echo "✅ All $(words $(CONNECTOR_DIRS)) connectors installed!"
 
 install-readers:
 	@for dir in $(READER_DIRS); do \
 		echo "Installing $$dir..."; \
-		$(MAKE) -C $$dir install MODE=$(MODE) FORCE_DEPS=$(FORCE_DEPS) || exit 1; \
+		$(MAKE) -C $$dir install MODE=$(MODE) FORCE_DEPS=$(FORCE_DEPS) PYTHON=$(PYTHON) || exit 1; \
 	done
 	@echo "✅ All $(words $(READER_DIRS)) reader connectors installed!"
 
@@ -122,10 +129,16 @@ install-%:
 	done; \
 	if [ -n "$$dir" ]; then \
 		echo "Installing $$dir in $(MODE) mode..."; \
-		$(MAKE) -C "$$dir" install MODE=$(MODE) FORCE_DEPS=$(FORCE_DEPS); \
+		$(MAKE) -C "$$dir" install MODE=$(MODE) FORCE_DEPS=$(FORCE_DEPS) PYTHON=$(PYTHON); \
 	else \
 		echo "❌ Connector '$*' not found under connectors/"; exit 1; \
 	fi
+
+# The systemd units of streamwright serve and worker, into /etc/systemd/system (as root). PYTHON: the installation's
+# Python (its `streamwright` goes in ExecStart), e.g. /opt/streamwright/venv/bin/python; SYSTEMD_ARGS: e.g. --force
+SYSTEMD_ARGS ?=
+install-systemd:
+	$(PYTHON) -m streamwright.core.cli systemd install $(SYSTEMD_ARGS)
 
 # Build distributions
 build: build-all
@@ -133,7 +146,7 @@ build-all: clean-dist
 	@echo "Building distributions for all packages..."
 	@for dir in $(CORE_DIR) $(CONNECTOR_DIRS); do \
 		echo "Building $$dir..."; \
-		$(MAKE) -C $$dir build || exit 1; \
+		$(MAKE) -C $$dir build PYTHON=$(PYTHON) || exit 1; \
 	done
 	@echo "✅ All distributions built successfully!"
 	@find $(DIST_BASE) -name "*.tar.gz" -o -name "*.whl" 2>/dev/null | sort || echo "No distributions found"
@@ -146,33 +159,37 @@ clean:
 	@for dir in $(CORE_DIR) $(CONNECTOR_DIRS); do \
 		$(MAKE) -C $$dir clean 2>/dev/null || true; \
 	done
-	find . -type d \( -name "__pycache__" -o -name "*.egg-info" -o -name "build" -o -name "dist" -o -name ".pytest_cache" \) -exec rm -rf {} + 2>/dev/null || true
+	find . -type d \( -name "__pycache__" -o -name "*.egg-info" -o -name "build" -o -name "dist" -o -name ".pytest_cache" \
+		-o -name ".ruff_cache" -o -name "spark-warehouse" \) -prune -exec rm -rf {} + 2>/dev/null || true
 	@echo "✅ Build and test artifacts cleaned!"
 
 uninstall:
 	@echo "Uninstalling StreamWright and all connectors..."
-	pip uninstall -y $(ALL_PKGS) 2>/dev/null || true
+	$(PYTHON) -m pip uninstall -y $(ALL_PKGS) 2>/dev/null || true
 	@echo "✅ All packages uninstalled!"
 
 verify:
 	@echo "Verifying core installation..."
-	@$(MAKE) -C $(CORE_DIR) verify
+	@$(MAKE) -C $(CORE_DIR) verify PYTHON=$(PYTHON)
 
 verify-connectors:
 	@for dir in $(CONNECTOR_DIRS); do \
 		echo ""; \
-		$(MAKE) -C $$dir verify; \
+		$(MAKE) -C $$dir verify PYTHON=$(PYTHON); \
 	done
 
 test: lint
-	python -m pytest --import-mode=importlib core/tests connectors/readers -q
+	$(PYTHON) -m pytest --import-mode=importlib core/tests connectors/readers connectors/http -q
 
 test-all: lint
-	python -m pytest --import-mode=importlib core/tests connectors -q
+	$(PYTHON) -m pytest --import-mode=importlib core/tests connectors -q
 
 validate:
-	streamwright validate --strict examples
+	$(PYTHON) -m streamwright.core.cli validate --strict examples
+
+# The gates CI runs (the companion repos are skipped when they are not checked out beside this one)
+check: test check-vendored check-contracts validate
 
 _show-packages:
 	@echo "Installed StreamWright packages:"
-	@pip list | grep -E '^streamwright' || true
+	@$(PYTHON) -m pip list | grep -E '^streamwright' || true

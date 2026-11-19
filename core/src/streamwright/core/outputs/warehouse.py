@@ -26,7 +26,6 @@ import datetime
 import json
 import logging
 import os
-import re
 
 import duckdb
 
@@ -54,9 +53,7 @@ __all__ = ["DuckDBOutput", "DuckLakeOutput"]
 
 
 LOG = logging.getLogger("streamwright.output")
-_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _STATE_TABLE = "_streamwright_state"
-_LEGACY_STATE_TABLE = "_adapt_state"  # the state table before the StreamWright rename; read once, then superseded
 _MISSING_CATALOG = "creating a new DuckLake is explicitly disabled"
 
 
@@ -259,20 +256,16 @@ class _WarehouseOutput(LoadingOutput):
             return None
         try:
             connection.execute("SET TimeZone = 'UTC'")
-            row = None
-            for state_table in (_STATE_TABLE, _LEGACY_STATE_TABLE):
-                try:
-                    row = connection.execute("SELECT state FROM %s WHERE source = $source" % _table_name(
-                        self.schema, state_table), {"source": self.source_name}).fetchone()
-                except duckdb.CatalogException:
-                    continue
-                except Exception as exc:
-                    masked = self._mask(exc)
-                    if masked is exc:
-                        raise
-                    raise masked from None
-                if row:
-                    break
+            try:
+                row = connection.execute("SELECT state FROM %s WHERE source = $source" % _table_name(
+                    self.schema, _STATE_TABLE), {"source": self.source_name}).fetchone()
+            except duckdb.CatalogException:
+                return None
+            except Exception as exc:
+                masked = self._mask(exc)
+                if masked is exc:
+                    raise
+                raise masked from None
             if not row:
                 return None
             return json.loads(row[0]) if isinstance(row[0], str) else row[0]

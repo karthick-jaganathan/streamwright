@@ -19,7 +19,7 @@ description: Amazon Sponsored Products ads (SKU and ASIN product ads).
 # HTTP GET request to list product ads
 requests:
   - name: raw_sp_ads
-    http:
+    operation:
       path: /v2/sp/productAds
       method: GET
 

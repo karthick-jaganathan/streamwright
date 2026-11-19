@@ -34,9 +34,9 @@ from streamwright.core.net.paginators import (
     set_dotted_path,
 )
 from streamwright.core.runtime.components import register, unregister
-from streamwright.core.runtime.testing import MemoryOutput, page_stream
 from streamwright.core.sdk.contract import ConnectorDefinition
 from streamwright.core.sdk.operations import http
+from streamwright.core.sdk.testing import MemoryOutput, page_stream
 
 
 def test_shared_retry_executor_uses_classification_and_retry_after():
@@ -306,7 +306,7 @@ def test_runner_merge_headers_and_secrets_redaction(caplog):
             page_stream(
                 "s",
                 {
-                    "http": {
+                    "operation": {
                         "path": "/data",
                         "headers": {
                             "x-case": "from_request",
@@ -355,7 +355,7 @@ def test_runner_records_path_missing_raises_error():
             page_stream(
                 "s",
                 {
-                    "http": {"path": "/items"},
+                    "operation": {"path": "/items"},
                     "records": {"path": "wrong_key"},
                 },
                 "SELECT * FROM records",
@@ -390,7 +390,7 @@ def test_runner_empty_records_path_overrides_source_default():
             page_stream(
                 "s",
                 {
-                    "http": {"path": "/single_item"},
+                    "operation": {"path": "/single_item"},
                     "records": {},  # empty records overrides source default to mean whole response
                 },
                 "SELECT * FROM records",
@@ -415,10 +415,11 @@ def test_runner_empty_records_path_overrides_source_default():
 def test_runner_http_transport_provider_auth_and_rejects_sdk():
 
 
-    # a declarative HTTP connector: its adapter refuses sessions (core's io.http), the engine runs `http:` requests
+    # a declarative HTTP connector: its adapter (core's HttpSourceAdapter) refuses sessions, the engine runs `http:`
+    # requests
     register(ConnectorDefinition(name="mock_http_conn", title="Mock HTTP", family="advertising",
                                  connection=http.auth_fields(), operations=(http.REQUEST,),
-                                 adapters={"source": "streamwright.core.io.http:HttpSourceAdapter"}))
+                                 adapters={"source": "streamwright.core.sdk.engines.source:HttpSourceAdapter"}))
     try:
         # Valid source with http requests
         source = {
@@ -432,7 +433,7 @@ def test_runner_http_transport_provider_auth_and_rejects_sdk():
             "streams": [
                 page_stream(
                     "s",
-                    {"http": {"path": "/endpoint"}},
+                    {"operation": {"path": "/endpoint"}},
                     "SELECT * FROM records",
                 )
             ],
@@ -461,12 +462,12 @@ def test_runner_http_transport_provider_auth_and_rejects_sdk():
             "streams": [
                 page_stream(
                     "s",
-                    {"sdk": "mock_http_conn", "service": "something", "method": "list"},
+                    {"operation": {"service": "something", "method": "list"}},
                     "SELECT * FROM records",
                 )
             ],
         }
-        with pytest.raises(SourceError, match="mock_http_conn is a REST API connector: use an http request"):
+        with pytest.raises(SourceError, match="mock_http_conn is a REST API connector: its operation is an HTTP "):
             SourceRunner(bad_source, {}, {}).run()
     finally:
         unregister("mock_http_conn")
@@ -644,7 +645,7 @@ def test_runner_does_not_send_credentials_to_a_next_url_on_another_origin():
         "http": {"base_url": "https://api.example.com", "headers": {"X-Key": "{{ secrets.key }}"},
                  "paginator": {"type": "cursor", "next_url_path": "next"}, "records": {"path": "data"}},
         "spec": {"secrets": {"tok": {"type": "string"}, "key": {"type": "string"}}},
-        "streams": [page_stream("s", {"http": {"path": "/items"}}, "SELECT * FROM records")],
+        "streams": [page_stream("s", {"operation": {"path": "/items"}}, "SELECT * FROM records")],
     }
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
         rsps.add(responses.GET, "https://api.example.com/items",
@@ -653,3 +654,22 @@ def test_runner_does_not_send_credentials_to_a_next_url_on_another_origin():
         with pytest.raises(SourceError, match="another origin"):
             SourceRunner(source, {}, {"tok": "TOKEN_X", "key": "HEADER_KEY_X"}, output=MemoryOutput()).run()
         assert [call.request.url for call in rsps.calls] == ["https://api.example.com/items"]
+
+
+def test_runner_renders_a_source_paginator_per_response():
+    source = {
+        "name": "source_paginator", "auth": {"type": "bearer", "token": "tok"},
+        "http": {"base_url": "https://api.example.com", "records": {"path": "data"},
+                 "paginator": {"type": "offset", "offset_param": "offset", "limit_param": "limit",
+                               "page_size": "{{ response.size | default(2) }}"}},
+        "streams": [page_stream("s", {"operation": {"path": "/items"}}, "SELECT * FROM records")],
+    }
+    with responses.RequestsMock() as rsps:
+        rsps.add(responses.GET, "https://api.example.com/items", json={"data": [{"id": 1}, {"id": 2}, {"id": 3}],
+                                                                   "size": 3})
+        rsps.add(responses.GET, "https://api.example.com/items", json={"data": [{"id": 4}], "size": 3})
+        out = MemoryOutput()
+        SourceRunner(source, {}, {}, output=out).run()
+        assert [call.request.url for call in rsps.calls] == ["https://api.example.com/items?offset=0&limit=2",
+                                                             "https://api.example.com/items?offset=3&limit=3"]
+    assert len(out.records) == 4

@@ -48,6 +48,7 @@ from streamwright.core.cli.jobs import (
     add_connector_allowlist,
     add_failed_job_arguments,
     add_fan_out_arguments,
+    add_input_argument,
     add_job_arguments,
     add_job_key_argument,
     add_lock_arguments,
@@ -60,6 +61,7 @@ from streamwright.core.config.inputs import InputError, parse_duration, read_val
 from streamwright.core.jobs.duckdb.engine import JobInvalidError, job_state, redactor, run_job, validate_job
 from streamwright.core.jobs.inputs import read_config_values
 from streamwright.core.jobs.manifest import JobError
+from streamwright.core.jobs.payload import PayloadError, read_payload
 from streamwright.core.jobs.state import StateError
 from streamwright.core.runtime import logs
 from streamwright.core.runtime.logs.lines import fields, iso_time, utc_now
@@ -106,6 +108,13 @@ def _cmd_validate(args):
     _print_issues(report)
     if not report.valid:
         return FAILURE
+    if args.input_source is not None:
+        try:
+            payload = read_payload(args.input_source, report.job)
+        except PayloadError as exc:
+            _err("%s: error [bad-payload] %s" % (args.job, exc))
+            return FAILURE
+        sys.stdout.write("%s: the payload fits spec.input (%d rows)\n" % (args.input_source, len(payload.rows)))
     sys.stdout.write("%s is valid (kind: DuckDBJob)\n" % args.job)
     if args.graph:
         sys.stdout.write(report.plan + "\n")
@@ -127,7 +136,8 @@ def _run_summary(args, result, started_at, failure):
     finished_at = utc_now()
     outputs = [{"name": name, "rows": rows, "files": [location for location in result.locations.get(name, ())
                                                        if location],
-                "already_committed": name in result.skipped}
+                "already_committed": name in result.skipped,
+                **({"rejected": result.rejected[name]} if result.rejected.get(name) else {})}
                for name, rows in sorted(result.outputs.items())] if result is not None else []
     summary = {"status": "ok" if failure is None and result is not None and not result.exit_code else "failed",
                "started_at": iso_time(started_at), "finished_at": iso_time(finished_at),
@@ -164,7 +174,7 @@ def _cmd_run(args):
                          apply_state_migrations=args.apply_state_migrations,
                          failed_job_policy=args.failed_job_policy, max_job_attempts=args.max_job_attempts,
                          allow_lookup_exec=args.allow_lookup_exec, fan_out_concurrency=args.fan_out_concurrency,
-                         fan_out_on_failure=args.fan_out_on_failure,
+                         fan_out_on_failure=args.fan_out_on_failure, input_source=args.input_source,
                          interval=parse_duration(args.interval or "10s").total_seconds())
     except BaseException as exc:
         failure = exc
@@ -300,6 +310,7 @@ def build_parser(prog="streamwright duckdb"):
                               help="check a DuckDBJob manifest offline (no secrets needed)",
                               description=_DESCRIPTIONS["validate"])
     validate.add_argument("--graph", action="store_true", help="also print the plan of a valid job")
+    add_input_argument(validate, "its rows are checked against spec.input too")
     _inputs(validate)
     validate.set_defaults(func=_cmd_validate, parser=validate)
     plan = sub.add_parser("plan", allow_abbrev=False, formatter_class=raw,
@@ -318,6 +329,7 @@ def build_parser(prog="streamwright duckdb"):
                           "line of compact JSON (event run_summary)")
     _inputs(run, secrets=True)
     add_job_key_argument(run, "; needs a persistent runtime.state")
+    add_input_argument(run, "its rows are the batch's `input` table")
     add_apply_migrations_argument(run)
     add_lock_arguments(run)
     add_failed_job_arguments(run)

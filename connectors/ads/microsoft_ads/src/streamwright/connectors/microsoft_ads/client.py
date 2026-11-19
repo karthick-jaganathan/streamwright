@@ -24,7 +24,6 @@ Microsoft asks for).
 
 import contextlib
 import datetime
-import difflib
 import http.client
 import socket
 import urllib.error
@@ -38,7 +37,7 @@ from bingads.authorization import OAuthDesktopMobileAuthCodeGrant, OAuthWebAuthC
 from bingads.exceptions import OAuthTokenRequestException
 from suds import WebFault
 
-from streamwright.core.sdk import ConnectorError, InputError, as_date
+from streamwright.core.sdk import ConnectorError, InputError, as_date, suggest
 from streamwright.core.sdk.contract import ResolvedConnection
 
 __all__ = ["MicrosoftAdsConnection", "connect", "read_pages", "translate_error", "validate_connection"]
@@ -240,13 +239,8 @@ def _resolve_method(client: Any, service: str, method: str) -> Any:
     operations = _operations(client)
     if method not in operations:
         raise ConnectorError("microsoft_ads: %s has no %s operation in %s%s" % (
-            service, method, _sdk_version(), _did_you_mean(method, operations)), retryable=False)
+            service, method, _sdk_version(), suggest(method, operations, style="list")), retryable=False)
     return getattr(client, method)
-
-
-def _did_you_mean(value: str, candidates: list[str]) -> str:
-    matches = difflib.get_close_matches(value, candidates, n=3)
-    return "; did you mean %s?" % ", ".join(matches) if matches else ""
 
 
 def read_pages(connection: MicrosoftAdsConnection, service: str, method: str, arguments: Mapping[str, Any],

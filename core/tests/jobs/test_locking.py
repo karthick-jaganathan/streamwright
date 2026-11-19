@@ -51,13 +51,6 @@ def test_bad_locks_are_rejected(lock, message):
     assert not report.valid and any(message in issue.message for issue in report.issues), report.issues
 
 
-def test_the_old_run_key_is_reported_as_renamed():
-    job = _job({"token": "t"})
-    job["runtime"]["state"]["run_key"] = "daily"
-    messages = [issue.message for issue in validate_job(job).issues]
-    assert any("run_key was renamed job_key" in text for text in messages), messages
-
-
 def test_a_scope_is_text_of_a_bounded_length():
     assert validate_job(_job({"token": "t"}, scope="client:{{ config.client }}")).valid
     assert not validate_job(_job({"token": "t"}, scope="x" * 200)).valid

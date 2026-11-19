@@ -18,8 +18,9 @@
 """A stream's tables: its requests and `transform` steps, and its exports."""
 
 
+from streamwright.core.runtime.text import suggest
 from streamwright.core.validation import vocabulary as spec
-from streamwright.core.validation.checker import ERROR, describe, suggest
+from streamwright.core.validation.checker import ERROR, describe
 from streamwright.core.validation.sections.stream_context import transform_steps
 from streamwright.core.validation.sections.streams import StreamsSection
 from streamwright.core.validation.sections.templates import TEMPLATE

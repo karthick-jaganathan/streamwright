@@ -22,16 +22,18 @@ reference scopes, shared by the checks, the runtime and the JSON Schema.
 
 from types import MappingProxyType
 
+from streamwright.core.sql.quote import IDENTIFIER_PATTERN
+
 # `version` is optional; omitting it means VERSION. A new version is only introduced for a breaking change.
 VERSION = "1"
 SUPPORTED_VERSIONS = ("1", "1.0")
 KIND = "source"
 
-TOP_LEVEL_KEYS = ("version", "kind", "name", "description", "spec", "auth", "http", "export", "streams")
+TOP_LEVEL_KEYS = ("version", "kind", "name", "description", "spec", "auth", "http", "policy", "export", "streams")
 REQUIRED_TOP_LEVEL_KEYS = ("kind", "name", "streams")
 EXTENSION_PREFIX = "x-"  # free-form top-level keys, e.g. to hold YAML anchors
 
-NAME_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]*$"
+NAME_PATTERN = IDENTIFIER_PATTERN
 DURATION_PATTERN = r"^[0-9]+[smhd]$"
 
 # * ------
@@ -40,7 +42,9 @@ DURATION_PATTERN = r"^[0-9]+[smhd]$"
 INPUT_SECTIONS = ("config", "secrets")
 INPUT_TYPES = ("string", "integer", "number", "boolean", "date", "list")
 LIST_ITEM_TYPES = ("string", "integer", "number", "boolean", "date")
-INPUT_KEYS = ("type", "items", "required", "default", "description")
+# enum, pattern, minimum, maximum, max_length: the values an input accepts (a list input: each item)
+INPUT_CONSTRAINTS = ("enum", "pattern", "minimum", "maximum", "max_length")
+INPUT_KEYS = ("type", "items", "required", "default", "description", *INPUT_CONSTRAINTS)
 
 # * ----
 # * auth
@@ -58,6 +62,9 @@ SECRET_KEY_HINTS = ("secret", "token", "password")  # auth keys whose literal va
 # * ----------------------
 # * HTTP, retries and limits
 # * ----------------------
+# The checks read a source translated by config.grammar (its public `operation:` and `policy:` groups flattened):
+# the key sets of `http`, streams and request items below are that shape's. A group's name stays known, for
+# suggestions.
 HTTP_KEYS = ("base_url", "headers", "rate_limit", "retry", "paginator", "records", "params_encoding")
 RATE_LIMIT_KEYS = ("requests", "per")
 # not `on`: YAML 1.1 reads the key `on` as the boolean true
@@ -70,7 +77,7 @@ BACKOFF_TYPES = ("exponential", "constant")
 # a stream reads its own `requests` (each one a table named after it), shapes them with the SQL `steps` of its
 # `transform` and writes the steps its `export` names
 STREAM_KEYS = ("kind", "name", "description", "partitions", "incremental", "requests", "transform", "export",
-               "on_partition_error", "on_error", "retry", "rate_limit", "timeout")
+               "on_partition_error", "on_error", "retry", "rate_limit", "timeout", "policy")
 REQUIRED_STREAM_KEYS = ("name", "requests", "transform", "export")
 REQUEST_COLUMNS = ("record", "partition", "config", "window_start", "window_end", "today")  # of each request's table
 # fail (raise), skip (tolerate and mark the stream partial), warn (tolerate without marking it partial)
@@ -95,10 +102,10 @@ HTTP_REQUEST_KEYS = ("path", "method", "params", "headers", "json", "params_enco
 HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 PARAMS_ENCODING_TYPES = ("plain", "dotted")
 PAGINATOR_IN_LOCATIONS = ("query", "body")
-# per-request values are the operation's `arguments` (sdk requests take no `headers`)
+# a call (`sdk` is its source's auth.provider): per-request values are the operation's `arguments`, no `headers`
 SDK_REQUEST_KEYS = ("sdk", "service", "method", "arguments")
 REQUEST_ITEM_BASE_KEYS = ("name", "paginator", "records", "partitions")
-REQUEST_ITEM_KEYS = (*REQUEST_ITEM_BASE_KEYS, "http", "async_job", *SDK_REQUEST_KEYS)
+REQUEST_ITEM_KEYS = (*REQUEST_ITEM_BASE_KEYS, "operation", "http", "async_job", *SDK_REQUEST_KEYS)
 ASYNC_JOB_KEYS = ("submit", "poll", "download", "results")
 POLL_KEYS = ("method", "arguments", "every", "timeout", "done_when", "fail_when")
 POLL_CONDITION_KEYS = ("path", "equals", "in")
@@ -123,20 +130,3 @@ SCOPES = ("config", "secrets", "partition", "window", "response", "submit", "pol
 WINDOW_ATTRIBUTES = ("start", "end")
 # name -> number of arguments
 FILTERS = MappingProxyType({"default": 1, "join": 1, "date": 1, "int": 0, "lower": 0, "upper": 0})
-
-
-def split_outside_quotes(text, separator):
-    """Splits on `separator` outside single or double quotes; parts are stripped. Shared by checks and runtime."""
-    parts, current, quote = [], "", None
-    for char in text:
-        if quote:
-            quote = None if char == quote else quote
-        elif char in "'\"":
-            quote = char
-        elif char == separator:
-            parts.append(current.strip())
-            current = ""
-            continue
-        current += char
-    parts.append(current.strip())
-    return parts

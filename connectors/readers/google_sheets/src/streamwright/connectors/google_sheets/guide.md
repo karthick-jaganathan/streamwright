@@ -33,14 +33,14 @@ auth:
 ```yaml
 requests:
   - name: raw_sheet
-    sdk: google_sheets
-    service: spreadsheet
-    method: read              # "read" | "get_values" | "list_sheets"
-    arguments:
-      spreadsheet_id: "{{ config.spreadsheet_id }}"
-      sheet: "Sheet1"         # or range: "Sheet1!A1:Z500"
-      header_row: 1           # 1-indexed header row (default: 1; 0 for auto col_1, col_2)
-      batch_size: 1000        # chunk size for streaming into DuckDB
+    operation:
+      service: spreadsheet
+      method: read              # "read" | "get_values" | "list_sheets"
+      arguments:
+        spreadsheet_id: "{{ config.spreadsheet_id }}"
+        sheet: "Sheet1"         # or range: "Sheet1!A1:Z500"
+        header_row: 1           # 1-indexed header row (default: 1; 0 for auto col_1, col_2)
+        batch_size: 1000        # chunk size for streaming into DuckDB
 
 transform:
   mode: page
@@ -78,12 +78,13 @@ connections:
 steps:
   - name: quarterly_targets
     connection: reporting_sheets
-    service: spreadsheet
-    method: read
-    arguments:
-      sheet: "Q3 Targets"
-      header_row: 1
-      value_render_option: FORMATTED_VALUE
+    operation:
+      service: spreadsheet
+      method: read
+      arguments:
+        sheet: "Q3 Targets"
+        header_row: 1
+        value_render_option: FORMATTED_VALUE
     sql: "SELECT department, region, CAST(target_amount AS DOUBLE) AS target FROM input WHERE department IS NOT NULL"
 ```
 

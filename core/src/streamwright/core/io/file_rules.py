@@ -29,8 +29,8 @@ from streamwright.core.io.file_formats import option_problems, regex_problem
 from streamwright.core.jobs import naming
 from streamwright.core.runtime.contract import EngineCapabilities, OperationKind
 
-__all__ = ["DUCKDB_CAPABILITIES", "DUCKDB_WRITE_MODES", "ENGINE_CAPABILITIES", "SOURCE_CAPABILITIES", "check_read",
-           "check_write"]
+__all__ = ["DUCKDB_WRITE_MODES", "FILE_DUCKDB_CAPABILITIES", "FILE_ENGINE_CAPABILITIES", "FILE_SOURCE_CAPABILITIES",
+           "check_read", "check_write"]
 
 READ_NAME: Final = "object.read"  # the catalog's names (streamwright.core.sdk.operations.files)
 WRITE_NAME: Final = "object.write"
@@ -78,7 +78,7 @@ def check_write(arguments: Mapping[str, Any]) -> list[str]:
     return problems
 
 
-SOURCE_CAPABILITIES: Final = EngineCapabilities(
+FILE_SOURCE_CAPABILITIES: Final = EngineCapabilities(
     engine="source",
     operation_kinds=frozenset({OperationKind.READ}),
     arguments=MappingProxyType({
@@ -87,7 +87,7 @@ SOURCE_CAPABILITIES: Final = EngineCapabilities(
     checks=MappingProxyType({READ_NAME: check_read}),
 )
 
-DUCKDB_CAPABILITIES: Final = EngineCapabilities(
+FILE_DUCKDB_CAPABILITIES: Final = EngineCapabilities(
     engine="duckdb",
     operation_kinds=frozenset({OperationKind.READ, OperationKind.WRITE}),
     arguments=MappingProxyType({
@@ -98,4 +98,4 @@ DUCKDB_CAPABILITIES: Final = EngineCapabilities(
     checks=MappingProxyType({READ_NAME: check_read, WRITE_NAME: check_write}),
 )
 
-ENGINE_CAPABILITIES: Final = (SOURCE_CAPABILITIES, DUCKDB_CAPABILITIES)
+FILE_ENGINE_CAPABILITIES: Final = (FILE_SOURCE_CAPABILITIES, FILE_DUCKDB_CAPABILITIES)

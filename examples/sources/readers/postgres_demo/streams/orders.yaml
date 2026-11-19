@@ -23,17 +23,17 @@ incremental:
   window: 1d
 requests:
   - name: raw_orders
-    sdk: postgres
-    service: database
-    method: query
-    arguments:
-      query: |
-        SELECT id, customer_id, status, total::VARCHAR AS total, currency, updated_at
-        FROM public.orders
-        WHERE updated_at >= $since AND updated_at < $until + INTERVAL 1 DAY
-      params:
-        since: "{{ window.start }}"
-        until: "{{ window.end }}"
+    operation:
+      service: database
+      method: query
+      arguments:
+        query: |
+          SELECT id, customer_id, status, total::VARCHAR AS total, currency, updated_at
+          FROM public.orders
+          WHERE updated_at >= $since AND updated_at < $until + INTERVAL 1 DAY
+        params:
+          since: "{{ window.start }}"
+          until: "{{ window.end }}"
 transform:
   mode: page
   steps:

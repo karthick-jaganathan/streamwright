@@ -22,21 +22,22 @@ incremental:
   start: "{{ config.start_date }}"
   window: 7d
   lookback: 28d                    # attribution windows restate results for up to 28 days
-retry: {max_attempts: 5, max_delay: 5m}   # throttling can last minutes
+policy:
+  retry: {max_attempts: 5, max_delay: 5m}   # throttling can last minutes
 requests:
   - name: raw_campaign_insights
-    sdk: meta_ads
-    service: AdAccount
-    method: get_insights           # an edge: paged by the connector
-    arguments:
-      id: "act_{{ partition.account_id }}"
-      fields: [account_id, campaign_id, campaign_name, date_start, impressions, clicks, spend]
-      action_report_time: conversion   # an undeclared (vendor) Graph API argument, forwarded verbatim (contract §6a)
-      params:
-        level: campaign
-        time_increment: 1
-        time_range: {since: "{{ window.start }}", until: "{{ window.end }}"}
-        limit: 500
+    operation:
+      service: AdAccount
+      method: get_insights           # an edge: paged by the connector
+      arguments:
+        id: "act_{{ partition.account_id }}"
+        fields: [account_id, campaign_id, campaign_name, date_start, impressions, clicks, spend]
+        action_report_time: conversion   # an undeclared (vendor) Graph API argument, forwarded verbatim (contract §6a)
+        params:
+          level: campaign
+          time_increment: 1
+          time_range: {since: "{{ window.start }}", until: "{{ window.end }}"}
+          limit: 500
 transform:
   mode: page
   steps:

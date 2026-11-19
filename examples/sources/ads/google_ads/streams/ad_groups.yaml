@@ -19,19 +19,19 @@ partitions:
   - {name: customer_id, values: "{{ config.customer_ids }}"}
 requests:
   - name: raw_ad_groups
-    sdk: google_ads
-    service: GoogleAdsService
-    method: search_stream
-    arguments:
-      customer_id: "{{ partition.customer_id }}"
-      query:
-        gaql:
-          select: [customer.id, campaign.id, ad_group.id, ad_group.name, ad_group.status, ad_group.type,
-                   ad_group.cpc_bid_micros]
-          from: ad_group
-          where:
-            - {field: ad_group.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
-            - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ partition.customer_id }}"
+        query:
+          gaql:
+            select: [customer.id, campaign.id, ad_group.id, ad_group.name, ad_group.status, ad_group.type,
+                     ad_group.cpc_bid_micros]
+            from: ad_group
+            where:
+              - {field: ad_group.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
+              - {field: campaign.status, op: IN, type: enum, value: [ENABLED, PAUSED]}
 transform:
   mode: page
   steps:

@@ -26,9 +26,9 @@ CONNECTOR = ConnectorDefinition(
     name="linkedin_ads",
     title="LinkedIn Ads",
     family="advertising",
-    summary="LinkedIn Marketing campaigns, creatives and analytics, declared in the source's `http:` block",
+    summary="LinkedIn Marketing campaigns, creatives and analytics: HTTP reads and writes (`operation:` requests)",
     connection=http.auth_fields(("bearer",)),
-    operations=(http.REQUEST,),
-    adapters={"source": "streamwright.core.io.http:HttpSourceAdapter"},
+    operations=(http.REQUEST, http.SEND),
+    adapters={"source": "streamwright.core.sdk.engines.source:HttpSourceAdapter"},
     loggers=("streamwright.network", "urllib3"),
 )

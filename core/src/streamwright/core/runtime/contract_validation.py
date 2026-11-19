@@ -29,7 +29,6 @@ from collections.abc import Mapping
 from typing import Any
 
 from streamwright.core.config.inputs import InputError, parse_duration
-from streamwright.core.engine.queries import BuiltQuery
 from streamwright.core.runtime.contract import (
     ConnectorDefinition,
     EngineCapabilities,
@@ -41,9 +40,10 @@ from streamwright.core.runtime.contract import (
     types_of,
 )
 from streamwright.core.runtime.contract_terms import REFERENCE, SECRET_MENTION, matches_secret_pattern
+from streamwright.core.runtime.issues import Issue
+from streamwright.core.runtime.queries import BuiltQuery
 from streamwright.core.runtime.templates import render
-from streamwright.core.validation.checker import suggest
-from streamwright.core.validation.issues import Issue
+from streamwright.core.runtime.text import suggest
 
 __all__ = ["check_arguments", "check_connection", "resolve_arguments", "resolve_connection", "resolve_values",
            "vendor_arguments"]

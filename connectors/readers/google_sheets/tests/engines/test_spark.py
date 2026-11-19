@@ -63,6 +63,13 @@ def test_the_driver_fetches_once_and_pins_the_records_for_replay():
 
 
 @responses.activate
+def test_vendor_params_reach_the_values_get_request_on_the_driver():
+    responses.add(responses.GET, VALUES, json={"values": [["a"], ["1"]]})
+    GoogleSheetsSparkAdapter().read(context({}), READ, dict(ARGUMENTS, majorDimension="COLUMNS"))
+    assert "majorDimension=COLUMNS" in responses.calls[-1].request.url
+
+
+@responses.activate
 def test_an_empty_sheet_is_an_empty_frame():
     responses.add(responses.GET, VALUES, json={"values": []})
     spark_context = context({})

@@ -57,13 +57,18 @@ _DAYS = MappingProxyType({"type": "string", "pattern": r"^[0-9]+d$", "descriptio
 _WINDOW = MappingProxyType({"type": "string", "pattern": r"^0*[1-9][0-9]*d$",
                             "description": "whole days, at least 1d, e.g. 1d, 7d"})
 _NAME = MappingProxyType({"type": "string", "pattern": NAME_PATTERN})
+_REQUEST_KINDS = ("operation", "async_job")        # a request item has exactly one
 _FROM = MappingProxyType(dict(_NAME, description="An earlier request of this stream (fields are dotted paths in its "
                                                  "records) or a step of this stream (fields are its columns)."))
 _BATCH = MappingProxyType({"type": "integer", "minimum": 1, "description": "One request per list of up to N distinct "
                                                                           "values: the partition's name holds the list "
                                                                           "(e.g. for GAQL `IN`)."})
 _START_DATE = MappingProxyType({"type": "string",
-                                "pattern": r"^(?:today|-?[0-9]+d|[0-9]{4}-[0-9]{2}-[0-9]{2}|\{\{.*\}\})$"})
+                                "pattern": r"^(?:today|-?[0-9]+d|[0-9]{4}-[0-9]{2}-[0-9]{2}|.*\{\{.*\}\}.*)$"})
+_VALUES = MappingProxyType({"anyOf": [{"type": "array"}, {"type": "string", "pattern": r"\{\{"}],
+                            "description": "A list, or a reference to one such as \"{{ config.ids }}\"."})
+_TIMEOUT = MappingProxyType({"anyOf": [{"type": "number", "exclusiveMinimum": 0}, _DURATION],
+                             "description": "Seconds (a positive number) or a duration such as 30s."})
 _INPUT_DEFAULT_TYPES = MappingProxyType({
     "string": {"type": ["string", "null"]}, "integer": {"type": ["integer", "null"]},
     "number": {"type": ["number", "null"]}, "boolean": {"type": ["boolean", "null"]},
@@ -111,6 +116,11 @@ def _definitions():
             "required": {"type": "boolean", "description": "Default true."},
             "default": {"description": "Dates accept offsets from today, e.g. -30d."},
             "description": _STR,
+            "enum": {"type": "array", "minItems": 1, "description": "The values it accepts (a list: each item)."},
+            "pattern": {"type": "string", "description": "A regular expression a text value matches in full."},
+            "minimum": {"type": "number"},
+            "maximum": {"type": "number"},
+            "max_length": {"type": "integer", "minimum": 1, "description": "The longest text value."},
         }, required=("type",)), allOf=[
             {"if": {"properties": {"type": {"const": name}}, "required": ["type"]},
              "then": {"properties": {"default": schema},
@@ -131,25 +141,32 @@ def _definitions():
             "path": _STR, "method": _enum(HTTP_METHODS), "params": {"type": "object"},
             "headers": {"type": "object", "additionalProperties": _STR}, "json": {},
             "params_encoding": _enum(PARAMS_ENCODING_TYPES),
+            "records": _ref("records"), "paginator": _ref("paginator"),
         }, required=("path",)), allOf=[{
             "if": {"properties": {"params_encoding": {"const": "plain"}}, "required": ["params_encoding"]},
             "then": {"properties": {"params": {"additionalProperties": {
                 "not": {"type": ["object", "array"]}}}}},
         }]),
-        "sdk_request": _obj({"sdk": _STR, "service": _STR, "method": _STR, "arguments": {"type": "object"}},
-                            required=("sdk", "method")),
+        "call": _obj({"service": _STR, "method": _STR, "arguments": {"type": "object"}, "records": _ref("records")},
+                     required=("method",), description="A call of the auth.provider connector's client."),
+        "operation": {"oneOf": [_ref("call"), _ref("http_request")],
+                      "description": "What the request invokes on the auth.provider connector, which decides the kind: "
+                                     "a call (service, method, arguments) of an SDK connector, or an HTTP request "
+                                     "(path, method, params, ...)."},
+        "call_request": _obj({"operation": _ref("call")}, required=("operation",)),
         "poll_condition": _obj({"path": _STR, "equals": {}, "in": {"type": "array"}}, required=("path",)),
         "async_job": {
             "type": "object",
             "properties": {
-                "submit": _ref("sdk_request"),
+                "submit": _ref("call_request"),
                 "poll": _obj({
-                    "method": _STR, "arguments": {"type": "object"}, "every": _DURATION, "timeout": _DURATION,
+                    "operation": _obj({"method": _STR, "arguments": {"type": "object"}}, required=("method",)),
+                    "every": _DURATION, "timeout": _DURATION,
                     "done_when": _ref("poll_condition"), "fail_when": _ref("poll_condition"),
-                }, required=("method", "every", "timeout", "done_when")),
+                }, required=("operation", "every", "timeout", "done_when")),
                 "download": _obj({"url": _STR, "format": _enum(DOWNLOAD_FORMATS), "compression": _enum(COMPRESSIONS)},
                                  required=("url", "format")),
-                "results": _ref("sdk_request"),
+                "results": _ref("call_request"),
             },
             "required": ["submit", "poll"],
             "oneOf": [{"required": ["download"]}, {"required": ["results"]}],
@@ -157,26 +174,16 @@ def _definitions():
         },
         "request_item": {"type": "object", "properties": {
             "name": _NAME,
-            "http": _ref("http_request"),
-            "sdk": _STR,
-            "service": _STR,
-            "method": _STR,
-            "arguments": {"type": "object"},
+            "operation": _ref("operation"),
             "async_job": _ref("async_job"),
-            "paginator": _ref("paginator"),
-            "records": _ref("records"),
             "partitions": {"type": "array", "minItems": 1, "items": _ref("request_partition")},
+            "records": dict(_ref("records"), description="Where an async job's downloaded json holds its records."),
             _MERGE_KEY: {},
-        }, "required": ["name"], "additionalProperties": False, "oneOf": [
-            {"required": ["http"], "not": {"anyOf": [
-                {"required": ["sdk"]}, {"required": ["service"]}, {"required": ["method"]},
-                {"required": ["arguments"]}, {"required": ["async_job"]},
-            ]}},
-            {"required": ["sdk", "method"], "not": {"anyOf": [{"required": ["http"]}, {"required": ["async_job"]}]}},
-            {"required": ["async_job"], "not": {"anyOf": [
-                {"required": ["http"]}, {"required": ["sdk"]}, {"required": ["service"]},
-                {"required": ["method"]}, {"required": ["arguments"]},
-            ]}},
+        }, "required": ["name"], "additionalProperties": False,
+            "dependencies": {"records": {"required": ["async_job"],
+                                         "properties": {"async_job": {"required": ["download"]}}}}, "oneOf": [
+            {"required": [kind], "not": {"anyOf": [{"required": [other]} for other in _REQUEST_KINDS if other != kind]}}
+            for kind in _REQUEST_KINDS
         ]},
         "paginator": _dispatch({
             "none": _obj({"type": {}}),
@@ -202,14 +209,14 @@ def _definitions():
             "link_header": _obj({"type": {}}),
         }),
         "partition": {"oneOf": [
-            _obj({"name": _NAME, "values": {"type": ["array", "string"]}}, required=PARTITION_VALUES_KEYS),
+            _obj({"name": _NAME, "values": _VALUES}, required=PARTITION_VALUES_KEYS),
             _obj({"name": _NAME, "from_stream": _STR, "field": _STR}, required=PARTITION_STREAM_KEYS),
             _obj({"from_stream": _STR, "fields": {"type": "array", "items": _NAME, "minItems": 1, "uniqueItems": True}},
                  required=PARTITION_RECORD_KEYS, description="One partition per distinct combination of these "
                                                              "fields in the parent's records, named after them."),
         ]},
         "request_partition": {"oneOf": [
-            _obj({"name": _NAME, "values": {"type": ["array", "string"]}, BATCH_SIZE: _BATCH},
+            _obj({"name": _NAME, "values": _VALUES, BATCH_SIZE: _BATCH},
                  required=REQUEST_PARTITION_VALUES_KEYS),
             _obj({"name": _NAME, "from": _FROM, "field": _STR, BATCH_SIZE: _BATCH},
                  required=REQUEST_PARTITION_SOURCE_KEYS),
@@ -261,8 +268,8 @@ def _definitions():
                        "description": "The stream's outputs: each export is an output table with the rows of one "
                                       "step."},
             "on_partition_error": _enum(ERROR_POLICIES),
-            "retry": _ref("retry"),
-            "rate_limit": _ref("rate_limit"),
+            "policy": _obj({"retry": _ref("retry"), "rate_limit": _ref("rate_limit"), "timeout": _TIMEOUT,
+                            "on_error": _enum(ERROR_POLICIES)}),
         }, required=REQUIRED_STREAM_KEYS),
     }
     auth_fields = {"token_url": _STR, "client_id": _STR, "client_secret": _STR, "refresh_token": _STR,
@@ -310,12 +317,12 @@ def json_schema():
             "http": _obj({
                 "base_url": _STR,
                 "headers": {"type": "object", "additionalProperties": _STR},
-                "rate_limit": _ref("rate_limit"),
-                "retry": _ref("retry"),
                 "paginator": _ref("paginator"),
                 "records": _ref("records"),
                 "params_encoding": _enum(PARAMS_ENCODING_TYPES),
             }),
+            "policy": _obj({"retry": _ref("retry"), "rate_limit": _ref("rate_limit")},
+                           description="Defaults of every request of the source (a stream's `policy` replaces them)."),
             "export": _obj({
                 "file_name": {"type": "string", "minLength": 1,
                               "description": "The default file-name template of every export of the source (an "

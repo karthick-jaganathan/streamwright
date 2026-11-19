@@ -18,12 +18,12 @@ description: Delta Lake table scan for event stream.
 
 requests:
   - name: raw_events
-    service: table
-    method: read
-    sdk: deltalake
-    arguments:
-      path: "{{ config.table_path }}"
-      columns: [event_id, user_id, event_name, event_time, properties]
+    operation:
+      service: table
+      method: read
+      arguments:
+        path: "{{ config.table_path }}"
+        columns: [event_id, user_id, event_name, event_time, properties]
 
 transform:
   mode: page

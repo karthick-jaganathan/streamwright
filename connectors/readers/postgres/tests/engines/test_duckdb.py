@@ -42,6 +42,29 @@ class TestDuckDBAdapter(DuckDBAdapterContract):
         self.read_arguments = MappingProxyType({"query": "SELECT id FROM %s.orders WHERE id = 2" % schema})
 
 
+def test_the_attached_database_has_the_servers_statement_timeout():
+    class Recorder:
+        def __init__(self):
+            self.secrets = []
+
+        def load_extension(self, name):
+            pass
+
+        def create_secret(self, name, kind, options, scope=None):
+            self.secrets.append(dict(options))
+            return name
+
+        def is_writable(self, name):
+            return False
+
+        def attach(self, name, path, kind=None, secret=None, read_only=False):
+            pass
+    session = Recorder()
+    connection = {"host": "db", "database": "shop", "user": "u", "statement_timeout": "2s"}
+    CONNECTOR.load_adapter("duckdb").configure(session, "pg", connection)
+    assert session.secrets[0]["URI"].endswith("&options=-c%20statement_timeout%3D2000")
+
+
 def _job(schema, connection, outputs, state=True):
     job = {"kind": "DuckDBJob", "name": "pg_job", "spec": {"secrets": {"pg_password": {"type": "string"}}},
            "connections": {"pg": dict(connection, provider="postgres", password="{{ secrets.pg_password }}")},
@@ -51,7 +74,7 @@ def _job(schema, connection, outputs, state=True):
                      {"name": "changes", "sql": "SELECT 1 AS id, 'new' AS status UNION ALL SELECT 3, 'added'"}],
            "outputs": outputs}
     if state:
-        job["runtime"] = {"state": {"connection": "pg", "schema": "%s_state" % schema}}
+        job["runtime"] = {"state": {"connection": "pg", "schema": "%s_state" % schema, "apply_migrations": True}}
     return job
 
 
@@ -72,7 +95,7 @@ def test_merge_append_and_overwrite_through_the_attached_database_with_state_in_
     assert _rows(schema) == [(1, "new"), (2, "paid"), (3, "added")]
     with psycopg.connect(DSN) as conn:
         assert conn.execute('SELECT count(*) FROM "%s".copied' % schema).fetchone() == (3,)
-        assert conn.execute('SELECT count(*) FROM "%s_state".batches' % schema).fetchone() == (1,)
+        assert conn.execute('SELECT count(*) FROM "%s_state".sw_jobs' % schema).fetchone() == (1,)
     append = dict(merge, name="again", mode="append", table="%s.copied" % schema, step="changes")
     del append["primary_key"]
     assert run_job(_job(schema, connection, [append]), secrets=secrets).exit_code == 0

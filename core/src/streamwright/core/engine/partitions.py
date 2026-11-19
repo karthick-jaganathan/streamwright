@@ -25,7 +25,7 @@ from streamwright.core.config.inputs import as_date, parse_duration
 from streamwright.core.engine import rules, sql
 from streamwright.core.engine.errors import SourceError
 from streamwright.core.engine.responses import lookup, same_value
-from streamwright.core.engine.values import Distinct, partition_key, partition_value
+from streamwright.core.engine.values import Distinct, partition_key
 from streamwright.core.runtime.templates import render, to_text
 
 
@@ -167,7 +167,7 @@ def _request_source(item, stream_names, request_names, step_names, sandbox):
             return partition_key(sql.as_json(partition))
     else:
         for row in sandbox.distinct_rows(step_names.get(source, item["from"]), fields):
-            values = tuple(partition_value(value) for value in row)
+            values = tuple(row)
             if all(value is not None for value in values):
                 index[tuple(to_text(values[position]) for position in shared)].add(
                     tuple(values[position] for position in own))

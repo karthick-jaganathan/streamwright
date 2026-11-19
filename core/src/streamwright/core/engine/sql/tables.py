@@ -19,11 +19,11 @@
 
 import datetime
 import json
-import re
 from types import MappingProxyType
 
 from streamwright.core.engine.sql.types import _schema
 from streamwright.core.runtime.templates import to_json
+from streamwright.core.sql.quote import IDENTIFIER as _NAME
 
 COLUMNS = (("record", "JSON"), ("partition", "JSON"), ("config", "JSON"), ("window_start", "DATE"),
            ("window_end", "DATE"), ("today", "DATE"))
@@ -44,7 +44,6 @@ PARAMETER_TYPES = MappingProxyType({"string": "VARCHAR", "integer": "BIGINT", "n
 # the values plain casts are compiled with (a NULL folds into an untyped constant): their types are the values'
 _SAMPLES = MappingProxyType({"VARCHAR": "x", "BIGINT": 1, "DOUBLE": 1.0, "BOOLEAN": True,
                              "DATE": datetime.date(2000, 1, 1)})
-_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class SqlError(Exception):

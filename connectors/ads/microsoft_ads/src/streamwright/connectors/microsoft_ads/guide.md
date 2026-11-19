@@ -64,15 +64,15 @@ partitions:
   - {name: account_id, values: "{{ config.account_ids }}"}
 requests:
   - name: raw_campaigns
-    sdk: microsoft_ads
-    service: CampaignManagementService
-    method: GetCampaignsByAccountId
-    arguments:
-      request:                         # the fields of the SOAP request
-        AccountId: "{{ partition.account_id }}"
-        CampaignType: [Search, Shopping, PerformanceMax]   # without it, only Search
-      # account_id / customer_id: the SOAP header's account and customer (defaults: the request's, the connection's)
-    records: {path: Campaign}          # one record per campaign in the response
+    operation:
+      service: CampaignManagementService
+      method: GetCampaignsByAccountId
+      arguments:
+        request:                         # the fields of the SOAP request
+          AccountId: "{{ partition.account_id }}"
+          CampaignType: [Search, Shopping, PerformanceMax]   # without it, only Search
+        # account_id / customer_id: the SOAP header's account and customer (defaults: the request's, the connection's)
+      records: {path: Campaign}          # one record per campaign in the response
   # Reports: ReportingService.SubmitGenerateReport with a ReportRequest (the connector polls and downloads it)
 
 transform:

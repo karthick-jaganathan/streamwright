@@ -15,12 +15,13 @@
 # **************************************************************************/
 
 # Ad accounts available to the authenticated advertiser.
-retry: {max_attempts: 3, max_delay: 2m}
+policy:
+  retry: {max_attempts: 3, max_delay: 2m}
 
 # HTTP request to list ad accounts (inherits base_url, paginator, records from source.yaml)
 requests:
   - name: raw_ad_accounts
-    http:
+    operation:
       path: /v1/ad_accounts
       method: GET
       params:

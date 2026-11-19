@@ -166,8 +166,6 @@ def _token_pattern(name):
 def check_state_lock(state):
     """Problems of runtime.state's scope and lock, as (path below runtime.state, message)."""
     found = []
-    if "run_key" in state:
-        found.append((("run_key",), "run_key was renamed job_key"))
     if "max_job_attempts" in state and (state.get("failed_job_policy") or DEFAULT_FAILED_JOB_POLICY) != "retry":
         found.append((("max_job_attempts",), "max_job_attempts needs failed_job_policy: retry (the policy is %s)"
                       % (state.get("failed_job_policy") or DEFAULT_FAILED_JOB_POLICY)))

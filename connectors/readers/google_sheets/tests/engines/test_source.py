@@ -32,6 +32,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", 
 EXAMPLE = os.path.join(REPO_ROOT, "examples", "sources", "readers", "google_sheets_demo")
 BASE = client.SHEETS_API_BASE
 ROWS = (("campaign_id", "owner"), ("c1", "ada"), ("c2", "lin"))
+BUDGET_ROWS = (("campaign_id", "campaign_name", "month", "target_budget", "owner"),   # the example's sheet
+               ("c1", "Brand", "2026-11", "1000", "ada"), ("c2", "Search", "2026-11", "2500", "lin"))
 
 
 def serve_budgets(status=200, **kwargs):
@@ -55,7 +57,7 @@ class TestSourceAdapter(SourceAdapterContract):
 
 @responses.activate
 def test_the_example_runs_and_the_key_never_reaches_the_url():
-    serve_budgets()
+    serve_budgets(json={"values": BUDGET_ROWS})
     responses.add(responses.GET, "%s/sheet-1?fields=sheets.properties" % BASE, json={"sheets": []})
     source = load_source(EXAMPLE)
     source["auth"] = {"provider": "google_sheets", "api_key": "{{ secrets.gcp_service_account_json }}",

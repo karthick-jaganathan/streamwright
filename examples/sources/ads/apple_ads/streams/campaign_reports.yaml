@@ -19,9 +19,7 @@ description: Apple Ads campaign reporting analytics (impressions, taps, installs
 # HTTP POST report query with daily time range (records path overrides default to result.rows)
 requests:
   - name: raw_campaign_reports
-    records:
-      path: result.rows
-    http:
+    operation:
       path: /v1/reports/apps/campaigns/query
       method: POST
       json:
@@ -32,6 +30,8 @@ requests:
           startTime: "2026-01-01"
           endTime: "2026-01-07"
           granularity: DAILY
+      records:
+        path: result.rows
 
 # Transform step: unpacks campaign metrics and spend amounts
 transform:

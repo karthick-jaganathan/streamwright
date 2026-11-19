@@ -1,0 +1,24 @@
+# StreamWright serve: the REST API (installed by `streamwright systemd install`)
+[Unit]
+Description=StreamWright serve (REST API)
+Documentation=https://streamwright.web.app/docs/jobs/serve
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=streamwright
+Group=streamwright
+WorkingDirectory=@CONFIG_DIR@
+EnvironmentFile=@CONFIG_DIR@/common.env
+ExecStart=@STREAMWRIGHT@ serve @CONFIG_DIR@/serve.yaml --log-format json
+Restart=on-failure
+RestartSec=5
+# /var/lib/streamwright: the user's home (DuckDB keeps its extensions in ~/.duckdb), a local queue or job state
+StateDirectory=streamwright
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

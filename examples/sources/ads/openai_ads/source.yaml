@@ -44,4 +44,5 @@ http:
   # Default records path: extracts record list from the {"data": [...]} response envelope
   records: {path: data}
   # Automatic retries for rate limits (429) and server errors with exponential backoff
+policy:
   retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential, max_delay: 2m}

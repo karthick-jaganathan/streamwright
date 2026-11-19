@@ -16,9 +16,12 @@
 # **************************************************************************/
 
 """
-The SQL dialects the bookkeeping store runs on. A dialect is data: types, the database clock, parameter style,
-locking suffixes and how a table is named (a dedicated schema where the database has schemas, a `streamwright_`
-prefix on SQLite). The store never branches on a dialect's name.
+The SQL dialects the bookkeeping store runs on. A dialect is mostly data: types, the database clock, parameter style,
+locking suffixes and its namespace (`namespace()`: a dedicated schema where the database has schemas, a `<schema>_`
+prefix on SQLite). The store and the migration runner branch on a dialect's name in a few places only: SQLite keeps
+the sw_* tables unprefixed (its `<schema>_` prefix, `streamwright_` by default, named only the tables of the store
+before sw_*, which the first migration imports), DuckDB selects its `catalog`, and the DDL is compiled per dialect
+name (streamwright.core.jobs.state.migrations).
 """
 
 import datetime

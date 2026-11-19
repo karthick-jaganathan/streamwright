@@ -46,7 +46,7 @@ __all__ = ["RESERVED", "NamingError", "Template", "parse_template", "plan_names"
 RESERVED = frozenset(["now", "today", "batch_ts", "batch_id", "seq"])
 _TIME_SOURCES = frozenset(["now", "today", "batch_ts"])
 _PLACEHOLDER = re.compile(r"\{([^{}:]*)(?::([^{}]*))?\}")
-_REF = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)((?:[+-][0-9]{1,6}[smhdw])*)$")
+_REF = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)((?:[+-][0-9]{1,6}[smhdw])*)$")   # "a.b": one column
 _OFFSET = re.compile(r"([+-])([0-9]{1,6})([smhdw])")
 _OFFSET_SECONDS = MappingProxyType({"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800})
 _LITERAL = re.compile(r"^[A-Za-z0-9._=,@+\-]*$")

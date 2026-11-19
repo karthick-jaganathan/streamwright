@@ -19,7 +19,7 @@ description: Amazon Sponsored Products ad groups.
 # HTTP GET request to list Sponsored Products ad groups
 requests:
   - name: raw_sp_ad_groups
-    http:
+    operation:
       path: /v2/sp/adGroups
       method: GET
 

@@ -17,12 +17,14 @@
 
 """The files connector on the `duckdb` engine (kind: DuckDBJob): local files; roots are relative to the job's folder."""
 
+import glob
 import os
 from collections.abc import Mapping
 from functools import partial
 from typing import Any
 
 from streamwright.core.io import files
+from streamwright.core.io.local import is_local_glob
 from streamwright.core.sdk.contract import Operation, ResolvedConnection
 from streamwright.core.sdk.engines.duckdb import AdapterError, DuckDBSession, ReadContext, WriteContext, WriteReceipt
 
@@ -34,16 +36,25 @@ def _locate(context: ReadContext | WriteContext):
     locate = partial(files.locate_local, context.session, roots)
     canonical_roots = [os.path.realpath(context.session.local_path(root)) for root in roots]
 
-    def confined(path):
-        location = locate(path)  # retain the existing lexical checks and error messages
-        resolved = os.path.realpath(location)
+    def inside(found: str) -> bool:
+        resolved = os.path.realpath(found)
         for root in canonical_roots:
             try:
                 if os.path.commonpath((resolved, root)) == root:
-                    return location
+                    return True
             except ValueError:  # paths on different volumes
                 continue
-        raise AdapterError("path %r resolves outside the connection's roots (%s)" % (path, ", ".join(roots)))
+        return False
+
+    def confined(path):
+        location = locate(path)  # retain the existing lexical checks and error messages
+        # a glob is checked file by file as DuckDB expands it (hidden entries too): a link it passes may lead out
+        matches = glob.glob(location, recursive=True, include_hidden=True) if is_local_glob(location) else []
+        outside = next((found for found in [location, *matches] if not inside(found)), None)
+        if outside is not None:
+            raise AdapterError("path %r resolves outside the connection's roots (%s)%s" % (
+                path, ", ".join(roots), "" if outside == location else ": %s" % outside))
+        return location
 
     return confined
 

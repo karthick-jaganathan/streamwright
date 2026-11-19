@@ -23,14 +23,15 @@ connector built on streamwright.core.sdk. Needs pytest.
   arguments; SourceAdapterContract, DuckDBAdapterContract: the engine adapters (streamwright.core.sdk.testing.contract).
   A connector's test module subclasses a suite and sets its class attributes (pytest collects the `Test*` subclass).
 
-Helpers for connector tests: FakeApi, MemoryOutput, FakeClock, page_stream, SourceRunner, SourceError, load_source,
-render, resolve_inputs, RunMetrics, validate_text, registered(), run_cli(), and the DuckDB-job entry points of
-the DuckDBJob engine (run_job, JobInvalidError).
+Helpers for connector tests: FakeApi, MemoryOutput, FakeClock, page_stream, SourceRunner, SourceError, load_source
+(the engine's shape, to run), read_source (as written, to edit and write back), render, resolve_inputs, RunMetrics,
+validate_text, registered(), run_cli(), and the DuckDB-job entry points of the DuckDBJob engine (run_job,
+JobInvalidError).
 """
 
 from streamwright.core import cli
 from streamwright.core.config.inputs import resolve_inputs
-from streamwright.core.config.loader import load_source
+from streamwright.core.config.loader import load_source, read_source
 from streamwright.core.engine.runner import SourceError, SourceRunner
 from streamwright.core.jobs import OutputSpec, check_output
 from streamwright.core.jobs.check import check_job
@@ -41,8 +42,8 @@ from streamwright.core.outputs.output import open_output
 from streamwright.core.runtime import components, plugins
 from streamwright.core.runtime.logs import RunMetrics
 from streamwright.core.runtime.templates import render
-from streamwright.core.runtime.testing import FakeApi, FakeClock, MemoryOutput, page_stream
 from streamwright.core.sdk.testing.contract import DuckDBAdapterContract, SourceAdapterContract, certify
+from streamwright.core.sdk.testing.fakes import FakeApi, FakeClock, MemoryOutput, page_stream
 from streamwright.core.sdk.testing.helpers import extension_installed, registered, run_cli
 from streamwright.core.sdk.testing.storage import Listener, ObjectStorage, patch_object_storage
 from streamwright.core.validation.engine import ERROR, validate_text
@@ -76,6 +77,7 @@ __all__ = [
            "page_stream",
            "patch_object_storage",
            "plugins",
+           "read_source",
            "registered",
            "render",
            "resolve_inputs",

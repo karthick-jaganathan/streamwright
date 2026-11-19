@@ -30,6 +30,12 @@ def test_seq_numbers_splits_in_value_order_so_a_replay_names_them_alike():
     assert plan_names(template, None, list(reversed(splits)), BATCH, "b1") == names
 
 
+def test_a_dotted_split_column_is_one_placeholder():
+    template = parse_template("{campaign.name}_{seq}.csv", ["campaign.name"])
+    names = plan_names(template, None, [(("Brand",), {"campaign.name": "Brand"})], BATCH, "b1")
+    assert names == {("Brand",): "Brand_00001.csv"}
+
+
 def test_dates_layouts_constants_and_collisions():
     layout = parse_template("dt={today:%Y-%m-%d}/{c}", ["c"], allow_slash=True, name="layout")
     file_name = parse_template("{c}-{host}-{today-1d}.csv", ["c"], constants=("host",))

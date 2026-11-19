@@ -14,30 +14,33 @@
 # * limitations under the License.
 # **************************************************************************/
 
-# StreamWright Source Makefile
+# StreamWright core (the `streamwright` package)
 
-# Package information
 PACKAGE_NAME = streamwright
-VERSION = 0.0.1
-
-# Installation mode (dev, prod, dist)
+# The Python whose environment the targets use (an active pyenv / virtualenv by default)
+PYTHON ?= python
+# Installation mode (dev, prod, dist); FORCE_DEPS=true reinstalls dependencies
 MODE ?= prod
+FORCE_DEPS ?= false
+# Optional extras to install, comma-separated (e.g. EXTRAS=serve)
+EXTRAS ?=
+DIST_DIR ?= /tmp/sdist/streamwright
 
-# Distribution directory
-DIST_DIR = /tmp/sdist/streamwright
+PIP_FORCE := $(if $(filter true,$(FORCE_DEPS)),--force-reinstall,)
+TARGET := .$(if $(EXTRAS),[$(EXTRAS)],)
+DIST_TARGET := $(PACKAGE_NAME)$(if $(EXTRAS),[$(EXTRAS)],)
 
 .PHONY: install uninstall clean test help verify build
 
-# Default target
 help:
-	@echo "StreamWright Source - Available commands:"
+	@echo "StreamWright core - Available commands:"
 	@echo ""
-	@echo "  make install [MODE=dev|prod|dist] - Install $(PACKAGE_NAME) package (default: prod)"
-	@echo "  make uninstall                    - Uninstall $(PACKAGE_NAME) package"
-	@echo "  make build                        - Build distribution packages"
+	@echo "  make install [MODE=dev|prod|dist] [EXTRAS=serve] - Install $(PACKAGE_NAME) (default: prod; FORCE_DEPS=true)"
+	@echo "  make uninstall                    - Uninstall $(PACKAGE_NAME)"
+	@echo "  make build                        - Build distribution packages into $(DIST_DIR)"
 	@echo "  make clean                        - Clean build artifacts"
-	@echo "  make test                         - Run tests (if available)"
-	@echo "  make verify                       - Verify installation"
+	@echo "  make test                         - Run the core tests (pytest)"
+	@echo "  make verify                       - Verify the installation"
 	@echo "  make help                         - Show this help message"
 	@echo ""
 	@echo "Installation modes:"
@@ -45,63 +48,46 @@ help:
 	@echo "  MODE=prod  - Production mode (pip install .)"
 	@echo "  MODE=dist  - Distribution mode (build + install from $(DIST_DIR))"
 
-# Install package with mode support
 install:
 ifeq ($(MODE),dev)
-	@echo "Installing $(PACKAGE_NAME) package in development mode..."
-	pip install -e .
+	@echo "Installing $(PACKAGE_NAME) in development mode..."
+	$(PYTHON) -m pip install -e "$(TARGET)" $(PIP_FORCE)
 else ifeq ($(MODE),prod)
-	@echo "Installing $(PACKAGE_NAME) package in production mode..."
-	pip install .
+	@echo "Installing $(PACKAGE_NAME) in production mode..."
+	$(PYTHON) -m pip install "$(TARGET)" $(PIP_FORCE)
 else ifeq ($(MODE),dist)
-	@echo "Installing $(PACKAGE_NAME) package from distribution..."
+	@echo "Installing $(PACKAGE_NAME) from distribution..."
 	@$(MAKE) build
-	@echo "Installing from distribution directory $(DIST_DIR)..."
-	pip install $(PACKAGE_NAME) --find-links $(DIST_DIR) --force-reinstall
+	$(PYTHON) -m pip install "$(DIST_TARGET)" --find-links $(DIST_DIR) --force-reinstall
 else
 	@echo "❌ Invalid MODE: $(MODE). Use dev, prod, or dist"
 	@exit 1
 endif
 	@echo "✅ Installation complete!"
-	@echo "Installed packages:"
-	@pip list | grep streamwright
+	@$(PYTHON) -m pip list | grep streamwright
 
-# Build distribution packages
 build: clean
-	@echo "Building distribution packages for $(PACKAGE_NAME)..."
-	@echo "Creating distribution directory $(DIST_DIR)..."
 	@mkdir -p $(DIST_DIR)
-	@echo "Building distributions directly to $(DIST_DIR)..."
-	python -m build --outdir $(DIST_DIR)
-	@echo "✅ Build complete!"
-	@echo "Distribution files in $(DIST_DIR):"
+	$(PYTHON) -m build --outdir $(DIST_DIR)
+	@echo "✅ Build complete: $(DIST_DIR)"
 	@ls -la $(DIST_DIR)/
 
-# Uninstall package
 uninstall:
-	@echo "Uninstalling $(PACKAGE_NAME) package..."
-	pip uninstall -y $(PACKAGE_NAME)
+	$(PYTHON) -m pip uninstall -y $(PACKAGE_NAME)
 	@echo "✅ Uninstallation complete!"
 
-# Clean build artifacts
 clean:
-	@echo "Cleaning build artifacts for $(PACKAGE_NAME)..."
-	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name "build" -exec rm -rf {} + 2>/dev/null || true
-	find . -type d -name "dist" -exec rm -rf {} + 2>/dev/null || true
+	find . -type d \( -name "__pycache__" -o -name "*.egg-info" -o -name build -o -name dist -o -name .pytest_cache \) -prune -exec rm -rf {} + 2>/dev/null || true
 	@echo "✅ Cleanup complete!"
 
-# Run tests (placeholder)
+# From the repository root, as CI and the root Makefile run them
 test:
-	@echo "Running tests for $(PACKAGE_NAME)..."
-	@echo "⚠️  No tests configured yet. Add your test commands here."
-	# pytest tests/ --verbose
+	cd .. && $(PYTHON) -m pytest --import-mode=importlib core/tests -q
 
-# Quick verification
 verify:
 	@echo "Verifying $(PACKAGE_NAME) installation..."
-	@pip show $(PACKAGE_NAME) >/dev/null 2>&1 && echo "✅ $(PACKAGE_NAME) is installed!" || echo "❌ $(PACKAGE_NAME) is not installed!"
-	@python -c "import streamwright.core; print('✅ streamwright.core import works!')" 2>/dev/null || echo "❌ streamwright.core import failed!"
-	@streamwright --help >/dev/null 2>&1 && echo "✅ streamwright command works!" || echo "❌ streamwright command failed!" 
-	@streamwright validate --help >/dev/null 2>&1 && echo "✅ streamwright validate command works!" || echo "❌ streamwright validate command failed!"
+	@$(PYTHON) -m pip show $(PACKAGE_NAME) >/dev/null 2>&1 && echo "✅ $(PACKAGE_NAME) is installed!" || echo "❌ $(PACKAGE_NAME) is not installed!"
+	@$(PYTHON) -c "import streamwright.core" 2>/dev/null && echo "✅ streamwright.core import works!" || echo "❌ streamwright.core import failed!"
+	@$(PYTHON) -m streamwright.core.cli --help >/dev/null 2>&1 && echo "✅ streamwright command works!" || echo "❌ streamwright command failed!"
+	@$(PYTHON) -m streamwright.core.cli validate --help >/dev/null 2>&1 && echo "✅ streamwright validate works!" || echo "❌ streamwright validate failed!"
+	@$(PYTHON) -c "import starlette, uvicorn" 2>/dev/null && echo "✅ the serve extra is installed (streamwright serve, worker)" || echo "ℹ️  the serve extra is not installed (EXTRAS=serve for streamwright serve)"

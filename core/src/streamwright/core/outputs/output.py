@@ -44,7 +44,6 @@ and DuckDB, DuckLake and Parquet store them in DECIMAL columns (dlt too, in the 
 import datetime
 import importlib
 import logging
-import re
 import sys
 from types import MappingProxyType
 
@@ -53,6 +52,7 @@ from streamwright.core.outputs.file_names import FILE_NAME_SCOPES, export_files
 from streamwright.core.outputs.files import FileOutput, ParquetOutput, parquet_type
 from streamwright.core.outputs.warehouse import DuckDBOutput, DuckLakeOutput
 from streamwright.core.runtime.templates import to_json, to_text
+from streamwright.core.sql.quote import IDENTIFIER
 
 __all__ = [
     "FILE_FORMATS",
@@ -160,7 +160,7 @@ def _open_warehouse(kind):
         path, _, schema = detail.partition(":")
         if kind == "ducklake" and path == "postgres":
             path, colon, schema = detail.rpartition(":")
-            if not (colon and path != "postgres" and re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", schema)):
+            if not (colon and path != "postgres" and IDENTIFIER.match(schema)):
                 path, schema = detail, ""
         if not path:
             raise ValueError("--output %s needs a path, e.g. %s:warehouse.duckdb or %s:catalog.ducklake:SCHEMA" % (

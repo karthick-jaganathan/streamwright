@@ -28,7 +28,7 @@ import yaml
 from streamwright.core import cli
 from streamwright.core.engine import sql
 from streamwright.core.engine.runner import SourceError, SourceRunner, partition_key
-from streamwright.core.runtime.testing import MemoryOutput, page_stream
+from streamwright.core.sdk.testing import MemoryOutput, page_stream
 
 TODAY = datetime.date(2026, 10, 3)
 
@@ -67,7 +67,7 @@ def source(api, request=None, select=SELECT, primary_key=("account_id", "campaig
     stream.setdefault("partitions", [{"name": "account_id", "values": "{{ config.account_ids }}"}])
     return {"kind": "source", "name": "demo", "auth": {"type": "bearer", "token": "{{ secrets.token }}"},
             "http": {"base_url": api.url}, "streams": [page_stream(
-                "performance", request or {"http": {"path": "/campaigns", "params": params}}, select,
+                "performance", request or {"operation": {"path": "/campaigns", "params": params}}, select,
                 records={"path": "data"}, primary_key=primary_key, **stream)]}
 
 
@@ -81,7 +81,7 @@ def shaped(sandbox, query, records, scope=None):
 
 def problem(query):
     """The first problem sql.check_source finds in a step that reads one request, `records`, or None."""
-    found = sql.check_source({"streams": [page_stream("shaped", {"http": {"path": "/x"}}, query)]})
+    found = sql.check_source({"streams": [page_stream("shaped", {"operation": {"path": "/x"}}, query)]})
     return found[0][1] if found else None
 
 
@@ -119,10 +119,10 @@ def test_steps_read_exploded_records_and_supply_partitions(api):
         {"id": "a1", "campaigns": [{"id": "11"}, {"id": "12"}]}, {"id": "a2", "campaigns": [{"id": "21"}]}]})
     api.routes[("GET", "/ads")] = lambda request: (200, {"data": [
         {"ad": request["params"]["account"] + "/" + request["params"]["campaign"]}]})
-    accounts = page_stream("campaigns", {"http": {"path": "/accounts"}},
+    accounts = page_stream("campaigns", {"operation": {"path": "/accounts"}},
                            "SELECT record->>'$.id' AS campaign_id, partition->>'x' AS nothing FROM records",
                            records={"path": "data", "explode": "campaigns"})
-    ads = page_stream("ads", {"http": {"path": "/ads", "params": {"account": "x",
+    ads = page_stream("ads", {"operation": {"path": "/ads", "params": {"account": "x",
                                                                   "campaign": "{{ partition.campaign_id }}"}}},
                       "SELECT record->>'ad' AS ad FROM records", records={"path": "data"},
                       partitions=[{"from_stream": "campaigns", "fields": ["campaign_id"]}])
@@ -345,7 +345,7 @@ def test_bad_values_fail_the_page_or_become_null(api, caplog):
 def test_step_problems_stop_the_run_before_any_request(api, tmp_path, capsys, caplog, monkeypatch):
     doc = source(api, primary_key=["account_id", "campaign"])
     doc["streams"][0]["incremental"]["cursor_field"] = "day"
-    doc["streams"].append(page_stream("ads", {"http": {"path": "/ads"}}, "SELECT 1 AS id FROM records",
+    doc["streams"].append(page_stream("ads", {"operation": {"path": "/ads"}}, "SELECT 1 AS id FROM records",
                                       partitions=[{"from_stream": "performance", "fields": ["campaign"]}]))
     problems = sql.check_source(doc)
     assert [path for path, _ in problems] == [

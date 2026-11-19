@@ -55,23 +55,6 @@ def resolve_job(parser, args):
     return args.job
 
 
-class _Renamed(argparse.Action):
-    """An option that was renamed or removed: using it is a usage error that says what to use (hidden from the help)."""
-
-    def __init__(self, option_strings, dest, message, **kwargs):
-        self.message = message
-        super().__init__(option_strings, dest, nargs="?", help=argparse.SUPPRESS, **kwargs)
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        parser.error(self.message)
-
-
-def add_renamed_option(parser, old, new=None, *, message=None):
-    """`old`, an option renamed `new` (or removed: `message` says why): giving it is a usage error."""
-    parser.add_argument(old, dest="renamed_" + old.lstrip("-").replace("-", "_"), action=_Renamed,
-                        message=message or "%s was renamed %s" % (old, new))
-
-
 def add_apply_migrations_argument(parser):
     """--apply-state-migrations (args.apply_state_migrations)."""
     parser.add_argument("--apply-state-migrations", action="store_true",
@@ -81,11 +64,17 @@ def add_apply_migrations_argument(parser):
 
 
 def add_job_key_argument(parser, extra=""):
-    """--job-key (and the old --run-key, now an error); `extra`: the engine's own note, appended to the help."""
+    """--job-key; `extra`: the engine's own note, appended to the help."""
     parser.add_argument("--job-key", metavar="KEY",
                         help="jobs without a consume step: a batch with this key runs once per runtime.state.scope, "
                              "a later run with it does nothing (overrides runtime.state.job_key)" + extra)
-    add_renamed_option(parser, "--run-key", "--job-key")
+
+
+def add_input_argument(parser, action):
+    """--input FILE|-: the payload of a job with spec.input (`action`: what the command does with it)."""
+    parser.add_argument("--input", metavar="FILE", dest="input_source",
+                        help="the input payload of a job that declares spec.input: a JSON array of objects or NDJSON, "
+                             "from FILE or - (stdin); %s" % action)
 
 
 def add_batch_arguments(parser):
@@ -188,7 +177,7 @@ def add_lock_arguments(parser):
     return parser
 
 
-# the help of the options every job engine's commands share (the Spark engine adds its own aliases)
+# the help of the options every job engine's commands share
 JOB_HELP = MappingProxyType({
     "job": "the job manifest: a YAML file, or its folder (job.yaml)",
     "job_option": "the job manifest, as an option (instead of JOB)",

@@ -117,3 +117,13 @@ def test_vendor_arguments_reach_pymongo_find_and_aggregate():
     aggregate = CONNECTOR.operation("collection", "aggregate")
     list(session._cursor(aggregate, {"collection": "users", "pipeline": [], "allowDiskUse": True}))
     assert recorder[-1] == ("aggregate", {"allowDiskUse": True})
+
+
+@pytest.mark.parametrize("pipeline", [[{"$out": "copy"}], [{"$facet": {"x": [{"$merge": {"into": "copy"}}]}}]])
+def test_an_aggregate_with_a_write_stage_is_refused_before_it_reaches_the_server(pipeline):
+    class Collection:
+        def aggregate(self, *args, **kwargs):
+            raise AssertionError("the pipeline reached pymongo")
+    session = MongoDBSession({"shop": {"users": Collection()}}, "shop")
+    with pytest.raises(ConnectorError, match="read-only"):
+        session._cursor(CONNECTOR.operation("collection", "aggregate"), {"collection": "users", "pipeline": pipeline})

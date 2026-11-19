@@ -1,0 +1,115 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# Creates offline conversion goals (the goals ApplyOfflineConversions records conversions against) from --input rows;
+# a goal whose name the account already has is skipped (a warning each).
+#
+#   streamwright duckdb run examples/microsoft_ads/jobs/conversion_goals/create.yaml \
+#     --input examples/microsoft_ads/payloads/conversion_goals/create.json \
+#     --set customer_id=CUSTOMER_ID --set account_id=ACCOUNT_ID \
+#     --secrets ~/.streamwright/microsoft-ads-secrets.yaml --apply-state-migrations
+# Microsoft asks to wait about 2 hours after creating an offline goal before uploading conversions to it.
+kind: DuckDBJob
+version: 1
+name: microsoft_ads_conversion_goals_create
+description: Offline conversion goals created in a Microsoft Advertising account; existing names skipped
+
+spec:
+  config:
+    customer_id: {type: string, required: true, pattern: "^[0-9]+$", description: "the customer (CustomerId)"}
+    account_id: {type: string, required: true, pattern: "^[0-9]+$", description: "the account (CustomerAccountId)"}
+  secrets:
+    developer_token: {type: string, required: true}
+    client_id: {type: string, required: true}
+    client_secret: {type: string, required: true}
+    refresh_token: {type: string, required: true}
+  input:
+    columns:
+      name: {type: string, required: true, max_length: 100}
+      category: {type: string, required: true, enum: [Purchase, AddToCart, BeginCheckout, Subscribe, SubmitLeadForm, BookAppointment, Signup, RequestQuote, GetDirections, OutboundClick, Contact, PageView, Other]}
+      value: {type: number, minimum: 0, description: "a fixed value per conversion; none: each conversion's own value"}
+      currency: {type: string, pattern: "^[A-Z]{3}$"}
+      window_days: {type: integer, minimum: 1, maximum: 90, description: "the conversion window (default 30)"}
+    max_rows: 100
+
+connections:
+  ads:
+    provider: microsoft_ads
+    developer_token: "{{ secrets.developer_token }}"
+    client_id: "{{ secrets.client_id }}"
+    client_secret: "{{ secrets.client_secret }}"
+    refresh_token: "{{ secrets.refresh_token }}"
+    customer_id: "{{ config.customer_id }}"
+    account_id: "{{ config.account_id }}"
+
+steps:
+  # the account's offline goals (one record: {"ConversionGoals": {"ConversionGoal": [...]}})
+  - name: existing
+    connection: ads
+    operation:
+      service: CampaignManagementService
+      method: GetConversionGoalsByIds
+      arguments:
+        request: {ConversionGoalTypes: [OfflineConversion]}
+    sql: |
+      SELECT g->>'$.Name' AS name, g->>'$.Id' AS id
+      FROM records, unnest(CAST(record->'$.ConversionGoals.ConversionGoal' AS JSON[])) AS t(g)
+
+  - name: skipped
+    sql: SELECT i.name, e.id FROM input AS i JOIN existing AS e USING (name)
+    log:
+      message: "skipped goal {name}: the account already has it (id {id})"
+      level: warning
+
+  # the new goals; columns are OfflineConversionGoal fields (`@type` the concrete type of the abstract ConversionGoal)
+  - name: goals
+    sql: |
+      SELECT 'OfflineConversionGoal' AS "@type",
+             i.name AS Name,
+             i.category AS GoalCategory,
+             'All' AS CountType,
+             coalesce(i.window_days, 30) * 1440 AS ConversionWindowInMinutes,
+             'Account' AS Scope,
+             'Active' AS Status,
+             CASE WHEN i.value IS NULL THEN 'VariableValue' ELSE 'FixedValue' END AS "Revenue.Type",
+             CAST(coalesce(i.value, 1) AS DOUBLE) AS "Revenue.Value",
+             coalesce(i.currency, 'USD') AS "Revenue.CurrencyCode"
+      FROM input AS i
+      ANTI JOIN existing AS e USING (name)
+      ORDER BY i.name
+
+outputs:
+  - name: create
+    connection: ads
+    step: goals
+    operation:
+      service: CampaignManagementService
+      method: AddConversionGoals
+    apply:
+      on_row_error: continue
+    log:
+      sql: |
+        SELECT Name AS name,
+               CASE WHEN outcome.status = 'applied' THEN 'created, id ' || (outcome.result->>'Id')
+                    ELSE 'rejected: ' || outcome.error_code || ': ' || outcome.error_message END AS what
+        FROM "create"
+        ORDER BY outcome.row
+      message: "goal {name}: {what}"
+
+runtime:
+  state:
+    sqlite: ../../.streamwright/microsoft_ads_conversion_goals_create.state.db
+    scope: "account:{{ config.account_id }}"

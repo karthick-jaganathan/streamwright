@@ -1,0 +1,122 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# Uploads offline conversions (a row per conversion, given with --input) to the account's offline conversion goals,
+# by goal name. A conversion naming a goal the account does not have (an offline goal) is skipped, a warning each.
+#
+#   streamwright duckdb run examples/microsoft_ads/jobs/conversions/upload.yaml \
+#     --input examples/microsoft_ads/payloads/conversions/clicks.json \
+#     --set customer_id=CUSTOMER_ID --set account_id=ACCOUNT_ID \
+#     --secrets ~/.streamwright/microsoft-ads-secrets.yaml --apply-state-migrations
+# The payload's click ids are placeholders: Microsoft rejects them (logged per row from the results). Use the msclkid
+# of real clicks on the account, after the goal's creation and within its conversion window, to record conversions.
+kind: DuckDBJob
+version: 1
+name: microsoft_ads_conversions_upload
+description: Offline conversions uploaded to a Microsoft Advertising account's offline goals, by goal name
+
+spec:
+  config:
+    customer_id: {type: string, required: true, pattern: "^[0-9]+$", description: "the customer (CustomerId)"}
+    account_id: {type: string, required: true, pattern: "^[0-9]+$", description: "the account (CustomerAccountId)"}
+  secrets:
+    developer_token: {type: string, required: true}
+    client_id: {type: string, required: true}
+    client_secret: {type: string, required: true}
+    refresh_token: {type: string, required: true}
+  input:
+    columns:
+      MicrosoftClickId: {type: string, required: true, max_length: 100}
+      ConversionName: {type: string, required: true, max_length: 100}         # the offline goal's name
+      ConversionTime:                                                          # in UTC
+        type: string
+        required: true
+        pattern: "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+      ConversionValue: {type: number, minimum: 0}
+      ConversionCurrencyCode: {type: string, pattern: "^[A-Z]{3}$"}
+    max_rows: 10000
+
+connections:
+  ads:
+    provider: microsoft_ads
+    developer_token: "{{ secrets.developer_token }}"
+    client_id: "{{ secrets.client_id }}"
+    client_secret: "{{ secrets.client_secret }}"
+    refresh_token: "{{ secrets.refresh_token }}"
+    customer_id: "{{ config.customer_id }}"
+    account_id: "{{ config.account_id }}"
+
+steps:
+  # the account's offline goals (one record: {"ConversionGoals": {"ConversionGoal": [...]}})
+  - name: offline_goals
+    connection: ads
+    operation:
+      service: CampaignManagementService
+      method: GetConversionGoalsByIds
+      arguments:
+        request: {ConversionGoalTypes: [OfflineConversion]}
+    sql: |
+      SELECT g->>'$.Name' AS name, g->>'$.Status' AS status
+      FROM records, unnest(CAST(record->'$.ConversionGoals.ConversionGoal' AS JSON[])) AS t(g)
+
+  - name: skipped_conversions
+    sql: |
+      SELECT i.MicrosoftClickId AS click_id, i.ConversionName AS goal
+      FROM input AS i
+      ANTI JOIN offline_goals AS g ON g.name = i.ConversionName
+    log:
+      message: "skipped click {click_id}: the account has no offline goal named {goal}"
+      level: warning
+      max_rows: 50
+
+  # the conversions to upload; columns are OfflineConversion fields
+  - name: conversions
+    sql: |
+      SELECT i.MicrosoftClickId, i.ConversionName, i.ConversionTime, i.ConversionValue, i.ConversionCurrencyCode
+      FROM input AS i
+      SEMI JOIN offline_goals AS g ON g.name = i.ConversionName
+      ORDER BY i.ConversionTime, i.MicrosoftClickId
+
+outputs:
+  - name: upload
+    connection: ads
+    step: conversions
+    operation:
+      service: CampaignManagementService
+      method: ApplyOfflineConversions
+      arguments:
+        account_id: "{{ config.account_id }}"
+    apply:
+      chunk_size: 2               # small, to show the calls; leave it out in production (1000 a call)
+      nulls: skip_field           # no value or currency: the field is left out
+      on_row_error: continue      # a rejected conversion fails alone
+    policy:
+      retry: {max_attempts: 5, backoff: exponential}
+    log:
+      sql: |
+        SELECT outcome.row AS row, MicrosoftClickId AS click_id, ConversionName AS goal,
+               outcome.error_code AS code, outcome.error_message AS error
+        FROM upload
+        WHERE outcome.status = 'failed'
+        ORDER BY outcome.row
+      message: "row {row}: click {click_id} ({goal}) rejected: {code}: {error}"
+      level: warning
+      max_rows: 50
+
+runtime:
+  state:
+    sqlite: ../../.streamwright/microsoft_ads_conversions_upload.state.db
+    scope: "account:{{ config.account_id }}"

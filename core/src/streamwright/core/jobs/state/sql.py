@@ -31,7 +31,8 @@ from streamwright.core.jobs.types import Lease
 __all__ = ["LOG", "SqlBase", "json_text", "json_value"]
 
 LOG = logging.getLogger("streamwright.jobs.state")
-_TABLES = ("sw_leases", "sw_jobs", "sw_sequences", "sw_receipts", "sw_events", "sw_signatures", "sw_migrations")
+_TABLES = ("sw_leases", "sw_jobs", "sw_sequences", "sw_receipts", "sw_events", "sw_signatures", "sw_migrations",
+           "sw_requests")
 
 
 def json_text(value: Any) -> str:

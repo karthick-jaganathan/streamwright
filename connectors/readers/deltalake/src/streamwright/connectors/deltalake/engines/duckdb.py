@@ -121,14 +121,17 @@ class DeltaLakeDuckDBAdapter:
     """`read: delta` through delta_scan; table writes through delta-rs, replay-safe."""
 
     def configure(self, session: DuckDBSession, name: str, connection: ResolvedConnection) -> None:
-        roots = [str(root) for root in connection["roots"]]
-        for index, secret in enumerate(client.storage_secrets(connection, roots)):
+        roots = client.normalize_roots(str(root) for root in connection["roots"])   # as _locate resolves paths
+        for secret in client.storage_secrets(connection, roots):
             session.load_extension(secret.extension)
-            for scope in secret.scopes:
+            for index, scope in enumerate(secret.scopes):      # one secret per root: each keeps its own scope
                 session.create_secret("%s_%s_%d" % (name, secret.secret_type, index), secret.secret_type,
                                       list(secret.parameters), scope=scope)
 
     def read_sql(self, context: ReadContext, operation: Operation, arguments: Mapping[str, Any]) -> str:
+        problem = client.duckdb_problem(context.connection)
+        if problem:
+            raise AdapterError(problem)
         context.session.load_extension("delta")
         location = _locate(context.session, context.connection, arguments["path"])
         return "SELECT * FROM delta_scan(%s)" % quote_literal(location)

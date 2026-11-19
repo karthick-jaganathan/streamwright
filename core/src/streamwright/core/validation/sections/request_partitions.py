@@ -18,8 +18,9 @@
 """Request-level `partitions`: values, `from` and partition sources."""
 
 
+from streamwright.core.runtime.text import split_outside_quotes, suggest
 from streamwright.core.validation import vocabulary as spec
-from streamwright.core.validation.checker import describe, suggest
+from streamwright.core.validation.checker import describe
 from streamwright.core.validation.partitions import PartitionChecker
 from streamwright.core.validation.sections.requests import RequestSection
 from streamwright.core.validation.sections.stream_context import StreamContext, lower_name
@@ -101,7 +102,7 @@ class RequestPartitionSection(RequestSection):
         """
         unavailable = False
         for inner in template_expressions(values):
-            match = REFERENCE_HEAD.match(spec.split_outside_quotes(inner, "|")[0])
+            match = REFERENCE_HEAD.match(split_outside_quotes(inner, "|")[0])
             scope, name = (match.group(1), (match.group(2) or "").split(".")[0]) if match else (None, None)
             if scope == "window":
                 why = "no window"

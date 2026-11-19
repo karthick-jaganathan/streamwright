@@ -18,7 +18,7 @@
 """One stream of a source's plan (StreamPlan), and the names of its requests, steps, exports and partitions."""
 
 
-from streamwright.core.engine.sql.tables import _NAME
+from streamwright.core.config.streams import is_table_name
 
 
 def mapping_entries(value):
@@ -28,31 +28,11 @@ def mapping_entries(value):
     return [(position, item) for position, item in enumerate(value) if isinstance(item, dict)]
 
 
-def is_table_name(name):
-    """Whether a stream, request, step or export name can name a table (`streamwright validate` reports the others)."""
-    return isinstance(name, str) and _NAME.match(name) is not None
-
-
 def partition_fields(item):
     """(fields read, partition names) of a partition item: `field` and `name`, or `fields` (named after them)."""
     if isinstance(item.get("fields"), list):
         return tuple(item["fields"]), tuple(item["fields"])
     return (item.get("field"),), (item.get("name"),)
-
-
-def exports_of(stream):
-    """A stream's export names (those that can be names: `streamwright validate` reports the others)."""
-    export = stream.get("export") if isinstance(stream, dict) else None
-    return [name for name in export if is_table_name(name)] if isinstance(export, dict) else []
-
-
-def incremental_exports(source):
-    """
-    The exports of the streams with `incremental`: a run writes a window of their data, so outputs append them when
-    they have no primary_key (the others replace their tables).
-    """
-    return {export for stream in source.get("streams") or [] if isinstance(stream, dict) and
-               stream.get("incremental") for export in exports_of(stream)}
 
 
 class StreamPlan:

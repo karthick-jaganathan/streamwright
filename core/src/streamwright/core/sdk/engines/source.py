@@ -19,16 +19,21 @@
 The `source` engine adapter protocol (streamwright run): a connector's `engines/source.py` opens a session on a
 resolved connection; the session reads an operation's pages with the context of the request that reads them (its
 stream's rate limit, retries, metrics and log fields). Errors a caller can act on are raised as ConnectorError (with a
-provider `code`); messages never quote secret values.
+provider `code`); messages never quote secret values. The helpers of SDK-transport sessions (make_caller,
+translate_errors, translate_pages: the vendor's exceptions as ConnectorError; standalone_context: a context outside a
+run) and HttpSourceAdapter (the `source` adapter of declarative HTTP connectors) are here too.
 """
 
 from collections.abc import Iterator, Mapping
 from typing import Any, Protocol, runtime_checkable
 
+from streamwright.core.runtime.api_calls import make_caller, standalone_context, translate_errors, translate_pages
 from streamwright.core.runtime.connector_types import ConnectorContext, ConnectorError
 from streamwright.core.runtime.contract import Operation, ResolvedConnection
+from streamwright.core.runtime.http_adapter import HttpSourceAdapter
 
-__all__ = ["ConnectorContext", "ConnectorError", "SourceAdapter", "SourceSession"]
+__all__ = ["ConnectorContext", "ConnectorError", "HttpSourceAdapter", "SourceAdapter", "SourceSession", "make_caller",
+           "standalone_context", "translate_errors", "translate_pages"]
 
 
 @runtime_checkable

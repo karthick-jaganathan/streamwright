@@ -21,12 +21,13 @@ incremental:
   cursor_field: date
   start: "{{ config.start_date }}"
   window: 1d
-retry: {max_attempts: 3, max_delay: 2m}
+policy:
+  retry: {max_attempts: 3, max_delay: 2m}
 
 # HTTP request for ad analytics pivoted by campaign and daily granularity
 requests:
   - name: raw_campaign_performance
-    http:
+    operation:
       path: /rest/adAnalytics
       method: GET
       params:

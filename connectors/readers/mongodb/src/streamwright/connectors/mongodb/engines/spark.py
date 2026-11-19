@@ -60,6 +60,9 @@ class MongoDBSparkAdapter:
     def read(self, context: SparkContext, operation: Operation, arguments: Mapping[str, Any]) -> DataFrame:
         database, collection = _source(context, arguments)
         pipeline = arguments["pipeline"] if operation.method == "aggregate" else client.find_pipeline(arguments)
+        stage = client.write_stage(pipeline)
+        if stage:
+            raise ValueError("mongodb: aggregate is read-only; the pipeline has a %s stage" % stage)
         reader = (context.spark.read.format(FORMAT).option("spark.mongodb.read.connection.uri",
                                                            client.uri(context.connection))
                   .option("spark.mongodb.read.database", database).option("spark.mongodb.read.collection", collection))

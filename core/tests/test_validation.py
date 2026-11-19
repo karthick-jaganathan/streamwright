@@ -26,7 +26,7 @@ import jsonschema
 import pytest
 import yaml
 
-from streamwright.core.config.loader import SourceFilesError, find_source, load_source
+from streamwright.core.config.loader import SourceFilesError, find_source, load_source, read_source
 from streamwright.core.runtime.components import register, unregister
 from streamwright.core.sdk.contract import ConnectorDefinition, Operation
 from streamwright.core.sdk.operations import http
@@ -93,9 +93,11 @@ def base_source():
             "partitions": [{"name": "account_id", "values": "{{ config.account_ids }}"}],
             "requests": [{
                 "name": "raw_campaigns",
-                "http": {"path": "/accounts/{{ partition.account_id }}/campaigns"},
-                "paginator": {"type": "offset", "offset_param": "start", "limit_param": "count", "page_size": 100},
-                "records": {"path": "elements"},
+                "operation": {
+                    "path": "/accounts/{{ partition.account_id }}/campaigns",
+                    "paginator": {"type": "offset", "offset_param": "start", "limit_param": "count", "page_size": 100},
+                    "records": {"path": "elements"},
+                },
             }],
             "transform": {"mode": "page", "steps": [
                 {"name": "campaigns",
@@ -128,10 +130,40 @@ def test_schema_and_checker_reject_the_same_source_errors(case):
     elif case == "numeric_incremental_start":
         stream["incremental"] = {"cursor_field": "day", "start": 5}
     elif case == "nested_plain_params":
-        stream["requests"][0]["http"]["params"] = {"filter": {"status": "active"}}
-        stream["requests"][0]["http"]["params_encoding"] = "plain"
+        stream["requests"][0]["operation"]["params"] = {"filter": {"status": "active"}}
+        stream["requests"][0]["operation"]["params_encoding"] = "plain"
     assert any(issue.severity == ERROR for issue in validate_text(yaml.safe_dump(document)))
     assert not jsonschema.Draft7Validator(schema.json_schema()).is_valid(document)
+
+
+@pytest.mark.parametrize(("case", "valid"), [
+    ("download_records", True), ("results_records", False), ("numeric_timeout", True), ("comma_values", False),
+    ("partial_start_reference", True),
+])
+def test_schema_and_checker_agree(case, valid):
+    document = base_source()
+    stream = document["streams"][0]
+    if case in ("download_records", "results_records"):
+        sdk_source(document)
+        stream["requests"] = [{"name": "raw_campaigns", "records": {"path": "rows"}, "async_job": {
+            "submit": {"operation": {"method": "Submit"}},
+            "poll": {"operation": {"method": "Poll", "arguments": {"id": "{{ submit.result }}"}}, "every": "15s",
+                     "timeout": "30m", "done_when": {"path": "Status", "equals": "DONE"}},
+            "download": {"url": "{{ poll.url }}", "format": "json"}}}]
+        if case == "results_records":
+            stream["requests"][0]["async_job"].pop("download")
+            stream["requests"][0]["async_job"]["results"] = {"operation": {"method": "Get"}}
+    elif case == "numeric_timeout":
+        stream["policy"] = {"timeout": 30}
+    elif case == "comma_values":
+        stream["partitions"][0]["values"] = "a,b"
+    elif case == "partial_start_reference":
+        document["spec"]["config"]["day"] = {"type": "string", "default": "01"}
+        stream["incremental"] = {"cursor_field": "day", "start": "2024-01-{{ config.day }}"}
+        stream["requests"][0]["operation"]["params"] = {"since": "{{ window.start }}"}
+    errors = [issue for issue in validate_text(yaml.safe_dump(document)) if issue.severity == ERROR]
+    assert (errors == []) == valid, errors
+    assert jsonschema.Draft7Validator(schema.json_schema()).is_valid(document) == valid
 
 
 def check(mutate=None, **options):
@@ -159,7 +191,7 @@ def new_stream(name, partitions=None, path="/items", **keys):
     item = {"name": name}
     if partitions is not None:
         item["partitions"] = partitions
-    item.update(requests=[{"name": "raw_" + name, "http": {"path": path}}],
+    item.update(requests=[{"name": "raw_" + name, "operation": {"path": path}}],
                 transform={"mode": "page", "steps": [
                     {"name": name, "select": "SELECT record->>'id' AS id FROM raw_%s" % name}]},
                 export={name: {"step": name}})
@@ -170,17 +202,17 @@ def new_stream(name, partitions=None, path="/items", **keys):
 def requests_stream(doc, partitions):
     """The base stream in run mode with a second request, `raw_ads`, that has these request partitions."""
     stream(doc)["transform"]["mode"] = "run"
-    stream(doc)["requests"].append({"name": "raw_ads", "partitions": partitions,
-                                    "http": {"path": "/ads/{{ partition.account_id }}/{{ partition.campaign_id }}"}})
+    stream(doc)["requests"].append({"name": "raw_ads", "partitions": partitions, "operation": {
+        "path": "/ads/{{ partition.account_id }}/{{ partition.campaign_id }}"}})
 
 
 def sdk_source(doc):
     doc["auth"] = {"provider": "google_ads", "refresh_token": "{{ secrets.token }}"}
     del doc["http"]
-    stream(doc)["requests"] = [{"name": "raw_campaigns", "sdk": "google_ads", "service": "GoogleAdsService",
-                                "method": "search_stream",
-                                "arguments": {"customer_id": "{{ partition.account_id }}",
-                                              "query": {"gaql": {"select": ["campaign.id"], "from": "campaign"}}}}]
+    stream(doc)["requests"] = [{"name": "raw_campaigns", "operation": {
+        "service": "GoogleAdsService", "method": "search_stream",
+        "arguments": {"customer_id": "{{ partition.account_id }}",
+                      "query": {"gaql": {"select": ["campaign.id"], "from": "campaign"}}}}}]
 
 
 def codes(issues):
@@ -288,7 +320,7 @@ def test_schemas_accept_examples(path):
         for _, file_path in files:
             with open(file_path) as stream_:
                 jsonschema.validate(yaml.safe_load(stream_), document, cls=jsonschema.Draft7Validator)
-    jsonschema.validate(load_source(path), source_schema, cls=jsonschema.Draft7Validator)
+    jsonschema.validate(read_source(path), source_schema, cls=jsonschema.Draft7Validator)
 
 
 def test_schemas_accept_the_one_stream_form():
@@ -315,7 +347,7 @@ def test_schemas_accept_the_one_stream_form():
 @pytest.mark.parametrize("mutate", [
     lambda d: d.update(extra=1),
     lambda d: stream(d).update(fields=[{"name": "x", "from": "a"}]),          # removed keys
-    lambda d: stream(d).update(request={"http": {"path": "/a"}}),
+    lambda d: stream(d).update(request={"operation": {"path": "/a"}}),
     lambda d: stream(d).update(select="SELECT record FROM raw_campaigns"),
     lambda d: stream(d).update(raw=True),
     lambda d: stream(d).update(primary_key=["id"]),
@@ -336,11 +368,11 @@ def test_schemas_accept_the_one_stream_form():
     lambda d: steps(d)[0].update(select=""),
     lambda d: stream(d)["export"]["campaigns"].update(step=1),
     lambda d: stream(d)["export"]["campaigns"].update(primary_key=[]),
-    lambda d: d["http"].update(retry={"on": [429]}),
-    lambda d: request(d).update(paginator={"type": "cursor"}),
+    lambda d: d.update(policy={"retry": {"on": [429]}}),
+    lambda d: request(d)["operation"].update(paginator={"type": "cursor"}),
     lambda d: request(d).update(sdk="x", method="m"),                         # two request kinds
-    lambda d: stream(d).update(requests=[{"name": "r", "http": {"path": "/x"}, "headers": {"X": "y"}}]),
-    lambda d: stream(d).update(requests=[{"name": "r", "sdk": "x", "method": "m", "headers": {"A": {"b": 1}}}]),
+    lambda d: stream(d).update(requests=[{"name": "r", "operation": {"path": "/x"}, "headers": {"X": "y"}}]),
+    lambda d: stream(d).update(requests=[{"name": "r", "operation": {"method": "m"}, "headers": {"A": {"b": 1}}}]),
     lambda d: stream(d).update(partitions=[{"from_stream": "x", "fields": []}]),
     lambda d: stream(d).update(partitions=[{"from_stream": "x", "fields": ["a"], "name": "a"}]),
     lambda d: request(d).update(partitions=[{"from": "x", "fields": ["a"], "field": "a"}]),
@@ -397,6 +429,24 @@ def test_inputs():
     assert "did you mean 'string'" in messages(issues)
 
 
+def test_input_constraints_and_defaults_that_break_them_are_errors():
+    def mutate(d):
+        d["spec"]["config"].update({
+            "a": {"type": "string", "pattern": "[a-"},
+            "b": {"type": "integer", "minimum": "5", "maximum": 9},
+            "c": {"type": "string", "max_length": "ten"},
+            "d": {"type": "string", "enum": 5},
+            "e": {"type": "string", "enum": ["x", "y"], "default": "z"},
+            "f": {"type": "list", "items": "integer", "maximum": 3, "default": [1, 4]},
+        })
+    issues = [issue for issue in check(mutate) if issue.severity == ERROR]
+    assert [(code, path) for code, path, _ in found(issues)] == [
+        ("bad-value", "spec.config.a.pattern"), ("bad-value", "spec.config.b.minimum"),
+        ("bad-value", "spec.config.c.max_length"), ("bad-value", "spec.config.d.enum"),
+        ("bad-value", "spec.config.e.default"), ("bad-value", "spec.config.f.default")]
+    assert "the default is not one of: x, y" in messages(issues) and "the default is more than 3" in messages(issues)
+
+
 def test_unused_input_is_reported():
     issues = check(lambda d: d["spec"]["config"].update(start_date={"type": "date", "default": "-30d"}))
     assert codes(issues) == [(WARNING, "unused-input")]
@@ -433,14 +483,14 @@ def test_config_inputs_read_in_sql_are_used(query):
     ("{{ 1 + 2 }}", "template-syntax", "invalid reference"),
 ])
 def test_reference_checks(template, code, text):
-    issues = check(lambda d: request(d)["http"].update(params={"q": template}))
+    issues = check(lambda d: request(d)["operation"].update(params={"q": template}))
     assert [i.code for i in issues] == [code], issues
     assert text in issues[0].message
-    assert issues[0].path == "streams[0].requests[0].http.params.q"
+    assert issues[0].path == "streams[0].requests[0].operation.params.q"
 
 
 def test_filters_with_quoted_commas_and_partition_scope():
-    assert check(lambda d: request(d)["http"].update(params={
+    assert check(lambda d: request(d)["operation"].update(params={
         "ids": "{{ config.account_ids | join(', ') }}", "day": "{{ today | date('%Y-%m-%d') }}"})) == []
     issues = [i for i in check(lambda d: stream(d).pop("partitions")) if i.code != "unused-input"]
     assert {i.message.split(":")[0] for i in issues} == {"{{ partition.account_id }}"}
@@ -450,15 +500,15 @@ def test_filters_with_quoted_commas_and_partition_scope():
 def test_partition_references_see_the_stream_and_own_request_partitions():
     def mutate(d):
         requests_stream(d, [{"name": "campaign_id", "from": "campaigns", "field": "id"}])
-        request(d)["http"]["params"] = {"campaign": "{{ partition.campaign_id }}"}  # a partition of raw_ads only
+        request(d)["operation"]["params"] = {"campaign": "{{ partition.campaign_id }}"}  # a partition of raw_ads only
     issues = check(mutate)
-    assert found(issues) == [("unknown-reference", "streams[0].requests[0].http.params.campaign",
+    assert found(issues) == [("unknown-reference", "streams[0].requests[0].operation.params.campaign",
                               "{{ partition.campaign_id }}: 'campaign_id' is not declared in partition")]
     assert check(lambda d: requests_stream(d, [{"name": "campaign_id", "from": "campaigns", "field": "id"}])) == []
 
 
 def test_templates_are_not_allowed_in_names_and_records():
-    issues = check(lambda d: request(d)["records"].update(path="{{ config.account_ids }}"))
+    issues = check(lambda d: request(d)["operation"]["records"].update(path="{{ config.account_ids }}"))
     assert codes(issues) == [(ERROR, "unavailable-reference")]
     assert "cannot be used here" in issues[0].message
 
@@ -469,7 +519,7 @@ def test_templates_are_not_allowed_in_names_and_records():
 
 def _definition(name, *operations):
     return ConnectorDefinition(name=name, title=name, family="test", connection=(), operations=operations,
-                               adapters={"source": "streamwright.core.io.http:HttpSourceAdapter"})
+                               adapters={"source": "streamwright.core.sdk.engines.source:HttpSourceAdapter"})
 
 
 def test_auth_checks():
@@ -502,25 +552,25 @@ def test_http_transport_provider_validation():
     def sdk_req(d):
         d["auth"] = {"provider": "mock_http_val", "type": "bearer", "token": "{{ secrets.token }}"}
         del d["http"]
-        d["streams"][0]["requests"] = [{"name": "raw_campaigns", "sdk": "mock_http_val", "service": "s", "method": "m"}]
+        d["streams"][0]["requests"] = [{"name": "raw_campaigns", "operation": {"service": "s", "method": "m"}}]
     assert (ERROR, "bad-value") in codes(check(sdk_req))
     unregister("mock_http_val")
 
 
 def test_params_encoding_validation():
     def nested_plain(d):
-        request(d)["http"]["params"] = {"filter": {"status": "ACTIVE"}}
+        request(d)["operation"]["params"] = {"filter": {"status": "ACTIVE"}}
     assert (ERROR, "bad-value") in codes(check(nested_plain))
     assert "nested params need `params_encoding: dotted`" in messages(check(nested_plain))
 
     def nested_dotted_req(d):
-        request(d)["http"]["params"] = {"filter": {"status": "ACTIVE"}}
-        request(d)["http"]["params_encoding"] = "dotted"
+        request(d)["operation"]["params"] = {"filter": {"status": "ACTIVE"}}
+        request(d)["operation"]["params_encoding"] = "dotted"
     assert check(nested_dotted_req) == []
 
     def nested_dotted_top(d):
         d["http"]["params_encoding"] = "dotted"
-        request(d)["http"]["params"] = {"filter": {"status": "ACTIVE"}}
+        request(d)["operation"]["params"] = {"filter": {"status": "ACTIVE"}}
     assert check(nested_dotted_top) == []
 
 
@@ -530,17 +580,17 @@ def test_headers_secrets_validation():
     assert check(top_headers_secret) == []
 
     def req_headers_secret(d):
-        request(d)["http"]["headers"] = {"X-Token": "{{ secrets.token }}"}
+        request(d)["operation"]["headers"] = {"X-Token": "{{ secrets.token }}"}
     assert check(req_headers_secret) == []
 
     def params_secret(d):
-        request(d)["http"]["params"] = {"token": "{{ secrets.token }}"}
+        request(d)["operation"]["params"] = {"token": "{{ secrets.token }}"}
     assert (ERROR, "secret-outside-auth") in codes(check(params_secret))
 
 
 def test_body_paginator_json_validation():
     def body_no_json(d):
-        request(d)["paginator"] = {
+        request(d)["operation"]["paginator"] = {
             "type": "offset", "in": "body",
             "offset_param": "offset", "limit_param": "limit", "page_size": 10
         }
@@ -548,34 +598,33 @@ def test_body_paginator_json_validation():
     assert "`in: body` requires `http.json` to be a mapping" in messages(check(body_no_json))
 
     def body_with_json(d):
-        request(d)["http"]["json"] = {"offset": 0, "limit": 10}
-        request(d)["paginator"] = {
+        request(d)["operation"]["json"] = {"offset": 0, "limit": 10}
+        request(d)["operation"]["paginator"] = {
             "type": "offset", "in": "body",
             "offset_param": "offset", "limit_param": "limit", "page_size": 10
         }
     assert check(body_with_json) == []
 
 
+KIND = "a call (service, method, arguments) or an HTTP request (path, method, params, ...)"
+
+
 def test_connectors_and_sdk_requests():
     assert check(sdk_source) == []
-    assert codes(check(sdk_source, allowed_connectors=["meta"])) == [(ERROR, "connector-not-allowed")] * 2
-
-    def mismatch(d):
-        sdk_source(d)
-        request(d)["sdk"] = "microsoft_ads"
-    assert "does not match auth.provider" in messages(check(mismatch))
+    assert codes(check(sdk_source, allowed_connectors=["meta"])) == [(ERROR, "connector-not-allowed")]
 
     def no_provider(d):
         sdk_source(d)
         d["auth"] = {"type": "bearer", "token": "{{ secrets.token }}"}
-    assert "connector `auth.provider`" in messages(check(no_provider))
+    assert "the connector in `auth.provider`" in messages(check(no_provider))
 
     def paginated(d):
         sdk_source(d)
-        request(d)["paginator"] = {"type": "page_number", "page_param": "page"}
-    issues = check(paginated)
-    assert "paginated by the connector" in messages(issues)
-    assert issues[0].path == "streams[0].requests[0].paginator.type"
+        request(d)["operation"].update(paginator={"type": "page_number", "page_param": "page"}, bogus=1, type="http")
+    issues = check(paginated)       # (reported once: nothing else is checked under a mixed operation)
+    assert found(issues) == [("bad-value", "streams[0].requests[0].operation",
+                              "an operation is %s, not both (found arguments, service and "
+                              "paginator)" % KIND)]
 
 
 # * --------------------
@@ -587,44 +636,45 @@ def test_http_checks():
     assert codes(issues) == [(ERROR, "missing-key")] and "needs `http.base_url`" in messages(issues)
     assert codes(check(lambda d: d["http"].update(base_url="http://api.example.com"))) == [(WARNING, "insecure-url")]
     assert codes(check(lambda d: d["http"].update(headers={"Version": 2}))) == [(ERROR, "bad-value")]
-    assert codes(check(lambda d: d["http"].update(rate_limit={"requests": 0, "per": "1 hour"}))) == \
+    assert codes(check(lambda d: d.update(policy={"rate_limit": {"requests": 0, "per": "1 hour"}}))) == \
         [(ERROR, "bad-value")] * 2
-    assert codes(check(lambda d: d["http"].update(retry={"codes": [429], "max_attempts": 3, "backoff": "linear"}))) \
-        == [(ERROR, "bad-value")]
-    assert codes(check(lambda d: request(d)["http"].update(method="get"))) == [(ERROR, "bad-value")]
+    retry = {"codes": [429], "max_attempts": 3, "backoff": "linear"}
+    assert codes(check(lambda d: d.update(policy={"retry": retry}))) == [(ERROR, "bad-value")]
+    assert codes(check(lambda d: request(d)["operation"].update(method="get"))) == [(ERROR, "bad-value")]
 
 
 def test_retry_on_key_is_caught():
-    text = yaml.safe_dump(base_source(), sort_keys=False).replace("base_url:", "retry: {on: [429]}\n  base_url:")
+    text = yaml.safe_dump(base_source(), sort_keys=False) + "policy:\n  retry: {on: [429]}\n"
     assert codes(validate_text(text, "s.yaml")) == [(ERROR, "unknown-key"), (WARNING, "yaml-boolean")]
 
 
 def test_request_shape():
-    issues = check(lambda d: request(d).update(sdk="x", method="m"))
-    assert found(issues) == [("bad-value", "streams[0].requests[0]",
-                              "a request needs exactly one of: http, sdk, async_job (found: http, sdk)")]
-    issues = check(lambda d: request(d).pop("http"))
-    assert "a request needs exactly one of: http, sdk, async_job (found: none)" in messages(issues)
+    issues = check(lambda d: request(d).update(call={"method": "m"}))
+    assert found(issues) == [("unknown-key", "streams[0].requests[0].call", "unknown key 'call'; requests do not "
+                                                                            "support it")]
+    issues = check(lambda d: request(d).pop("operation"))
+    assert found(issues) == [("bad-value", "streams[0].requests[0]", "a request needs an `operation:` or an "
+                                                                    "`async_job:`")]
     issues = check(lambda d: request(d).pop("name"))
     assert found(issues) == [("missing-key", "streams[0].requests[0]", "a request needs `name`")]
 
 
 def test_request_items_reject_wrong_kind_keys():
     def mutate(d):
-        stream(d)["requests"] = [{"name": "raw_campaigns", "http": {"path": "/a"},
+        stream(d)["requests"] = [{"name": "raw_campaigns", "operation": {"path": "/a"},
                                   "headers": {"X-Api-Key": "{{ secrets.token }}"}, "method": "POST"}]
     issues = check(mutate)
-    assert codes(issues) == [(ERROR, "unknown-key"), (ERROR, "unknown-key")]
+    assert codes(issues) == [(ERROR, "unknown-key")] * 2
     assert "unknown key 'headers'" in messages(issues)
-    assert "unknown key 'method'" in messages(issues)
+    assert "unknown key 'method' in a request; what it invokes is written in `operation:`" in messages(issues)
 
 
 def test_async_job_checks():
     def mutate(d):
         sdk_source(d)
         stream(d)["requests"] = [{"name": "raw_campaigns", "async_job": {
-            "submit": {"sdk": "google_ads", "method": "Submit", "arguments": {"id": "{{ submit.result }}"}},
-            "poll": {"method": "Poll", "arguments": {"id": "{{ submit.result }}"}, "every": "15 seconds",
+            "submit": {"operation": {"method": "Submit", "arguments": {"id": "{{ submit.result }}"}}},
+            "poll": {"operation": {"method": "Poll", "arguments": {"id": "{{ submit.result }}"}}, "every": "15 seconds",
                      "timeout": "30m", "done_when": {"path": "Status"}},
         }}]
     issues = check(mutate)
@@ -632,25 +682,27 @@ def test_async_job_checks():
     text = messages(issues)
     assert "exactly one of `download` or `results`" in text and "exactly one of `equals` or `in`" in text
 
-    def without_sdk(d):
+    def without_call(d):
         mutate(d)
-        request(d)["async_job"]["submit"].pop("sdk")
-        request(d)["async_job"]["results"] = {"method": "Results"}
-    issues = [issue for issue in check(without_sdk) if issue.code == "missing-key"]
+        request(d)["async_job"]["submit"].pop("operation")
+        request(d)["async_job"]["results"] = {}
+    issues = [issue for issue in check(without_call) if issue.code == "missing-key"]
     assert found(issues) == [
-        ("missing-key", "streams[0].requests[0].async_job.submit", "`submit` needs `sdk`: async jobs run through a "
-                                                                   "connector"),
-        ("missing-key", "streams[0].requests[0].async_job.results", "`results` needs `sdk`: async jobs run through a "
-                                                                    "connector"),
+        ("missing-key", "streams[0].requests[0].async_job.submit", "`submit` needs an `operation:`: async jobs run "
+                                                                   "through a connector"),
+        ("missing-key", "streams[0].requests[0].async_job.results", "`results` needs an `operation:`: async jobs run "
+                                                                    "through a connector"),
     ]
 
 
 def test_paginator_checks():
-    assert codes(check(lambda d: request(d).update(paginator={"type": "cursor", "param": "after"}))) == \
+    assert codes(check(lambda d: request(d)["operation"].update(paginator={"type": "cursor", "param": "after"}))) == \
         [(ERROR, "bad-value")]
-    assert check(lambda d: request(d).update(paginator={"type": "cursor", "next_url_path": "paging.next"})) == []
-    assert codes(check(lambda d: request(d).update(paginator={"type": "offset"}))) == [(ERROR, "missing-key")] * 3
-    assert check(lambda d: request(d).update(paginator={
+    assert check(lambda d: request(d)["operation"].update(
+        paginator={"type": "cursor", "next_url_path": "paging.next"})) == []
+    assert codes(check(lambda d: request(d)["operation"].update(paginator={"type": "offset"}))) == \
+        [(ERROR, "missing-key")] * 3
+    assert check(lambda d: request(d)["operation"].update(paginator={
         "type": "cursor", "token_path": "meta.next", "param": "{{ response.meta.next }}"})) == []
 
 
@@ -658,7 +710,7 @@ def test_query_builder_calls_are_data_with_checked_references():
     """Query builders are components; `streamwright validate` checks their references."""
     def mutate(d):
         sdk_source(d)
-        request(d)["arguments"]["query"]["gaql"].update(where=[
+        request(d)["operation"]["arguments"]["query"]["gaql"].update(where=[
             {"field": "campaign.id", "op": "IN", "type": "integer", "value": "{{ config.account_id }}"},
             {"field": "segments.date", "op": "BETWEN", "type": "date", "value": ["{{ secrets.token }}"]},
         ])
@@ -668,13 +720,14 @@ def test_query_builder_calls_are_data_with_checked_references():
 
 
 def test_sdk_requests_take_no_headers():
-    """Per-request values are an operation's arguments: `headers` is not a key of sdk requests."""
+    """Per-request values are a call's arguments: `headers` (an HTTP request's) in a call's operation mixes kinds."""
     def mutate(d):
         sdk_source(d)
-        request(d)["headers"] = {"CustomerId": 555}
+        request(d)["operation"]["headers"] = {"CustomerId": 555}
     issues = check(mutate)
-    assert set(codes(issues)) == {(ERROR, "unknown-key")} and "unknown key 'headers'" in messages(issues)
-    assert "headers" not in schema.json_schema()["definitions"]["sdk_request"]["properties"]
+    assert found(issues) == [("bad-value", "streams[0].requests[0].operation",
+                              "an operation is %s, not both (found arguments, service and headers)" % KIND)]
+    assert "headers" not in schema.json_schema()["definitions"]["call"]["properties"]
 
 
 # * -------------------------------------
@@ -694,71 +747,6 @@ def test_a_stream_needs_requests_transform_and_export(key, message):
 def test_a_stream_needs_at_least_one_export(export):
     assert found(check(lambda d: stream(d).update(export=export))) == [
         ("bad-value", "streams[0].export", "a stream needs at least one export")]
-
-
-@pytest.mark.parametrize("key,value,hint", [
-    ("request", {"http": {"path": "/a"}}, "`request` was removed: use `requests` with one named item"),
-    ("select", "SELECT record FROM records", "a stream-level `select` was removed: use `transform` steps; for "
-                                             "records as returned: `SELECT record FROM <request>`"),
-    ("raw", True, "`raw` was removed: use `transform` steps; for records as returned: `SELECT record FROM "
-                  "<request>`"),
-    ("primary_key", ["id"], "a stream-level `primary_key` was removed: put `primary_key` on the export"),
-    ("transform_mode", "page", "`transform_mode` was removed: use `transform.mode`"),
-    ("paginator", {"type": "none"}, "a stream-level `paginator` was removed: put `paginator` on the request item"),
-    ("records", {"path": "data"}, "a stream-level `records` was removed: put `records` on the request item"),
-    ("fields", [{"name": "id", "from": "id"}], "`fields` was replaced by SQL: `transform` steps"),
-    ("on_record_error", "skip", "use TRY_CAST in a step's `select`"),
-])
-def test_removed_stream_keys_have_hints(key, value, hint):
-    issues = check(lambda d: stream(d).update({key: value}))
-    assert [(i.code, i.path) for i in issues] == [("removed-key", "streams[0].%s" % key)]
-    assert hint in issues[0].message
-
-
-def test_streams_of_the_previous_forms_get_a_hint_for_each_removed_key():
-    shorthand = {"name": "ads", "primary_key": ["id"], "request": {"http": {"path": "/ads"}},
-                 "paginator": {"type": "none"}, "records": {"path": "data"},
-                 "select": "SELECT record->>'id' AS id FROM records"}
-    issues = check(lambda d: d["streams"].append(shorthand))
-    # `request` stands for `requests` and `select` for `transform`; nothing stood for `export`
-    assert [(i.code, i.path) for i in issues] == [("missing-key", "streams[1]")] + [
-        ("removed-key", "streams[1].%s" % key) for key in ("primary_key", "request", "paginator", "records", "select")]
-    assert "a stream needs `export`" in issues[0].message
-
-    transform_stream = {"name": "report", "transform_mode": "run",
-                        "requests": [{"name": "raw_report", "http": {"path": "/report"}}],
-                        "transform": [{"name": "rows", "select": "SELECT record FROM raw_report"}],
-                        "export": {"report": {"step": "rows"}}}
-    issues = check(lambda d: d["streams"].append(transform_stream))
-    assert found(issues) == [  # and the export's step is not reported as unknown on top
-        ("removed-key", "streams[1].transform_mode", "`transform_mode` was removed: use `transform.mode`"),
-        ("bad-value", "streams[1].transform", "`transform` is a mapping {mode: page or run, steps: [...]}: move "
-                                              "these steps to `transform.steps`"),
-    ]
-
-
-def test_the_fields_dsl_was_removed():
-    def old(d):
-        stream(d).pop("transform")
-        stream(d).update(fields=[{"name": "id", "from": "id"}], on_record_error="skip")
-    issues = check(old)
-    assert codes(issues) == [(ERROR, "removed-key")] * 2  # and no missing `transform` on top
-    assert "`fields` was replaced by SQL: `transform` steps (DuckDB SELECTs" in messages(issues)
-    assert "`on_record_error` was removed with `fields`" in messages(issues)
-
-
-def test_removed_models_key_and_folder(tmp_path):
-    issues = check(lambda d: d.update(models=[{"name": "m", "primary_key": ["id"], "select": "SELECT 1"}]))
-    assert codes(issues) == [(ERROR, "removed-key")]
-    assert "models were replaced by `transform` steps: a stream's SQL steps join and aggregate its own " \
-           "`requests`" in messages(issues)
-
-    folder = write_folder(tmp_path)
-    (folder / "models").mkdir()
-    (folder / "models" / "m.yaml").write_text("select: SELECT 1\nprimary_key: [id]\n")
-    issues = validate_source(str(folder))
-    assert [(os.path.relpath(i.file, str(folder)), i.code) for i in issues] == [("models", "source-folder")]
-    assert "models were replaced by `transform` steps" in messages(issues)
 
 
 def test_stream_description():
@@ -867,13 +855,13 @@ def test_keys_are_column_names():
     def mutate(d):
         stream(d)["export"]["campaigns"]["primary_key"] = ["idd"]
         stream(d)["incremental"] = {"cursor_field": "date", "start": "-30d"}
-        request(d)["http"]["params"] = {"since": "{{ window.start }}"}
+        request(d)["operation"]["params"] = {"since": "{{ window.start }}"}
     assert check(mutate) == []
 
 
 def test_page_mode_reads_one_request_without_request_partitions():
     def two_requests(d):
-        stream(d)["requests"].append({"name": "raw_stats", "http": {"path": "/stats"}})
+        stream(d)["requests"].append({"name": "raw_stats", "operation": {"path": "/stats"}})
     assert found(check(two_requests)) == [
         ("bad-value", "streams[0].transform.mode", "`mode: page` runs the steps on each page of one request, and this "
                                                    "stream has 2: use `mode: run` to read several requests")]
@@ -895,13 +883,13 @@ def test_incremental_needs_a_request_that_uses_the_window():
 
     def with_window(d):
         without_window(d)
-        request(d)["http"]["params"] = {"start": "{{ window.start }}"}
+        request(d)["operation"]["params"] = {"start": "{{ window.start }}"}
     assert check(with_window) == []
 
     def one_of_two_requests(d):  # run mode: the other request runs once per stream partition
         without_window(d)
         stream(d)["transform"]["mode"] = "run"
-        stream(d)["requests"].append({"name": "raw_stats", "http": {"path": "/stats", "params": {
+        stream(d)["requests"].append({"name": "raw_stats", "operation": {"path": "/stats", "params": {
             "day": "{{ window.end | date('%Y%m%d') }}"}}})
     assert check(one_of_two_requests) == []
 
@@ -909,11 +897,11 @@ def test_incremental_needs_a_request_that_uses_the_window():
         without_window(d)
         sdk_source(d)
         request(d).update(async_job={
-            "submit": {"sdk": "google_ads", "method": "Submit", "arguments": {"since": "{{ window.start }}"}},
-            "poll": {"method": "Poll", "every": "15s", "timeout": "30m", "done_when": {"path": "Status", "equals": 1}},
-            "results": {"sdk": "google_ads", "method": "Results"}})
-        for key in ("sdk", "service", "method", "arguments"):
-            request(d).pop(key)
+            "submit": {"operation": {"method": "Submit", "arguments": {"since": "{{ window.start }}"}}},
+            "poll": {"operation": {"method": "Poll"}, "every": "15s", "timeout": "30m",
+                     "done_when": {"path": "Status", "equals": 1}},
+            "results": {"operation": {"method": "Results"}}})
+        request(d).pop("operation")
     assert check(in_an_async_job) == []
 
 
@@ -921,7 +909,7 @@ def test_incremental_and_window():
     def mutate(d):
         stream(d)["incremental"] = {"cursor_field": "id", "start": "{{ config.account_ids }}", "window": "1d",
                                     "lookback": "30d"}
-        request(d)["http"]["params"] = {"since": "{{ window.start }}", "until": "{{ window.end }}"}
+        request(d)["operation"]["params"] = {"since": "{{ window.start }}", "until": "{{ window.end }}"}
     assert check(mutate) == []
 
     def bad(d):
@@ -943,7 +931,7 @@ def test_incremental_durations_are_whole_days(window, lookback, problem):
         if lookback:
             incremental["lookback"] = lookback
         stream(d)["incremental"] = incremental
-        request(d)["http"]["params"] = {"day": "{{ window.start }}"}
+        request(d)["operation"]["params"] = {"day": "{{ window.start }}"}
     issues = check(mutate)
     assert messages(issues) == ("" if problem is None else "incremental " + problem)
     jsonschema = pytest.importorskip("jsonschema")
@@ -960,8 +948,8 @@ def test_incremental_durations_are_whole_days(window, lookback, problem):
 def test_request_and_step_names_share_one_namespace():
     def mutate(d):
         stream(d)["transform"]["mode"] = "run"
-        stream(d)["requests"] += [{"name": "Raw_Campaigns", "http": {"path": "/b"}},
-                                  {"name": "raw_stats", "http": {"path": "/c"}}]
+        stream(d)["requests"] += [{"name": "Raw_Campaigns", "operation": {"path": "/b"}},
+                                  {"name": "raw_stats", "operation": {"path": "/c"}}]
         steps(d).extend([{"name": "CAMPAIGNS", "select": "SELECT 1 AS id"},
                          {"name": "raw_stats", "select": "SELECT 1 AS id"}])
     assert found(check(mutate)) == [
@@ -989,7 +977,7 @@ def test_tables_are_private_to_their_stream():
     def mutate(d):
         d["streams"].append(new_stream("ads", export={"ad_rows": {"step": "ads"}}))
         stream(d)["transform"]["mode"] = "run"
-        stream(d)["requests"].append({"name": "ads", "http": {"path": "/ads"}})
+        stream(d)["requests"].append({"name": "ads", "operation": {"path": "/ads"}})
         steps(d).append({"name": "ad_rows", "select": "SELECT 1 AS id FROM ads"})
         steps(d, 1)[0]["name"] = "campaigns"
         stream(d, 1)["export"]["ad_rows"]["step"] = "campaigns"
@@ -1046,7 +1034,7 @@ def test_duplicate_streams_and_partitions():
 def test_request_partition_sources(source, code, message):
     def mutate(d):
         requests_stream(d, [{"name": "campaign_id", "from": source, "field": "id"}])
-        stream(d)["requests"].append({"name": "raw_later", "http": {"path": "/later"}})
+        stream(d)["requests"].append({"name": "raw_later", "operation": {"path": "/later"}})
         steps(d).append({"name": "totals", "select": "SELECT count(*) AS id FROM campaigns"})
         stream(d)["export"] = {"campaign_list": {"step": "campaigns"}}
         d["streams"].append(new_stream("ads", export={"ad_list": {"step": "ads"}}))
@@ -1090,7 +1078,7 @@ def test_request_partition_values_see_config_today_and_the_stream_partitions_onl
     def incremental(d):
         requests_stream(d, [{"name": "campaign_id", "values": "{{ window.end }}"}])
         stream(d)["incremental"] = {"cursor_field": "id", "start": "2026-01-01"}
-        request(d, item=1)["http"]["params"] = {"day": "{{ window.start }}"}  # the request itself can use it
+        request(d, item=1)["operation"]["params"] = {"day": "{{ window.start }}"}  # the request itself can use it
 
     def own(d):
         requests_stream(d, [{"name": "kind", "values": ["x", "y"]},
@@ -1109,7 +1097,7 @@ def test_request_partition_values_see_config_today_and_the_stream_partitions_onl
     def unpartitioned(d):
         requests_stream(d, [{"name": "campaign_id", "values": "{{ partition.account_id }}"}])
         stream(d).pop("partitions")
-        request(d)["http"]["path"] = "/campaigns"
+        request(d)["operation"]["path"] = "/campaigns"
     assert ("unavailable-reference", "streams[0].requests[1].partitions[0].values",
             "{{ partition.account_id }}: stream 'campaigns' has no partitions") in found(check(unpartitioned))
 
@@ -1137,8 +1125,8 @@ def test_batch_size_from_a_step_in_a_stream_without_partitions():
             requests_stream(d, [item])
             stream(d).pop("partitions")
             del d["spec"]["config"]
-            request(d)["http"]["path"] = "/campaigns"
-            request(d, item=1)["http"]["path"] = "/ads"
+            request(d)["operation"]["path"] = "/campaigns"
+            request(d, item=1)["operation"]["path"] = "/ads"
         return mutate
     for item in ({"name": "campaign_ids", "from": "campaigns", "field": "id", "batch_size": 200},
                  {"from": "campaigns", "fields": ["id"], "batch_size": 200}):
@@ -1374,7 +1362,7 @@ def test_unquoted_template_hint():
         streams:
           - name: s
             requests:
-              - {name: raw_s, http: {path: /a, params: {q: {{ config.x }}}}}
+              - {name: raw_s, operation: {path: /a, params: {q: {{ config.x }}}}}
     """), "s.yaml")
     assert codes(issues) == [(ERROR, "yaml-syntax")]
     assert "quote template values" in issues[0].message
@@ -1423,7 +1411,7 @@ def test_unused_anchor_in_a_single_file():
 
 def test_issue_in_merged_anchor_points_at_the_anchor():
     text = SOURCE_TEXT.replace("name: demo\n", "name: demo\nx-records: &records\n  path: elements\n  pth: x\n", 1)
-    text = text.replace("records:\n      path: elements\n", "records:\n      <<: *records\n", 1)
+    text = text.replace("records:\n        path: elements\n", "records:\n        <<: *records\n", 1)
     assert "<<: *records" in text
     issues = validate_text(text, "s.yaml")
     assert codes(issues) == [(ERROR, "unknown-key")]
@@ -1456,7 +1444,7 @@ spec: {secrets: {token: {type: string}}}
     stream_file.write_text("""\
 requests:
   - name: customer
-    sdk: google_ads
+    operation: {service: GoogleAdsService}
 transform:
   mode: run
   steps:
@@ -1468,7 +1456,7 @@ export:
     issues = validate_file(str(folder))
     assert codes(issues) == [(ERROR, "bad-value"), (ERROR, "missing-key")]
     assert [(issue.file, issue.line, issue.code, issue.path) for issue in issues] == [
-        (str(stream_file), 2, "missing-key", "requests[0]"),
+        (str(stream_file), 3, "missing-key", "requests[0].operation"),
         (str(stream_file), 8, "bad-value", "transform.steps[1].select"),
     ]
 
@@ -1575,12 +1563,12 @@ def test_non_list_values_do_not_crash(mutate):
 
 
 def test_filter_arguments_must_be_literals_and_keys_cannot_reference():
-    issues = check(lambda d: request(d)["http"].update(params={
+    issues = check(lambda d: request(d)["operation"].update(params={
         "r": "{{ config.account_ids | default(secrets.token) }}"}))
     assert codes(issues) == [(ERROR, "template-syntax")] and "quoted text or numbers" in issues[0].message
-    issues = check(lambda d: request(d)["http"].update(params={"{{ secrets.token }}": "x"}))
+    issues = check(lambda d: request(d)["operation"].update(params={"{{ secrets.token }}": "x"}))
     assert codes(issues) == [(ERROR, "template-syntax")] and "mapping keys" in issues[0].message
-    assert check(lambda d: request(d)["http"].update(params={
+    assert check(lambda d: request(d)["operation"].update(params={
         "ids": "{{ config.account_ids | join('|') }}", "n": "{{ config.account_ids | default(5) }}"})) == []
 
 
@@ -1593,7 +1581,7 @@ def test_unquoted_dates_and_non_date_starts():
     def start(value):
         def mutate(d):
             stream(d)["incremental"] = {"cursor_field": "id", "start": value}
-            request(d)["http"]["params"] = {"since": "{{ window.start }}"}
+            request(d)["operation"]["params"] = {"since": "{{ window.start }}"}
         return mutate
     for value in (-30, {"days": 30}):
         assert found(check(start(value)))[0][:2] == ("bad-value", "streams[0].incremental.start")
@@ -1605,7 +1593,7 @@ def test_incremental_start_referencing_an_optional_config_without_default_is_an_
         def apply(d):
             d["spec"]["config"]["start_date"] = definition
             stream(d)["incremental"] = {"cursor_field": "id", "start": start_value, "window": "1d"}
-            request(d)["http"]["params"] = {"since": "{{ window.start }}"}
+            request(d)["operation"]["params"] = {"since": "{{ window.start }}"}
         return apply
 
     def start_error(issues):
@@ -1622,7 +1610,7 @@ def test_incremental_start_referencing_an_optional_config_without_default_is_an_
 
 
 @pytest.mark.parametrize("mutate", [
-    lambda d: request(d).update(paginator={"type": "offset", "offset_param": None, "limit_param": "count",
+    lambda d: request(d)["operation"].update(paginator={"type": "offset", "offset_param": None, "limit_param": "count",
                                            "page_size": 10}),
     lambda d: d["streams"].append(new_stream("ads", [{"name": "p", "from_stream": None, "field": "id"}])),
     lambda d: d.update(auth={"type": "basic", "username": ["a"], "password": "{{ secrets.token }}"}),
@@ -1635,8 +1623,9 @@ def test_async_job_values_are_type_checked():
     def mutate(d):
         sdk_source(d)
         stream(d)["requests"] = [{"name": "raw_campaigns", "async_job": {
-            "submit": {"sdk": "google_ads", "method": "Submit"},
-            "poll": {"method": None, "every": "15s", "timeout": "30m", "done_when": {"path": None, "equals": 1}},
+            "submit": {"operation": {"method": "Submit"}},
+            "poll": {"operation": {"method": None}, "every": "15s", "timeout": "30m",
+                     "done_when": {"path": None, "equals": 1}},
             "download": {"url": None, "format": "csv"},
         }}]
     assert codes(check(mutate)) == [(ERROR, "bad-value")] * 3
@@ -1645,20 +1634,21 @@ def test_async_job_values_are_type_checked():
 def test_async_jobs_and_http_requests_need_the_right_auth():
     def http_job(d):
         stream(d)["requests"] = [{"name": "raw_campaigns", "async_job": {
-            "submit": {"http": {"path": "/reports", "method": "POST"}},
-            "poll": {"method": "Poll", "every": "15s", "timeout": "30m", "done_when": {"path": "Status",
-                                                                                       "equals": "Success"}},
-            "results": {"http": {"path": "/reports/{{ submit.id }}"}},
+            "submit": {"operation": {"path": "/reports", "method": "POST"}},
+            "poll": {"operation": {"method": "Poll"}, "every": "15s", "timeout": "30m",
+                     "done_when": {"path": "Status", "equals": "Success"}},
+            "results": {"operation": {"path": "/reports/{{ submit.id }}"}},
         }}]
     issues = check(http_job)
     assert codes(issues) == [(ERROR, "bad-value")] * 2
-    assert "`submit` must be an sdk request" in messages(issues) and "`results` must be" in messages(issues)
+    assert "`submit`'s operation must be a call" in messages(issues) and "`results`'s operation must be a call" in \
+        messages(issues)
 
     def http_with_provider(d):
         d["auth"] = {"provider": "google_ads", "refresh_token": "{{ secrets.token }}"}
     issues = check(http_with_provider)
     assert codes(issues) == [(ERROR, "bad-value")]
-    assert "auth provider 'google_ads' authenticates sdk requests only" in messages(issues)
+    assert "auth provider 'google_ads' takes calls (service, method, arguments) only" in messages(issues)
 
 
 def test_bare_equals_operator_loads():
@@ -1687,8 +1677,8 @@ FOLDER_SOURCE = dedent("""\
 ACCOUNTS = dedent("""\
     requests:
       - name: raw_accounts
-        http: {path: /accounts, params: {ids: "{{ config.account_ids | join(',') }}"}}
-        records: {path: data}
+        operation: {path: /accounts, params: {ids: "{{ config.account_ids | join(',') }}"},
+                    records: {path: data}}
     transform:
       mode: page
       steps:
@@ -1702,8 +1692,8 @@ CAMPAIGNS = dedent("""\
       - {name: account_id, from_stream: accounts, field: account_id}
     requests:
       - name: raw_campaigns
-        http: {path: "/accounts/{{ partition.account_id }}/campaigns"}
-        records: {path: data}
+        operation: {path: "/accounts/{{ partition.account_id }}/campaigns",
+                    records: {path: data}}
     transform:
       mode: page
       steps:
@@ -1785,9 +1775,9 @@ def test_folder_findings_in_steps_and_request_items_point_to_their_line(tmp_path
     ads = dedent("""\
         requests:
           - name: raw_ads
-            http: {path: /ads}
+            operation: {path: /ads}
           - name: raw_stats
-            http: {path: /stats, method: get}
+            operation: {path: /stats, method: get}
             partitions:
               - {name: ad_id, from: ad_rows, field: id}
         transform:
@@ -1802,7 +1792,7 @@ def test_folder_findings_in_steps_and_request_items_point_to_their_line(tmp_path
     folder = write_folder(tmp_path, files={"accounts.yaml": ACCOUNTS, "ads.yaml": ads})
     issues = validate_source(str(folder))
     assert where(issues, folder) == [
-        ("streams/ads.yaml", 5, "bad-value", "requests[1].http.method"),
+        ("streams/ads.yaml", 5, "bad-value", "requests[1].operation.method"),
         ("streams/ads.yaml", 7, "unknown-source", "requests[1].partitions[0].from"),
         ("streams/ads.yaml", 12, "duplicate-step", "transform.steps[1].name"),
         ("streams/ads.yaml", 13, "bad-value", "transform.steps[1].select"),
@@ -1981,7 +1971,7 @@ def test_stream_file_kind_attribute(tmp_path):
 
 def test_non_mapping_paginator_and_fuzz_mapping_keys():
     def request_paginator_str(d):
-        request(d)["paginator"] = "cursor"
+        request(d)["operation"]["paginator"] = "cursor"
     issues = check(request_paginator_str)
     assert any(i.code in ("bad-type", "bad-value") for i in issues)
 
@@ -2002,7 +1992,7 @@ def test_non_mapping_paginator_and_fuzz_mapping_keys():
 
         for key in ("headers", "params", "rate_limit", "paginator"):
             def mutate_http(d, k=key, val=scalar):
-                request(d)["http"][k] = val
+                request(d)["operation"][k] = val
             issues = check(mutate_http)
             assert isinstance(issues, list)
             assert all(hasattr(i, "code") for i in issues)

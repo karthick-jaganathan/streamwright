@@ -32,7 +32,7 @@ from streamwright.core import cli
 from streamwright.core.engine import sql
 from streamwright.core.engine.runner import SourceError, SourceRunner, partition_key
 from streamwright.core.outputs.output import open_output
-from streamwright.core.runtime.testing import MemoryOutput, page_stream
+from streamwright.core.sdk.testing import MemoryOutput, page_stream
 
 TODAY = datetime.date(2026, 10, 3)
 DAYS = ("2026-10-01", "2026-10-02", "2026-10-03")
@@ -64,9 +64,9 @@ def run_mode(name, requests, steps, export, **stream):
 def report_stream():
     """Campaigns (read once) and daily stats (read per window), joined and summed into two exports."""
     return run_mode("daily_reports", [
-        {"name": "raw_campaigns", "http": {"path": "/campaigns"}, "records": {"path": "data"}},
-        {"name": "raw_stats", "http": {"path": "/stats", "params": {"day": "{{ window.start }}"}},
-         "records": {"path": "data"}}], [
+        {"name": "raw_campaigns", "operation": {"path": "/campaigns", "records": {"path": "data"}}},
+        {"name": "raw_stats", "operation": {"path": "/stats", "params": {"day": "{{ window.start }}"},
+                                            "records": {"path": "data"}}}], [
         {"name": "campaigns", "select": "SELECT record->>'id' AS campaign_id, record->>'name' AS campaign_name, "
                                         "record->>'account' AS account_id FROM raw_campaigns"},
         {"name": "stats", "select": "SELECT record->>'campaign' AS campaign_id, (record->>'day')::DATE AS day, "
@@ -127,7 +127,7 @@ def test_run_mode_runs_requests_and_steps_and_writes_every_export(api):
 def test_selection_takes_stream_and_export_names_and_a_stream_writes_all_its_exports(api):
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}]})
     source = demo(api)
-    source["streams"].append(page_stream("items", {"http": {"path": "/items"}},
+    source["streams"].append(page_stream("items", {"operation": {"path": "/items"}},
                                          "SELECT (record->>'id')::BIGINT AS id FROM records",
                                          records={"path": "data"}))
     assert list(run(source, streams=["account_daily"]).schemas) == ["campaign_daily", "account_daily"]
@@ -155,16 +155,30 @@ def test_export_keys_are_checked_and_rows_ordered(api):
         run(source)
 
 
+@pytest.mark.parametrize("mode", ["page", "run"])
+def test_rows_with_a_null_primary_key_fail_in_both_modes(api, mode):
+    api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}, {"id": None}]})
+    stream = page_stream("items", {"operation": {"path": "/items"}},
+                         "SELECT (record->>'id')::BIGINT AS id FROM records", records={"path": "data"},
+                         primary_key=["id"])
+    stream["transform"]["mode"] = mode
+    output = MemoryOutput()
+    with pytest.raises(SourceError, match=r"export 'items': primary_key column\(s\) are null: 'id' in 1 row\(s\)"):
+        run(source_with(api, stream), output=output)
+    assert records(output, "items") == []
+
+
 def test_requests_partition_from_a_request_and_a_step(api):
     api.routes[("GET", "/parents")] = lambda request: (200, {"data": [{"id": "a"}, {"id": "b"}, {"id": "a"}]})
     api.routes[("GET", "/children")] = lambda request: (200, {"data": [{"id": request["params"]["parent"] + "1"}]})
     api.routes[("GET", "/grand")] = lambda request: (200, {"data": [{"id": request["params"]["child"] + "x"}]})
     source = source_with(api, run_mode("tree", [
-        {"name": "raw_parents", "http": {"path": "/parents"}, "records": {"path": "data"}},
+        {"name": "raw_parents", "operation": {"path": "/parents", "records": {"path": "data"}}},
         {"name": "raw_children", "partitions": [{"name": "parent", "from": "raw_parents", "field": "id"}],
-         "http": {"path": "/children", "params": {"parent": "{{ partition.parent }}"}}, "records": {"path": "data"}},
+         "operation": {"path": "/children", "params": {"parent": "{{ partition.parent }}"},
+                       "records": {"path": "data"}}},
         {"name": "raw_grand", "partitions": [{"name": "child", "from": "child_rows", "field": "child_id"}],
-         "http": {"path": "/grand", "params": {"child": "{{ partition.child }}"}}, "records": {"path": "data"}}], [
+         "operation": {"path": "/grand", "params": {"child": "{{ partition.child }}"}, "records": {"path": "data"}}}], [
         {"name": "child_rows",
          "select": "SELECT partition->>'parent' AS parent_id, record->>'id' AS child_id FROM raw_children"},
         {"name": "grand_rows",
@@ -184,14 +198,13 @@ def test_run_mode_stream_that_skips_a_partition_writes_the_others_and_their_book
         {"id": request["params"]["account"] + "-c1"}, {"id": request["params"]["account"] + "-c2"}]})
     api.routes[("GET", "/stats")] = stats
     source = source_with(api, run_mode("report", [
-        {"name": "campaign_list", "http": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"}},
-         "records": {"path": "data"}},
+        {"name": "campaign_list", "operation": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"},
+                                                "records": {"path": "data"}}},
         # partitioned from a step: runs after it, so the step ran on a2's campaigns before a2 failed; `account`
         # names the stream partition, so each account's calls use only its own campaigns
         {"name": "daily_stats", "partitions": [{"from": "campaign_rows", "fields": ["account", "campaign_id"]}],
-         "http": {"path": "/stats", "params": {"campaign": "{{ partition.campaign_id }}",
-                                               "day": "{{ window.start }}"}},
-         "records": {"path": "data"}}], [
+         "operation": {"path": "/stats", "params": {"campaign": "{{ partition.campaign_id }}",
+                                               "day": "{{ window.start }}"}, "records": {"path": "data"}}}], [
         {"name": "campaign_rows",
          "select": "SELECT partition->>'account' AS account, record->>'id' AS campaign_id FROM campaign_list"},
         {"name": "stat_rows",
@@ -218,7 +231,7 @@ def test_run_mode_stream_that_skips_a_partition_writes_the_others_and_their_book
 def test_run_mode_resolves_five_step_chain_and_multiple_exports(api):
     api.routes[("GET", "/numbers")] = lambda request: (200, {"data": [{"id": 1, "value": 2}, {"id": 2, "value": 3}]})
     source = source_with(api, run_mode(
-        "chain", [{"name": "numbers", "http": {"path": "/numbers"}, "records": {"path": "data"}}], [
+        "chain", [{"name": "numbers", "operation": {"path": "/numbers", "records": {"path": "data"}}}], [
             {"name": "step1", "select": "SELECT (record->>'id')::BIGINT AS id, (record->>'value')::BIGINT AS value "
                                         "FROM numbers"},
             {"name": "step2", "select": "SELECT id, value * 2 AS doubled FROM step1"},
@@ -241,10 +254,12 @@ def test_run_mode_mixes_windowed_and_non_window_requests_and_partition_bookmarks
         "account": request["params"]["account"], "day": request["params"]["day"], "clicks": "1"}]})
     api.routes[("GET", "/profile")] = lambda request: (200, {"data": [{"account": request["params"]["account"]}]})
     source = source_with(api, run_mode("daily", [
-        {"name": "daily_raw", "records": {"path": "data"},
-         "http": {"path": "/daily", "params": {"account": "{{ partition.account }}", "day": "{{ window.start }}"}}},
-        {"name": "profiles", "http": {"path": "/profile", "params": {"account": "{{ partition.account }}"}},
-         "records": {"path": "data"}}], [
+        {"name": "daily_raw", "operation": {"path": "/daily",
+                                            "params": {"account": "{{ partition.account }}",
+                                                       "day": "{{ window.start }}"},
+                                            "records": {"path": "data"}}},
+        {"name": "profiles", "operation": {"path": "/profile", "params": {"account": "{{ partition.account }}"},
+                                           "records": {"path": "data"}}}], [
         {"name": "daily_rows", "select": "SELECT partition->>'account' AS account, (record->>'day')::DATE AS day, "
                                          "(record->>'clicks')::BIGINT AS clicks FROM daily_raw"},
         {"name": "profile_windows",
@@ -270,10 +285,10 @@ def test_run_mode_request_reads_every_page_and_later_streams_reuse_its_names(api
     api.routes[("GET", "/other")] = lambda request: (200, {"data": [{"id": 9}]})
     select = "SELECT (record->>'id')::BIGINT AS id FROM records"
     source = source_with(api, run_mode(
-        "items", [{"name": "records", "http": {"path": "/items"}, "records": {"path": "data"},
-                   "paginator": cursor_paginator()}],
+        "items", [{"name": "records", "operation": {"path": "/items", "records": {"path": "data"},
+                                                    "paginator": cursor_paginator()}}],
         [{"name": "items", "select": select}], {"items": {"step": "items", "primary_key": ["id"]}}),
-        page_stream("other", {"http": {"path": "/other"}}, select, records={"path": "data"}))
+        page_stream("other", {"operation": {"path": "/other"}}, select, records={"path": "data"}))
     output = run(source)
     assert records(output, "items") == [{"id": 1}, {"id": 2}, {"id": 3}]
     assert records(output, "other") == [{"id": 9}]
@@ -285,9 +300,9 @@ def test_requests_explode_their_records(api):
     select = "SELECT record->>'id' AS account_id, record->>'campaign' AS campaign_id FROM %s"
     records_spec = {"path": "data", "explode": "campaigns"}
     source = source_with(api, run_mode(
-        "listed", [{"name": "account_list", "http": {"path": "/accounts"}, "records": records_spec}],
+        "listed", [{"name": "account_list", "operation": {"path": "/accounts", "records": records_spec}}],
         [{"name": "listed_rows", "select": select % "account_list"}], {"listed": {"step": "listed_rows"}}),
-        page_stream("paged", {"http": {"path": "/accounts"}}, select % "records", records=records_spec))
+        page_stream("paged", {"operation": {"path": "/accounts"}}, select % "records", records=records_spec))
     output = run(source)
     expected = [{"account_id": "a1", "campaign_id": "c1"}, {"account_id": "a1", "campaign_id": "c2"}]
     assert records(output, "listed") == expected and records(output, "paged") == expected
@@ -296,7 +311,7 @@ def test_requests_explode_their_records(api):
 def test_each_stream_drops_its_tables_when_it_ends(api, monkeypatch):
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}]})
     source = demo(api)
-    source["streams"].append(page_stream("items", {"http": {"path": "/items"}},
+    source["streams"].append(page_stream("items", {"operation": {"path": "/items"}},
                                          "SELECT (record->>'id')::BIGINT AS id FROM records",
                                          records={"path": "data"}))
     tables = []
@@ -315,9 +330,10 @@ def test_run_mode_order_ignores_the_case_of_names(api):
     api.routes[("GET", "/parents")] = lambda request: (200, {"data": [{"id": "a"}, {"id": "b"}]})
     api.routes[("GET", "/children")] = lambda request: (200, {"data": [{"id": request["params"]["parent"] + "1"}]})
     source = source_with(api, run_mode("tree", [
-        {"name": "Parents", "http": {"path": "/parents"}, "records": {"path": "data"}},
+        {"name": "Parents", "operation": {"path": "/parents", "records": {"path": "data"}}},
         {"name": "Children", "partitions": [{"name": "parent", "from": "Parent_Rows", "field": "id"}],
-         "http": {"path": "/children", "params": {"parent": "{{ partition.parent }}"}}, "records": {"path": "data"}}], [
+         "operation": {"path": "/children", "params": {"parent": "{{ partition.parent }}"},
+                       "records": {"path": "data"}}}], [
         {"name": "parent_rows", "select": "SELECT record->>'id' AS id FROM PARENTS"},
         {"name": "child_rows", "select": "SELECT record->>'id' AS child_id FROM children"}],
         {"tree_out": {"step": "Child_Rows"}}))
@@ -329,8 +345,8 @@ def test_run_mode_step_failures_name_the_stream_and_step_and_write_nothing(api):
     api.routes[("GET", "/bad")] = lambda request: (200, {"data": [{"id": "secret-token-1",
                                                                    "day": request["params"]["day"]}]})
     source = source_with(api, run_mode(
-        "bad", [{"name": "raw_bad", "http": {"path": "/bad", "params": {"day": "{{ window.start }}"}},
-                 "records": {"path": "data"}}],
+        "bad", [{"name": "raw_bad", "operation": {"path": "/bad", "params": {"day": "{{ window.start }}"},
+                                                  "records": {"path": "data"}}}],
         [{"name": "bad_rows", "select": "SELECT CAST(record->>'id' AS INTEGER) AS id, (record->>'day')::DATE AS day "
                                         "FROM raw_bad"}],
         {"bad": {"step": "bad_rows", "primary_key": ["id"]}},
@@ -355,7 +371,7 @@ def test_page_mode_runs_steps_and_exports_per_page(api):
         data = pages.pop(0)
         return 200, dict({"data": data}, **({"next": "again"} if pages else {}))
     api.routes[("GET", "/items")] = page
-    source = source_with(api, page_stream("items", {"http": {"path": "/items"}, "paginator": cursor_paginator()},
+    source = source_with(api, page_stream("items", {"operation": {"path": "/items", "paginator": cursor_paginator()}},
                                           "SELECT (record->>'id')::BIGINT AS id FROM records",
                                           records={"path": "data"}, primary_key=["id"]))
     assert records(run(source), "items") == [{"id": 2}, {"id": 1}]
@@ -366,7 +382,7 @@ def test_page_mode_stream_that_skips_a_partition_writes_the_others_and_their_boo
         (500, {}) if request["params"]["account"] == "a2" and request["params"]["day"] == "2026-10-02" else
         (200, {"data": [{"clicks": "1"}]}))
     source = source_with(api, page_stream(
-        "stats", {"name": "raw_stats", "http": {"path": "/stats", "params": {
+        "stats", {"name": "raw_stats", "operation": {"path": "/stats", "params": {
             "account": "{{ partition.account }}", "day": "{{ window.start }}"}}},
         "SELECT partition->>'account' AS account, window_start AS day, (record->>'clicks')::BIGINT AS clicks "
         "FROM raw_stats", records={"path": "data"}, primary_key=["account", "day"], on_partition_error="skip",
@@ -388,8 +404,8 @@ def test_page_mode_windows_state_per_window_and_duplicate_keys_across_pages(api)
                          **({"next": "second"} if page_number == "first" else {}))
     api.routes[("GET", "/items")] = page
     source = source_with(api, page_stream(
-        "items", {"name": "items_raw", "http": {"path": "/items", "params": {"day": "{{ window.start }}"}},
-                  "paginator": cursor_paginator()},
+        "items", {"name": "items_raw", "operation": {"path": "/items", "params": {"day": "{{ window.start }}"},
+                                                     "paginator": cursor_paginator()}},
         "SELECT (record->>'id')::BIGINT AS id, (record->>'day')::DATE AS day, record->>'page' AS page FROM items_raw",
         records={"path": "data"}, primary_key=["id"],
         incremental={"cursor_field": "day", "start": "2026-10-02", "window": "1d"}))
@@ -420,7 +436,7 @@ class CountingOutput(MemoryOutput):
 def test_page_mode_writes_each_export_schema_once_so_outputs_keep_every_page(api, tmp_path):
     pages = {"": {"data": [{"id": 1}, {"id": 2}], "next": "p2"}, "p2": {"data": [{"id": 3}]}}
     api.routes[("GET", "/items")] = lambda request: (200, pages[request["params"].get("cursor", "")])
-    stream = page_stream("items", {"http": {"path": "/items"}, "paginator": cursor_paginator()},
+    stream = page_stream("items", {"operation": {"path": "/items", "paginator": cursor_paginator()}},
                          "SELECT (record->>'id')::BIGINT AS id FROM records", records={"path": "data"})
     stream["transform"]["steps"].append({"name": "doubled_rows", "select": "SELECT id * 2 AS doubled FROM items"})
     stream["export"]["doubled"] = {"step": "doubled_rows"}
@@ -475,7 +491,7 @@ PARAMETERS = ("SELECT $client AS client, $limit AS limit_value, $ratio AS ratio,
 @pytest.mark.parametrize("mode", ["page", "run"])
 def test_config_parameters_are_bound_values_with_their_config_types(api, mode):
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}, {"id": 9}]})
-    stream = page_stream("items", {"http": {"path": "/items"}}, PARAMETERS, records={"path": "data"})
+    stream = page_stream("items", {"operation": {"path": "/items"}}, PARAMETERS, records={"path": "data"})
     stream["transform"]["mode"] = mode
     config = {"client": "O'Brien'); DROP TABLE records; --", "limit": 5, "ratio": 2, "on": True,
               "since": datetime.date(2026, 10, 1), "ids": [1, 2], "names": [], "missing": None}
@@ -493,7 +509,7 @@ def test_config_parameters_are_bound_values_with_their_config_types(api, mode):
 def test_steps_keep_their_column_types_when_config_values_are_null(api, mode):
     """DuckDB folds `'a' || NULL` into an INTEGER NULL: a step's columns keep their types whatever the values."""
     api.routes[("GET", "/items")] = lambda request: (200, {"data": [{"id": 1}, {"id": 2}]})
-    stream = page_stream("items", {"http": {"path": "/items"}}, "SELECT (record->>'id')::BIGINT AS id, 'p-' || "
+    stream = page_stream("items", {"operation": {"path": "/items"}}, "SELECT (record->>'id')::BIGINT AS id, 'p-' || "
                                                                 "$client AS label, $ids[1] AS first_id FROM records",
                          records={"path": "data"})
     stream["transform"]["mode"] = mode
@@ -523,7 +539,7 @@ def test_steps_keep_their_column_types_when_config_values_are_null(api, mode):
 
 def test_config_parameters_have_their_types_in_the_checks(api):
     def problems(query):
-        return sql.check_source(source_with(api, page_stream("items", {"http": {"path": "/x"}}, query),
+        return sql.check_source(source_with(api, page_stream("items", {"operation": {"path": "/x"}}, query),
                                             spec=config_spec()))
     assert problems("SELECT $since + 1 AS next_day, $ids[1] + $limit AS n, $names AS names FROM records") == []
     # where DuckDB takes no subquery (lambdas, `= ANY(list)`, arguments that must be constants)
@@ -540,7 +556,7 @@ def test_config_parameters_have_their_types_in_the_checks(api):
 
 
 def test_parameters_that_are_not_config_inputs_stop_the_run_and_secrets_are_never_parameters(api):
-    stream = page_stream("items", {"http": {"path": "/items"}}, "SELECT $client AS client, $token AS token, "
+    stream = page_stream("items", {"operation": {"path": "/items"}}, "SELECT $client AS client, $token AS token, "
                                                                 "$nope AS nope FROM records")
     source = source_with(api, stream, spec={"config": {"client": {"type": "string"}},
                                             "secrets": {"token": {"type": "string"}}})
@@ -564,7 +580,7 @@ def listed_spec():
 def status_stream(api, condition, mode="page"):
     """A stream of STATUSES whose step keeps the ids of the records that meet `condition`."""
     api.routes[("GET", "/items")] = lambda request: (200, {"data": STATUSES})
-    stream = page_stream("items", {"http": {"path": "/items"}},
+    stream = page_stream("items", {"operation": {"path": "/items"}},
                          "SELECT (record->>'id')::BIGINT AS id FROM records WHERE " + condition,
                          records={"path": "data"})
     stream["transform"]["mode"] = mode
@@ -605,7 +621,7 @@ def test_list_parameters_compared_as_one_value_are_reported_before_any_request(a
 def test_parameters_are_plain_casts_only_where_duckdb_takes_no_subquery(api):
     # a reused column alias, TRY, a lambda and a non-inner join take no subquery: the steps compile with plain casts,
     # and run
-    stream = page_stream("items", {"http": {"path": "/items"}},
+    stream = page_stream("items", {"operation": {"path": "/items"}},
                          "SELECT (record->>'id')::BIGINT AS id, $limit AS lim, lim + 1 AS next, "
                          "TRY(CAST($limit AS TINYINT)) AS small, list_transform([id], lambda x: x * $limit) AS scaled "
                          "FROM records", records={"path": "data"})
@@ -638,13 +654,13 @@ def test_request_partitions_from_request_dotted_path_fields_distinct_and_missing
     api.routes[("GET", "/metric")] = lambda request: (200, {"data": [{
         "account": request["params"]["account"], "campaign": request["params"]["campaign"]}]})
     source = source_with(api, run_mode("request_parts", [
-        {"name": "parents", "http": {"path": "/parents"}, "records": {"path": "data"}},
+        {"name": "parents", "operation": {"path": "/parents", "records": {"path": "data"}}},
         {"name": "owners", "partitions": [{"name": "owner", "from": "parents", "field": "owner.id"}],
-         "http": {"path": "/owner", "params": {"owner": "{{ partition.owner }}"}}, "records": {"path": "data"}},
+         "operation": {"path": "/owner", "params": {"owner": "{{ partition.owner }}"}, "records": {"path": "data"}}},
         {"name": "metrics", "partitions": [{"from": "parents", "fields": ["account", "campaign"]}],
-         "http": {"path": "/metric", "params": {"account": "{{ partition.account }}",
-                                                "campaign": "{{ partition.campaign }}"}},
-         "records": {"path": "data"}}], [
+         "operation": {"path": "/metric", "params": {"account": "{{ partition.account }}",
+                                                "campaign": "{{ partition.campaign }}"},
+                       "records": {"path": "data"}}}], [
         {"name": "owner_rows", "select": "SELECT record->>'owner' AS owner FROM owners"},
         {"name": "metric_rows",
          "select": "SELECT record->>'account' AS account, record->>'campaign' AS campaign FROM metrics"}], {
@@ -660,11 +676,11 @@ def test_request_partitions_from_request_dotted_path_fields_distinct_and_missing
 def ads_source(api, partition):
     """Accounts a1 and a2, each with two campaigns; an ad request partitioned by `partition`."""
     return source_with(api, run_mode("ads", [
-        {"name": "campaign_list", "http": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"}},
-         "records": {"path": "data"}},
-        {"name": "ads_raw", "partitions": [partition], "records": {"path": "data"}, "http": {
+        {"name": "campaign_list", "operation": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"},
+                                                "records": {"path": "data"}}},
+        {"name": "ads_raw", "partitions": [partition], "operation": {
             "path": "/ads", "params": {"account": "{{ partition.account }}",
-                                       "campaign": "{{ partition.campaign }}"}}}], [
+                                       "campaign": "{{ partition.campaign }}"}, "records": {"path": "data"}}}], [
         {"name": "campaign_rows",
          "select": "SELECT partition->>'account' AS account, record->>'campaign' AS campaign FROM campaign_list"},
         {"name": "ad_rows",
@@ -712,12 +728,13 @@ def test_request_partitions_from_a_request_use_its_records_of_the_same_stream_pa
     api.routes[("GET", "/campaigns")] = lambda request: (200, {"Campaign": campaigns[request["params"]["account"]]})
     api.routes[("GET", "/ad_groups")] = lambda request: (200, {"AdGroup": [{"Id": request["params"]["campaign"]}]})
     source = source_with(api, run_mode("tree", [
-        {"name": "raw_campaigns", "records": {"path": "Campaign"},
-         "http": {"path": "/campaigns", "params": {"account": "{{ partition.account_id }}"}}},
-        {"name": "raw_ad_groups", "records": {"path": "AdGroup"},
-         "partitions": [{"name": "campaign_id", "from": "raw_campaigns", "field": "Id"}],
-         "http": {"path": "/ad_groups", "params": {"campaign": "{{ partition.campaign_id }}"},
-                  "headers": {"CustomerAccountId": "{{ partition.account_id }}"}}}], [
+        {"name": "raw_campaigns", "operation": {"path": "/campaigns",
+                                                "params": {"account": "{{ partition.account_id }}"},
+                                                "records": {"path": "Campaign"}}},
+        {"name": "raw_ad_groups", "partitions": [{"name": "campaign_id", "from": "raw_campaigns", "field": "Id"}],
+         "operation": {"path": "/ad_groups", "params": {"campaign": "{{ partition.campaign_id }}"},
+                       "headers": {"CustomerAccountId": "{{ partition.account_id }}"},
+                       "records": {"path": "AdGroup"}}}], [
         {"name": "ad_group_rows", "select": "SELECT partition->>'account_id' AS account_id, partition->>'campaign_id' "
                                             "AS campaign_id, record->>'Id' AS ad_group_id FROM raw_ad_groups"}],
         {"ad_group_tree": {"step": "ad_group_rows", "primary_key": ["account_id", "ad_group_id"]}},
@@ -740,12 +757,13 @@ def test_request_partitions_from_a_request_compare_stream_partition_values_as_js
     api.routes[("POST", "/campaigns")] = campaigns
     api.routes[("POST", "/ads")] = lambda request: (200, {"data": [json.loads(request["body"])]})
     source = source_with(api, run_mode("ads", [
-        {"name": "campaign_list", "records": {"path": "data"},
-         "http": {"method": "POST", "path": "/campaigns", "json": {"account": "{{ partition.account }}"}}},
-        {"name": "ad_list", "records": {"path": "data"},
-         "partitions": [{"name": "campaign", "from": "campaign_list", "field": "campaign.id"}],
-         "http": {"method": "POST", "path": "/ads", "json": {"account": "{{ partition.account }}",
-                                                             "campaign": "{{ partition.campaign }}"}}}],
+        {"name": "campaign_list", "operation": {"method": "POST", "path": "/campaigns",
+                                                "json": {"account": "{{ partition.account }}"},
+                                                "records": {"path": "data"}}},
+        {"name": "ad_list", "partitions": [{"name": "campaign", "from": "campaign_list", "field": "campaign.id"}],
+         "operation": {"method": "POST", "path": "/ads", "json": {"account": "{{ partition.account }}",
+                                                             "campaign": "{{ partition.campaign }}"},
+                       "records": {"path": "data"}}}],
         [{"name": "ad_rows", "select": "SELECT record->>'campaign' AS campaign FROM ad_list"}],
         {"ad_rows_out": {"step": "ad_rows"}}, partitions=[{"name": "account", "values": [7, "7"]}]))
     run(source)
@@ -760,14 +778,14 @@ def test_request_partition_sources_without_rows_and_values_matched_as_text(api):
     api.routes[("GET", "/ad_groups")] = lambda request: (200, {"data": [{"id": request["params"]["campaign"]}]})
     source = source_with(api, run_mode("tree", [
         {"name": "campaign_types", "partitions": [{"name": "kind", "values": []}],
-         "http": {"path": "/campaigns"}, "records": {"path": "data"}},
+         "operation": {"path": "/campaigns", "records": {"path": "data"}}},
         {"name": "typed_ad_groups", "partitions": [{"name": "campaign", "from": "campaign_types", "field": "id"}],
-         "http": {"path": "/ad_groups", "params": {"campaign": "{{ partition.campaign }}"}},
-         "records": {"path": "data"}},
-        {"name": "campaign_list", "http": {"path": "/campaigns"}, "records": {"path": "data"}},
+         "operation": {"path": "/ad_groups", "params": {"campaign": "{{ partition.campaign }}"},
+                       "records": {"path": "data"}}},
+        {"name": "campaign_list", "operation": {"path": "/campaigns", "records": {"path": "data"}}},
         {"name": "ad_list", "partitions": [{"from": "campaign_rows", "fields": ["account_id", "campaign"]}],
-         "http": {"path": "/ad_groups", "params": {"campaign": "{{ partition.campaign }}"}},
-         "records": {"path": "data"}}], [
+         "operation": {"path": "/ad_groups", "params": {"campaign": "{{ partition.campaign }}"},
+                       "records": {"path": "data"}}}], [
         {"name": "campaign_rows", "select": "SELECT 5::BIGINT AS account_id, record->>'id' AS campaign "
                                             "FROM campaign_list"},
         {"name": "ad_group_rows", "select": "SELECT partition->>'account_id' AS account_id, record->>'id' AS id "
@@ -788,11 +806,11 @@ class FakeApiStub:
 def test_request_partitions_read_each_source_once_for_many_stream_partitions():
     """1000 accounts with 100 campaigns each: each `from:` source is read once, not once per account."""
     stream = run_mode("tree", [
-        {"name": "raw_campaigns", "http": {"path": "/campaigns"}},
+        {"name": "raw_campaigns", "operation": {"path": "/campaigns"}},
         {"name": "raw_ad_groups", "partitions": [{"name": "campaign_id", "from": "raw_campaigns", "field": "Id"}],
-         "http": {"path": "/ad_groups"}},
+         "operation": {"path": "/ad_groups"}},
         {"name": "raw_ads", "partitions": [{"from": "campaign_rows", "fields": ["account_id", "campaign_id"]}],
-         "http": {"path": "/ads"}}],
+         "operation": {"path": "/ads"}}],
         [{"name": "campaign_rows", "select": "SELECT partition->>'account_id' AS account_id, record->>'Id' AS "
                                              "campaign_id FROM raw_campaigns"}],
         {"tree": {"step": "campaign_rows"}}, partitions=[{"name": "account_id", "values": [
@@ -817,7 +835,7 @@ def test_request_partitions_read_each_source_once_for_many_stream_partitions():
             assert {item["account_id"] for item in found[7]} == {"a7"}
         assert time.time() - started < 5  # it took minutes when each account read every row
         # with `batch_size`: still one read of the source, each account's own 100 campaigns in lists of up to 30
-        request = {"name": "raw_batched", "http": {"path": "/batched"}, "partitions": [
+        request = {"name": "raw_batched", "operation": {"path": "/batched"}, "partitions": [
             {"name": "campaign_ids", "from": "raw_campaigns", "field": "Id", "batch_size": 30}]}
         resolve = runner.partitions_planner.request_partitions(stream, request)
         found = [resolve(partition) for partition in partitions]
@@ -826,7 +844,7 @@ def test_request_partitions_read_each_source_once_for_many_stream_partitions():
         assert sorted(campaign for item in found[7] for campaign in item["campaign_ids"]) == sorted(
             "c%d" % n for n in range(100))
         # from a step, scoped by the stream partition field it lists: the same lists of each account's own campaigns
-        request = {"name": "raw_batched_rows", "http": {"path": "/batched"}, "partitions": [
+        request = {"name": "raw_batched_rows", "operation": {"path": "/batched"}, "partitions": [
             {"from": "campaign_rows", "fields": ["account_id", "campaign_id"], "batch_size": 30}]}
         resolve = runner.partitions_planner.request_partitions(stream, request)
         found = [resolve(partition) for partition in partitions]
@@ -854,10 +872,10 @@ def test_batch_size_from_a_step_reads_lists_of_values_and_every_row_lands(api):
     api.routes[("POST", "/details")] = lambda request: (200, {"data": [
         {"id": item, "detail": "d-" + item} for item in body(request)["ids"]]})
     source = source_with(api, run_mode("details", [
-        {"name": "raw_ids", "http": {"path": "/ids"}, "records": {"path": "data"}},
+        {"name": "raw_ids", "operation": {"path": "/ids", "records": {"path": "data"}}},
         {"name": "raw_details", "partitions": [{"name": "ids", "from": "id_rows", "field": "id", "batch_size": 200}],
-         "http": {"method": "POST", "path": "/details", "json": {"ids": "{{ partition.ids }}"}},
-         "records": {"path": "data"}}], [
+         "operation": {"method": "POST", "path": "/details", "json": {"ids": "{{ partition.ids }}"},
+                       "records": {"path": "data"}}}], [
         {"name": "id_rows", "select": "SELECT record->>'id' AS id FROM raw_ids"},
         {"name": "detail_rows", "select": "SELECT record->>'id' AS id, record->>'detail' AS detail, "
                                           "json_array_length(partition->'ids')::BIGINT AS batch FROM raw_details"},
@@ -878,8 +896,8 @@ def test_batch_size_on_values_gives_distinct_values_in_order_without_missing_one
     def items(size, ids):
         source = source_with(api, run_mode("items", [
             {"name": "raw_items", "partitions": [{"name": "ids", "values": "{{ config.ids }}", "batch_size": size}],
-             "http": {"method": "POST", "path": "/items", "json": {"ids": "{{ partition.ids }}"}},
-             "records": {"path": "data"}}],
+             "operation": {"method": "POST", "path": "/items", "json": {"ids": "{{ partition.ids }}"},
+                           "records": {"path": "data"}}}],
             [{"name": "item_rows", "select": "SELECT partition->>'ids' AS ids FROM raw_items"}],
             {"item_rows": {"step": "item_rows"}}))
         output = run(source, config={"ids": ids})
@@ -900,14 +918,14 @@ def test_batch_size_lists_each_stream_partitions_own_values_crossed_with_other_i
     api.routes[("POST", "/ads")] = lambda request: (200, {"data": [
         {"campaign": campaign, "kind": body(request)["kind"]} for campaign in body(request)["campaigns"]]})
     source = source_with(api, run_mode("ads", [
-        {"name": "raw_campaigns", "http": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"}},
-         "records": {"path": "data"}},
-        {"name": "raw_ads", "records": {"path": "data"}, "partitions": [
+        {"name": "raw_campaigns", "operation": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"},
+                                                "records": {"path": "data"}}},
+        {"name": "raw_ads", "partitions": [
             {"name": "kind", "values": ["x", "y"]},
             {"name": "campaigns", "from": "raw_campaigns", "field": "id", "batch_size": 2}],
-         "http": {"method": "POST", "path": "/ads", "json": {
+         "operation": {"method": "POST", "path": "/ads", "json": {
              "account": "{{ partition.account }}", "kind": "{{ partition.kind }}",
-             "campaigns": "{{ partition.campaigns }}"}}}],
+             "campaigns": "{{ partition.campaigns }}"}, "records": {"path": "data"}}}],
         [{"name": "ad_rows", "select": "SELECT partition->>'account' AS account, record->>'kind' AS kind, "
                                        "record->>'campaign' AS campaign FROM raw_ads"}],
         {"ad_rows": {"step": "ad_rows", "primary_key": ["account", "kind", "campaign"]}},
@@ -926,12 +944,12 @@ def test_batch_size_lists_are_read_for_each_window_and_bookmarks_stay_per_stream
     api.routes[("POST", "/stats")] = lambda request: (200, {"data": [
         {"campaign": campaign, "day": body(request)["day"]} for campaign in body(request)["campaigns"]]})
     source = source_with(api, run_mode("stats", [
-        {"name": "raw_campaigns", "http": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"}},
-         "records": {"path": "data"}},
-        {"name": "raw_stats", "records": {"path": "data"},
+        {"name": "raw_campaigns", "operation": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"},
+                                                "records": {"path": "data"}}},
+        {"name": "raw_stats",
          "partitions": [{"name": "campaigns", "from": "raw_campaigns", "field": "id", "batch_size": 2}],
-         "http": {"method": "POST", "path": "/stats", "json": {
-             "campaigns": "{{ partition.campaigns }}", "day": "{{ window.start }}"}}}],
+         "operation": {"method": "POST", "path": "/stats", "json": {
+             "campaigns": "{{ partition.campaigns }}", "day": "{{ window.start }}"}, "records": {"path": "data"}}}],
         [{"name": "stats", "select": "SELECT partition->>'account' AS account, record->>'campaign' AS campaign, "
                                      "(record->>'day')::DATE AS day FROM raw_stats"}],
         {"stats": {"step": "stats", "primary_key": ["account", "campaign", "day"]}},
@@ -957,12 +975,13 @@ def test_batch_size_on_from_fields_batches_each_stream_partitions_own_step_value
     api.routes[("POST", "/ads")] = lambda request: (200, {"data": [
         {"campaign": campaign} for campaign in body(request)["campaigns"]]})
     source = source_with(api, run_mode("ads", [
-        {"name": "raw_campaigns", "http": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"}},
-         "records": {"path": "data"}},
-        {"name": "raw_ads", "records": {"path": "data"},
+        {"name": "raw_campaigns", "operation": {"path": "/campaigns", "params": {"account": "{{ partition.account }}"},
+                                                "records": {"path": "data"}}},
+        {"name": "raw_ads",
          "partitions": [{"from": "campaign_rows", "fields": ["account", "campaign"], "batch_size": 2}],
-         "http": {"method": "POST", "path": "/ads", "json": {"account": "{{ partition.account }}",
-                                                            "campaigns": "{{ partition.campaign }}"}}}],
+         "operation": {"method": "POST", "path": "/ads", "json": {"account": "{{ partition.account }}",
+                                                            "campaigns": "{{ partition.campaign }}"},
+                       "records": {"path": "data"}}}],
         [{"name": "campaign_rows", "select": "SELECT partition->>'account' AS account, record->>'id' AS campaign "
                                              "FROM raw_campaigns ORDER BY account, campaign"},
          {"name": "ad_rows", "select": "SELECT partition->>'account' AS account, record->>'campaign' AS campaign, "
@@ -997,8 +1016,8 @@ def test_batch_size_on_from_fields_batches_each_stream_partitions_own_step_value
 def test_batch_size_from_a_step_needs_the_stream_partition_fields_and_one_batched_field(api, item, message):
     api.routes[("GET", "/campaigns")] = lambda request: (200, {"data": [{"id": "c1"}]})
     source = source_with(api, run_mode("ads", [
-        {"name": "raw_campaigns", "http": {"path": "/campaigns"}, "records": {"path": "data"}},
-        {"name": "raw_ads", "partitions": [item], "http": {"path": "/ads"}, "records": {"path": "data"}}],
+        {"name": "raw_campaigns", "operation": {"path": "/campaigns", "records": {"path": "data"}}},
+        {"name": "raw_ads", "partitions": [item], "operation": {"path": "/ads", "records": {"path": "data"}}}],
         [{"name": "campaign_rows", "select": "SELECT partition->>'account' AS account, record->>'id' AS campaign, "
                                              "'k' AS kind FROM raw_campaigns"}],
         {"campaign_rows": {"step": "campaign_rows"}}, partitions=[{"name": "account", "values": ["a1"]}]))
@@ -1012,7 +1031,7 @@ def test_batch_size_must_be_a_whole_number_of_at_least_one(api):
     for size in (0, "2", True):
         source = source_with(api, run_mode("items", [
             {"name": "raw_items", "partitions": [{"name": "ids", "values": ["a"], "batch_size": size}],
-             "http": {"path": "/items"}, "records": {"path": "data"}}],
+             "operation": {"path": "/items", "records": {"path": "data"}}}],
             [{"name": "item_rows", "select": "SELECT record->>'id' AS id FROM raw_items"}],
             {"item_rows": {"step": "item_rows"}}))
         with pytest.raises(SourceError, match=r"stream 'items': request 'raw_items': `batch_size` must be a whole "
@@ -1041,7 +1060,7 @@ def test_distinct_rows_reports_duckdb_errors_as_sql_errors():
 
 def accounts_stream(**stream):
     """Accounts per region (`bad` fails), skipping partitions that fail."""
-    return page_stream("accounts", {"http": {"path": "/accounts", "params": {"region": "{{ partition.region }}"}}},
+    return page_stream("accounts", {"operation": {"path": "/accounts", "params": {"region": "{{ partition.region }}"}}},
                        "SELECT (record->>'id')::INT AS id, record->>'id' AS account_id FROM records",
                        records={"path": "data"}, on_partition_error="skip",
                        partitions=[{"name": "region", "values": ["good", "bad"]}], **stream)
@@ -1054,13 +1073,13 @@ def test_from_stream_children_take_the_values_of_their_parents_export_and_are_pa
         "id": "c" + request["params"]["account"], "day": request["params"]["day"]}]})
     api.routes[("GET", "/stats")] = lambda request: (200, {"data": [{"clicks": "2"}]})
     source = source_with(api, accounts_stream(), page_stream(
-        "campaigns", {"http": {"path": "/campaigns", "params": {"account": "{{ partition.account }}",
+        "campaigns", {"operation": {"path": "/campaigns", "params": {"account": "{{ partition.account }}",
                                                                 "day": "{{ window.start }}"}}},
         "SELECT record->>'id' AS id, (record->>'day')::DATE AS day FROM records", records={"path": "data"},
         partitions=[{"name": "account", "from_stream": "Accounts", "field": "id"}],
         incremental={"cursor_field": "day", "start": "2026-10-01", "window": "1d"}), run_mode(
-        "report", [{"name": "raw_stats", "records": {"path": "data"}, "http": {"path": "/stats", "params": {
-            "account": "{{ partition.account_id }}", "day": "{{ window.start }}"}}}],
+        "report", [{"name": "raw_stats", "operation": {"path": "/stats", "params": {
+            "account": "{{ partition.account_id }}", "day": "{{ window.start }}"}, "records": {"path": "data"}}}],
         [{"name": "stat_rows", "select": "SELECT partition->>'account_id' AS account_id, window_start AS day, "
                                          "(record->>'clicks')::BIGINT AS clicks FROM raw_stats"}],
         {"report": {"step": "stat_rows", "primary_key": ["account_id", "day"]}},
@@ -1091,7 +1110,7 @@ def test_from_stream_parents_have_exactly_one_export_and_the_fields_are_its_colu
     parent = accounts_stream()
     parent["transform"]["steps"].append({"name": "ids", "select": "SELECT id FROM accounts"})
     parent["export"]["account_ids"] = {"step": "ids"}
-    child = page_stream("campaigns", {"http": {"path": "/campaigns"}}, "SELECT 1 AS x FROM records",
+    child = page_stream("campaigns", {"operation": {"path": "/campaigns"}}, "SELECT 1 AS x FROM records",
                         partitions=[{"name": "account", "from_stream": "accounts", "field": "id"}])
     source = source_with(api, parent, child)
     assert sql.check_source(source) == [(("streams", 1, "partitions", 0, "from_stream"), (
@@ -1140,7 +1159,7 @@ def test_check_source_reports_paths_into_the_source(api):
 
 def test_streams_take_one_form_and_page_mode_reads_one_request(api):
     """What `streamwright validate` rejects stops a run too, before any request (e.g. sources run from Python)."""
-    old = {"name": "old", "request": {"http": {"path": "/x"}}, "select": "SELECT 1 AS x FROM records"}
+    old = {"name": "old", "request": {"operation": {"path": "/x"}}, "select": "SELECT 1 AS x FROM records"}
     assert set(sql.check_source({"streams": [old]})) == {
         (("streams", 0, "export"), "a stream needs at least one export: `export: {NAME: {step: STEP}}`"),
         (("streams", 0, "requests"), "a stream needs `requests`, a list of named requests: a stream reads only "
@@ -1148,14 +1167,14 @@ def test_streams_take_one_form_and_page_mode_reads_one_request(api):
         (("streams", 0, "transform"), "a stream needs `transform: {mode: page|run, steps: [...]}`")}
     with pytest.raises(SourceError, match="stream 'old': requests: a stream needs `requests`"):
         run(source_with(api, old))
-    stream = page_stream("items", {"http": {"path": "/x"}, "partitions": [{"name": "p", "values": [1]}]},
+    stream = page_stream("items", {"operation": {"path": "/x"}, "partitions": [{"name": "p", "values": [1]}]},
                          "SELECT 1 AS x FROM records")
-    stream["requests"].append({"name": "more", "http": {"path": "/y"}})
+    stream["requests"].append({"name": "more", "operation": {"path": "/y"}})
     assert sql.check_source({"streams": [stream]}) == [
         (("streams", 0, "requests"), "`transform.mode: page` reads one request: with 2 requests, use `mode: run`"),
         (("streams", 0, "requests", 0, "partitions"), "request partitions need `transform.mode: run`")]
-    stream = run_mode("items", [{"name": "raw", "http": {"path": "/x"}},
-                                {"name": "more", "http": {"path": "/y"},
+    stream = run_mode("items", [{"name": "raw", "operation": {"path": "/x"}},
+                                {"name": "more", "operation": {"path": "/y"},
                                  "partitions": [{"name": "p", "from": "nope", "field": "x"}]}],
                       [{"name": "rows", "select": "SELECT 1 AS x"}], {"items": {"step": "rows"}, "bad": "junk"})
     stream["transform"]["mode"] = "batch"
@@ -1167,10 +1186,10 @@ def test_streams_take_one_form_and_page_mode_reads_one_request(api):
 
 
 def test_check_source_reports_export_names_used_twice_or_naming_another_stream(api):
-    first = page_stream("first", {"http": {"path": "/x"}}, "SELECT 1 AS x FROM records")
-    second = page_stream("second", {"http": {"path": "/x"}}, "SELECT 1 AS x FROM records")
+    first = page_stream("first", {"operation": {"path": "/x"}}, "SELECT 1 AS x FROM records")
+    second = page_stream("second", {"operation": {"path": "/x"}}, "SELECT 1 AS x FROM records")
     second["export"] = {"First": {"step": "second"}}
-    third = page_stream("third", {"http": {"path": "/x"}}, "SELECT 1 AS x FROM records")
+    third = page_stream("third", {"operation": {"path": "/x"}}, "SELECT 1 AS x FROM records")
     third["export"] = {"second": {"step": "third"}}
     assert sql.check_source({"streams": [first, second, third]}) == [
         (("streams", 1, "export", "First"), "export 'First' is also an export of stream 'first': export names are "
@@ -1181,9 +1200,9 @@ def test_check_source_reports_export_names_used_twice_or_naming_another_stream(a
 
 def test_check_source_reports_within_stream_request_partition_cycle():
     source = {"kind": "source", "name": "demo", "streams": [run_mode("cycle", [
-        {"name": "parents", "http": {"path": "/parents"}, "records": {"path": "data"}},
+        {"name": "parents", "operation": {"path": "/parents", "records": {"path": "data"}}},
         {"name": "children", "partitions": [{"name": "id", "from": "child_rows", "field": "id"}],
-         "http": {"path": "/children/{{ partition.id }}"}, "records": {"path": "data"}}],
+         "operation": {"path": "/children/{{ partition.id }}", "records": {"path": "data"}}}],
         [{"name": "child_rows", "select": "SELECT record->>'id' AS id FROM children"}],
         {"cycle": {"step": "child_rows"}})]}
     assert sql.check_source(source) == [(("streams", 0, "requests", 1, "partitions", 0, "from"), (
@@ -1193,9 +1212,9 @@ def test_check_source_reports_within_stream_request_partition_cycle():
 
 def test_request_partition_cycle_stops_the_run_before_any_request(api):
     source = source_with(api, run_mode("cycle", [
-        {"name": "parents", "http": {"path": "/parents"}, "records": {"path": "data"}},
+        {"name": "parents", "operation": {"path": "/parents", "records": {"path": "data"}}},
         {"name": "children", "partitions": [{"name": "id", "from": "child_rows", "field": "id"}],
-         "http": {"path": "/children/{{ partition.id }}"}, "records": {"path": "data"}}], [
+         "operation": {"path": "/children/{{ partition.id }}", "records": {"path": "data"}}}], [
         {"name": "parent_rows", "select": "SELECT record->>'id' AS id FROM parents"},
         {"name": "child_rows", "select": "SELECT c.record->>'id' AS id FROM children c, parent_rows"}],
         {"cycle": {"step": "child_rows"}}))
@@ -1206,9 +1225,9 @@ def test_request_partition_cycle_stops_the_run_before_any_request(api):
 
 
 def test_check_source_reports_from_stream_cycles(api):
-    first = page_stream("first", {"http": {"path": "/x"}}, "SELECT 1 AS id FROM records",
+    first = page_stream("first", {"operation": {"path": "/x"}}, "SELECT 1 AS id FROM records",
                         partitions=[{"name": "a", "from_stream": "second", "field": "id"}])
-    second = page_stream("second", {"http": {"path": "/x"}}, "SELECT 1 AS id FROM records",
+    second = page_stream("second", {"operation": {"path": "/x"}}, "SELECT 1 AS id FROM records",
                          partitions=[{"name": "b", "from_stream": "first", "field": "id"}])
     source = source_with(api, first, second)
     assert sql.check_source(source) == [(("streams", 1, "partitions", 0, "from_stream"), (
@@ -1220,7 +1239,7 @@ def test_check_source_reports_from_stream_cycles(api):
 
 def test_check_source_rejects_duckdb_builtin_request_and_step_names():
     source = {"kind": "source", "name": "demo", "streams": [run_mode(
-        "builtins", [{"name": "pg_settings", "http": {"path": "/x"}}],
+        "builtins", [{"name": "pg_settings", "operation": {"path": "/x"}}],
         [{"name": "duckdb_tables", "select": "SELECT 1 AS id"},
          {"name": "rows", "select": "SELECT * FROM pg_settings"}],
         {"builtins": {"step": "rows"}})]}
@@ -1231,7 +1250,7 @@ def test_check_source_rejects_duckdb_builtin_request_and_step_names():
                                                           "view: name it otherwise")]
     # names that `streamwright validate` reports do not stop the DuckDB checks
     source = {"kind": "source", "name": "demo", "streams": [run_mode(
-        "odd", [{"name": "raw", "http": {"path": "/x"}}, {"name": "bad name", "http": {}}, "junk", {"name": None}],
+        "odd", [{"name": "raw", "operation": {"path": "/x"}}, {"name": "bad name", "http": {}}, "junk", {"name": None}],
         [{"name": "rows", "select": "SELECT 1 AS id"}, {"name": 5, "select": "SELECT 2"}, "junk"],
         {"bad name": {"step": "rows"}, "records": {"step": "rows"}}), "junk"]}
     assert sql.check_source(source) == []
@@ -1243,9 +1262,9 @@ def test_check_source_rejects_duckdb_builtin_request_and_step_names():
 
 def test_check_source_reports_missing_request_partition_field_path():
     source = {"kind": "source", "name": "demo", "streams": [run_mode("missing_field", [
-        {"name": "parents", "http": {"path": "/parents"}, "records": {"path": "data"}},
+        {"name": "parents", "operation": {"path": "/parents", "records": {"path": "data"}}},
         {"name": "children", "partitions": [{"name": "id", "from": "parent_rows", "field": "missing"}],
-         "http": {"path": "/children/{{ partition.id }}"}, "records": {"path": "data"}}], [
+         "operation": {"path": "/children/{{ partition.id }}", "records": {"path": "data"}}}], [
         {"name": "parent_rows", "select": "SELECT record->>'id' AS id FROM parents"},
         {"name": "child_rows", "select": "SELECT record->>'id' AS id FROM children"}],
         {"child_list": {"step": "child_rows"}})]}
@@ -1262,7 +1281,7 @@ def test_check_source_reports_tables_duckdb_cannot_make(monkeypatch):
         return create_empty(sandbox, name, columns)
     monkeypatch.setattr(sql.Sandbox, "create_empty", fail_for_step)
     source = {"kind": "source", "name": "demo", "streams": [run_mode(
-        "report", [{"name": "raw", "http": {"path": "/x"}}],
+        "report", [{"name": "raw", "operation": {"path": "/x"}}],
         [{"name": "rows", "select": "SELECT 1 AS id"}, {"name": "more", "select": "SELECT * FROM rows"}],
         {"report": {"step": "more"}})]}
     assert sql.check_source(source) == [(("streams", 0, *SELECT_PATH),
@@ -1271,7 +1290,7 @@ def test_check_source_reports_tables_duckdb_cannot_make(monkeypatch):
 
 def test_check_source_reports_step_columns_that_are_not_field_names():
     source = {"kind": "source", "name": "demo", "streams": [run_mode("counts", [
-        {"name": "raw", "http": {"path": "/x"}}], [
+        {"name": "raw", "operation": {"path": "/x"}}], [
         {"name": "counted", "select": "SELECT count(*), 1 AS ok FROM range(3)"},
         {"name": "internal", "select": "SELECT a, sum(n), count(*) AS A FROM (SELECT 1 AS a, 2 AS n) GROUP BY a"},
         {"name": "cased", "select": "SELECT 1 AS id, 2 AS ID"}], {"counts": {"step": "cased"}})]}
@@ -1309,8 +1328,7 @@ def test_validate_source_folder_reports_step_sql_file_and_select_line(tmp_path, 
     lines = [
         "requests:",
         "  - name: raw_items",
-        "    http: {path: /items}",
-        "    records: {path: data}",
+        "    operation: {path: /items, records: {path: data}}",
         "transform:",
         "  mode: page",
         "  steps:",

@@ -17,8 +17,8 @@
 
 """
 The mysql connector on the `spark` engine (kind: SparkJob): JDBC reads and appends on the executors; merge and delete
-through a staging table and one driver transaction (pymysql). Credentials go in the JDBC properties only, never in
-Spark's configuration.
+through a staging table and one driver transaction (pymysql, with the connection's socket and TLS). Credentials go in
+the JDBC properties only, never in Spark's configuration.
 """
 
 import functools
@@ -28,18 +28,13 @@ from typing import Any
 from pyspark.sql import DataFrame
 
 from streamwright.connectors.mysql import client
+from streamwright.connectors.mysql.engines import driver
 from streamwright.core.sdk.contract import Operation, ResolvedConnection
 from streamwright.spark.io import jdbc
 from streamwright.spark.sdk import SparkContext, WriteReceipt
 
-try:  # the extra `spark` installs it: the driver's merges and deletes
-    import pymysql
-except ImportError:
-    pymysql = None
-
 __all__ = ["MySQLSparkAdapter"]
 
-CONNECT_TIMEOUT = 15
 DIALECT = jdbc.JdbcDialect(
     name="mysql",
     url_template=client.JDBC_URL,
@@ -62,14 +57,6 @@ def _target(connection: Mapping[str, Any]) -> jdbc.JdbcTarget:
                             user=values["user"], password=values["password"], properties=values["properties"])
 
 
-def _connect(values: Mapping[str, Any]) -> Any:
-    if pymysql is None:
-        raise RuntimeError("the Spark driver needs pymysql: pip install \"streamwright-mysql[spark]\"")
-    return pymysql.connect(host=values["host"], port=int(values["port"] or client.DIALECT.default_port),
-                           database=values["database"], user=values["user"], password=values["password"],
-                           connect_timeout=CONNECT_TIMEOUT, autocommit=False)
-
-
 class MySQLSparkAdapter:
     """JDBC reads and writes of the catalog's database operations."""
 
@@ -86,56 +73,12 @@ class MySQLSparkAdapter:
 
     def write(self, context: SparkContext, frame: DataFrame, operation: Operation,
               arguments: Mapping[str, Any]) -> WriteReceipt:
-        connect: Callable[[], Any] = functools.partial(_connect, client.jdbc_values(context.connection))
+        connect: Callable[[], Any] = functools.partial(driver.connect, context.connection, "spark")
         return jdbc.write_table(context, frame, arguments, dialect=DIALECT, target=_target(context.connection),
                                 connect=connect, operation=operation)
 
     def state_connection(self, connection: Mapping[str, Any]) -> tuple[Callable[[], Any], str]:
         """The driver's DB-API connection used by SparkJob's shared bookkeeping store."""
-        if pymysql is None:
+        if driver.pymysql is None:
             raise RuntimeError("SparkJob MySQL state needs PyMySQL: pip install \"streamwright-mysql[spark]\"")
-        values = dict(client.parameters(connection))
-        ssl_names = {"ssl_ca": "ca", "ssl_capath": "capath", "ssl_cert": "cert", "ssl_cipher": "cipher",
-                     "ssl_crl": "crl", "ssl_key": "key"}
-        ssl = {target: values[key] for key, target in ssl_names.items() if values.get(key)}
-
-        def connect_state():
-            kwargs = {"host": values.get("host"), "port": int(values.get("port") or client.DIALECT.default_port),
-                      "database": values.get("database"), "user": values.get("user"),
-                      "password": values.get("password"), "connect_timeout": CONNECT_TIMEOUT,
-                      "charset": "utf8mb4", "autocommit": False}
-            if values.get("socket"):
-                kwargs["unix_socket"] = values["socket"]
-            sslmode = str(values.get("sslmode") or "disabled").lower()
-            if sslmode == "disabled":
-                kwargs["ssl_disabled"] = True
-            else:
-                kwargs["ssl"] = ssl
-                if sslmode in ("verify_ca", "verify_identity"):
-                    kwargs["ssl_verify_cert"] = True
-                if sslmode == "verify_identity":
-                    kwargs["ssl_verify_identity"] = True
-            return _PyMySQLStateConnection(pymysql.connect(**kwargs))
-
-        return connect_state, "mysql"
-
-
-class _PyMySQLStateConnection:
-    """Adapt PyMySQL's cursor-only API to the state store's execute surface."""
-
-    def __init__(self, connection):
-        self._connection = connection
-
-    def execute(self, statement, parameters=()):
-        cursor = self._connection.cursor()
-        cursor.execute(statement, parameters)
-        return cursor
-
-    def commit(self):
-        return self._connection.commit()
-
-    def rollback(self):
-        return self._connection.rollback()
-
-    def close(self):
-        return self._connection.close()
+        return (lambda: driver.StateConnection(driver.connect(connection, "spark"))), "mysql"

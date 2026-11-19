@@ -23,7 +23,7 @@ import sys
 import pytest
 
 from streamwright.connectors.files import CONNECTOR
-from streamwright.core.io.file_rules import DUCKDB_CAPABILITIES, ENGINE_CAPABILITIES, SOURCE_CAPABILITIES
+from streamwright.core.io.file_rules import FILE_DUCKDB_CAPABILITIES, FILE_ENGINE_CAPABILITIES, FILE_SOURCE_CAPABILITIES
 from streamwright.core.sdk.contract import (
     InvalidConnectionError,
     check_arguments,
@@ -34,7 +34,7 @@ from streamwright.core.sdk.contract import (
 from streamwright.core.sdk.testing import certify
 from streamwright.spark.io.file_rules import CAPABILITIES as SPARK_CAPABILITIES
 
-TestCertification = certify(CONNECTOR, (*ENGINE_CAPABILITIES, SPARK_CAPABILITIES))
+TestCertification = certify(CONNECTOR, (*FILE_ENGINE_CAPABILITIES, SPARK_CAPABILITIES))
 
 
 def codes(issues):
@@ -72,18 +72,21 @@ def test_the_spec_uses_the_catalog_operations_and_each_engines_capabilities():
     assert [operation.name for operation in CONNECTOR.operations] == ["object.read", "object.write"]
     read, write = CONNECTOR.operation("object", "read"), CONNECTOR.operation("object", "write")
     assert check_arguments(CONNECTOR, read, {"path": "a/*.csv", "match": ".*", "recursive": True},
-                           SOURCE_CAPABILITIES) == []
-    assert codes(check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, DUCKDB_CAPABILITIES)) == [
+                           FILE_SOURCE_CAPABILITIES) == []
+    assert codes(check_arguments(CONNECTOR, read, {"path": "a.csv", "match": ".*"}, FILE_DUCKDB_CAPABILITIES)) == [
         ("unsupported-argument", "arguments.match")]
-    assert codes(check_arguments(CONNECTOR, write, {"path": "o/", "format": "csv"}, SOURCE_CAPABILITIES)) == [
+    assert codes(check_arguments(CONNECTOR, write, {"path": "o/", "format": "csv"}, FILE_SOURCE_CAPABILITIES)) == [
         ("unsupported-operation", "")]
     assert check_arguments(CONNECTOR, write, {"path": "o/", "format": "csv", "mode": "overwrite"},
-                           DUCKDB_CAPABILITIES) == []
-    assert check_arguments(CONNECTOR, write, {"path": "o/{{ batch.id }}/", "format": "csv", "mode": "append"},
+                           FILE_DUCKDB_CAPABILITIES) == []
+    # Spark appends part files: a replay would add them again, so only named files may be appended to
+    assert check_arguments(CONNECTOR, write, {"path": "o/{{ batch.id }}/", "format": "csv", "mode": "overwrite"},
                            SPARK_CAPABILITIES) == []
+    assert codes(check_arguments(CONNECTOR, write, {"path": "o/{{ batch.id }}/", "format": "csv", "mode": "append"},
+                                 SPARK_CAPABILITIES))
 
 
-@pytest.mark.parametrize("capabilities", [SOURCE_CAPABILITIES, DUCKDB_CAPABILITIES])
+@pytest.mark.parametrize("capabilities", [FILE_SOURCE_CAPABILITIES, FILE_DUCKDB_CAPABILITIES])
 def test_the_reader_options_are_typed_for_known_names_and_pass_vendor_names_through(capabilities):
     read = CONNECTOR.operation("object", "read")
     options = {"header": True, "delimiter": ";", "nullstr": "NA", "dateformat": "%Y-%m-%d"}
@@ -113,7 +116,7 @@ def test_the_spark_engine_types_known_options_and_forwards_vendor_options():
 
 
 def test_the_guide_has_its_sections_and_tables_generated_from_the_spec():
-    text = guide_text(CONNECTOR, "streamwright.connectors.files", (*ENGINE_CAPABILITIES, SPARK_CAPABILITIES))
+    text = guide_text(CONNECTOR, "streamwright.connectors.files", (*FILE_ENGINE_CAPABILITIES, SPARK_CAPABILITIES))
     assert [line for line in text.splitlines() if line.startswith("## ")] == [
         "## Connection", "## Operations", "## Engines"]
     assert "### `object.write` (write; engines: duckdb, spark)" in text

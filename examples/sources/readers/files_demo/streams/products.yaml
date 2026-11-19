@@ -18,11 +18,11 @@
 # as exact JSON numbers and text.
 requests:
   - name: raw_products
-    sdk: files
-    service: object
-    method: read
-    arguments:
-      path: products.parquet
+    operation:
+      service: object
+      method: read
+      arguments:
+        path: products.parquet
 transform:
   mode: page
   steps:

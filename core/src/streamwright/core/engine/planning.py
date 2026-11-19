@@ -30,7 +30,7 @@ def stream_problems(runner, stream):
         request, where = components.request_body(item), components.path_text(("requests", position))
         calls = components.sdk_calls(request)
         if calls and runner.connector is None:
-            problems.append("%s: sdk requests need a connector `auth.provider`" % where)
+            problems.append("%s: an operation that is a call needs a connector `auth.provider`" % where)
             continue
         problems += ["%s: %s" % (where, problem) for call in calls
                      for problem in components.check_call(runner.connector, call, runner.query_builders.builders)]
@@ -38,7 +38,7 @@ def stream_problems(runner, stream):
                      for path, message, _ in components.check_queries(request, runner.allowed_connectors,
                                                                       runner.query_builders.builders)]
         if "async_job" in request and "sdk" not in (request["async_job"].get("submit") or {}):
-            problems.append("%s: an async job's `submit` must be an sdk request (its `poll` calls the same "
+            problems.append("%s: an async job's `submit` must be a call (its `poll` calls the same "
                             "service)" % where)
         problem = _transport_problem(runner, request, calls)
         if problem:

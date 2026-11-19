@@ -49,8 +49,9 @@ http:
 
 ## Operations
 
-The connector offers one operation, `http.request`: each `requests:` item of a stream is an `http:` request, run by the
-engine's HTTP reader with the source's `http:` defaults (base URL, headers, paginator, records, retry, rate limit).
+The connector offers one operation, `http.request`: the `operation:` of each `requests:` item of a stream is an HTTP
+request, run by the engine's HTTP reader with the source's `http:` defaults (base URL, headers, paginator, records,
+retry, rate limit).
 
 ### `streams/<stream>.yaml` contract
 
@@ -60,7 +61,7 @@ partitions:
 
 requests:
   - name: raw_campaigns
-    http:
+    operation:
       path: /rest/adCampaigns
       method: GET
       params:
@@ -93,7 +94,7 @@ export:
 
 ### Vendor arguments
 
-Any key in an `http` request's `params` block is a query parameter forwarded verbatim to the API; the paths and
+Any key in an HTTP `operation:`'s `params` block is a query parameter forwarded verbatim to the API; the paths and
 parameters you call are whatever the API exposes, never a closed list in the connector (contract v1.3 §6b). For
 example `params: {statusFilter: ENABLED}` reaches the request URL unchanged; pagination cursors the paginator
 injects take precedence.
@@ -118,10 +119,11 @@ connections:
     provider: linkedin_ads
     type: bearer
     token: "{{ secrets.linkedin_access_token }}"
-    base_url: https://api.linkedin.com
-    headers:
-      LinkedIn-Version: "{{ config.api_version }}"
-      X-Restli-Protocol-Version: "2.0.0"
+    http:
+      base_url: https://api.linkedin.com
+      headers:
+        LinkedIn-Version: "{{ config.api_version }}"
+        X-Restli-Protocol-Version: "2.0.0"
   out:
     provider: files
     roots: [output]
@@ -129,15 +131,16 @@ connections:
 steps:
   - name: campaigns
     connection: linkedin_ads_api
-    request:
+    operation:
       path: /rest/adCampaigns
       method: GET
       params:
         q: search
         search.account.values[0]: "urn:li:sponsoredAccount:{{ config.account_id }}"
       records: {path: elements}
-    paginator: {type: offset, offset_param: start, limit_param: count, page_size: 100, total_path: paging.total}
-    retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
+      paginator: {type: offset, offset_param: start, limit_param: count, page_size: 100, total_path: paging.total}
+    policy:
+      retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
     sql: |
       SELECT (record->>'id')::BIGINT AS campaign_id,
              record->>'name' AS campaign_name,
@@ -154,12 +157,13 @@ outputs:
     format: parquet
 ```
 
-- **Connection**: the authentication keys and the HTTP defaults (`base_url`, `headers`, `params_encoding`,
-  `paginator`, `records`, `retry`, `rate_limit`) written directly on it. There is no `http:` block (that is a
-  source manifest's): `validate` rejects keys the connector would ignore.
-- **Step**: `request: {path, method, params, headers, json, records}`, plus `paginator`, `retry`, `rate_limit`.
-  `path` is relative to the connection's `base_url`, or an absolute `https://` URL. This is a REST API connector:
-  a step takes `request`, never `service`/`method` (those are SDK connectors' calls).
+- **Connection**: the authentication keys, the HTTP defaults in `http: {base_url, headers, params_encoding,
+  paginator, records}` and the default `policy: {retry, rate_limit}`. `validate` rejects keys the connector would
+  ignore.
+- **Step**: `operation: {path, method, params, headers, json, records, paginator}`, plus `policy: {retry,
+  rate_limit, timeout, on_error}`. `path` is relative to the connection's `http.base_url`, or an absolute `https://`
+  URL. This is a REST API connector: a step's operation is an HTTP request, never a call (`service`, `arguments`:
+  an SDK connector's).
 - **SQL**: the step's `sql` reads the table `records`, one JSON column `record`; extract with `->>`.
 
 ```bash
@@ -176,4 +180,4 @@ STREAMWRIGHT_SECRET_LINKEDIN_ACCESS_TOKEN=... streamwright duckdb run campaigns.
 
 | Engine | Adapter | Notes |
 |---|---|---|
-| source (`streamwright run`, DuckDBJob call steps) | `streamwright.core.io.http` | the engine's HTTP reader runs the source's `http:` requests: the connector declares the authentication it takes, the source declares the API |
+| source (`streamwright run`, DuckDBJob call steps) | `streamwright.core.sdk.engines.source` (HttpSourceAdapter) | the engine's HTTP reader runs each request's `operation:` with the source's `http:` defaults: the connector declares the authentication it takes, the source declares the API |

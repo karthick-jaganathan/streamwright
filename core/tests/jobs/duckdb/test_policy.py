@@ -43,7 +43,7 @@ def test_an_output_write_retries_a_transient_error_through_the_shared_retry(tmp_
         return original(self, context)
 
     monkeypatch.setattr(DuckDBCatalogAdapter, "write", flaky)
-    result = run_job(_job(tmp_path, out_extra={"retry": {"max_attempts": 3, "backoff": "constant"}}))
+    result = run_job(_job(tmp_path, out_extra={"policy": {"retry": {"max_attempts": 3, "backoff": "constant"}}}))
     assert result.exit_code == 0, result.error
     assert len(calls) == 2 and result.outputs == {"first": 1}
 
@@ -52,7 +52,8 @@ def test_a_failing_output_is_fatal_but_on_error_skip_lets_the_batch_complete(tmp
     failed = run_job(_job(tmp_path, name="out_fail", out_sql="SELECT * FROM does_not_exist"))
     assert failed.exit_code == 1
 
-    skipped = run_job(_job(tmp_path, name="out_skip", out_sql="SELECT * FROM missing", out_extra={"on_error": "skip"}))
+    skipped = run_job(_job(tmp_path, name="out_skip", out_sql="SELECT * FROM missing",
+                           out_extra={"policy": {"on_error": "skip"}}))
     assert skipped.exit_code == 0, skipped.error
 
 
@@ -61,14 +62,24 @@ def test_a_failing_step_with_on_error_warn_does_not_fail_the_batch(tmp_path):
     assert failed.exit_code == 1
 
     warned = run_job(_job(tmp_path, name="step_warn", step_sql="SELECT * FROM nope",
-                          step_extra={"on_error": "warn"}, out_sql="SELECT 1 AS id"))
+                          step_extra={"policy": {"on_error": "warn"}}, out_sql="SELECT 1 AS id"))
     assert warned.exit_code == 0, warned.error
 
 
 def test_an_unsupported_policy_key_names_the_engine(tmp_path):
-    report = validate_job(_job(tmp_path, out_extra={"paginator": {"type": "page"}}))
+    report = validate_job(_job(tmp_path, out_extra={"policy": {"rate_limit": {"requests": 1, "per": "1s"}}}))
     codes = [(i.code, i.message) for i in report.issues if i.code == "unsupported-argument"]
-    assert codes == [("unsupported-argument", "`paginator` is not supported by the duckdb engine on outputs")]
+    assert codes == [("unsupported-argument", "`rate_limit` is not supported by the duckdb engine on outputs")]
 
-    report = validate_job(_job(tmp_path, step_extra={"rate_limit": {"requests": 1, "per": "1s"}}))
+    report = validate_job(_job(tmp_path, step_extra={"policy": {"rate_limit": {"requests": 1, "per": "1s"}}}))
     assert any(i.code == "unsupported-argument" and "duckdb engine on steps" in i.message for i in report.issues)
+
+
+def test_an_output_timeout_interrupts_its_query_so_the_next_output_runs(tmp_path):
+    job = _job(tmp_path, name="out_timeout", out_sql="SELECT count(*) AS id FROM range(100000000) a, range(1000) b",
+               out_extra={"policy": {"timeout": 1, "on_error": "skip"}})
+    job["outputs"].append({"name": "second", "connection": "wh", "sql": "SELECT 2 AS id", "table": "b",
+                           "mode": "overwrite"})
+    result = run_job(job)
+    assert result.exit_code == 0, result.error
+    assert result.outputs == {"first": 0, "second": 1}

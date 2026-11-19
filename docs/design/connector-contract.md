@@ -11,8 +11,8 @@ permalink: /design/connector-contract/
 {: .no_toc }
 
 **Status:** implemented 2026-11-01 (v1.1: the shared operation catalog, engine capabilities and the
-`streamwright.core.io` helpers). All 19 connectors are on this contract and the pre-contract API is deleted
-(§8, complete).
+`streamwright.core.io` helpers; v1.2: apply operations, the writes of reverse ETL). All 19 connectors are on this
+contract and the pre-contract API is deleted (§8, complete).
 **Supersedes:** the three per-engine plug-in contracts: core `Connector` (`connector.py`, plus a `reader.py`), the
 `streamwright.duckdb.connectors` `DuckDBAdapter` (`duckdb_adapter.py`), and the `streamwright.spark.connectors`
 `Provider` hierarchy (`spark_adapter.py`).
@@ -82,7 +82,7 @@ connectors/readers/s3/
 └── src/streamwright/connectors/s3/
     ├── __init__.py              from streamwright.connectors.s3.spec import CONNECTOR; __all__ = ["CONNECTOR"]
     ├── spec.py                  CONNECTOR = ConnectorDefinition(..., operations=(files.READ, files.WRITE))
-    ├── client.py                vendor logic shared by every engine            (no engine imports)
+    ├── client.py                vendor logic shared by every engine; only when the spec names code in the package
     ├── guide.md                 user documentation (package data)
     └── engines/
         ├── __init__.py          (empty)
@@ -108,9 +108,20 @@ Field(name, type, *, required=False, secret=False, default=None, choices=(), pat
 #   e.g. ("string", "list") for a path or a list of paths); pattern applies to a text and to each text item
 # secret=True: the declared value must be exactly one {{ secrets.NAME }} reference; never logged; redacted.
 
-class OperationKind(str, Enum): READ = "read"; WRITE = "write"; CONSUME = "consume"; PUBLISH = "publish"
+class OperationKind(StrEnum): READ = "read"; WRITE = "write"; CONSUME = "consume"; PUBLISH = "publish"; APPLY = "apply"
 
-Operation(*, service, method, kind=OperationKind.READ, arguments=(), idempotent=True, description="", extensions=())
+Operation(*, service, method, kind=OperationKind.READ, arguments=(), idempotent=True, description="", extensions=(),
+          max_chunk=None, actions=(), destructive_actions=())
+# apply operations (a job's apply outputs: a row per vendor operation, with per-row results) declare max_chunk (the
+#   most rows one call takes), actions (the values of a row's `op` column, the first the default) and
+#   destructive_actions (those an output must allow); `idempotent` says whether a call cut short may be sent again.
+#   They run on the driver through the connector's `source` adapter: its session implements
+#   streamwright.core.sdk.apply.ApplySession.apply(operation, arguments, rows, context) -> [RowResult] (and, for
+#   on_unknown: reconcile, ReconcilingSession.reconcile). A session that sends a chunk as a request per row raises
+#   PartialApplyError(message, results) when one is cut short: the rows sent before it keep their outcomes, the rest
+#   stay in flight. A declarative HTTP connector declares the catalog's http.SEND next to http.REQUEST: an output's
+#   `operation:` is then a request (path, method, json; `{{ row.<column> }}`, or `{{ rows }}` for a chunk per
+#   request), sent by core (streamwright.core.jobs.apply.http_send); PUT and DELETE are idempotent, POST and PATCH not.
 # keyword-only; derived: .name ("object.read"), .argument(name), .arguments_for(capabilities) (the arguments an engine
 #   takes, choices narrowed to what it supports), .json_schema(capabilities=None), .describe()
 # .with_arguments(*fields) -> Operation: a new operation with `fields` added, or replacing the arguments of the same
@@ -160,7 +171,8 @@ numbers converted) with `.secret_values`, `.redactor` and `.redact(text)`. Resol
 
 ## 5. Operation catalog and engine capabilities
 
-**The catalog** (`streamwright.core.sdk.operations`, one module per family) declares each shared operation once, with
+**The catalog** (`streamwright.core.sdk.operations`, one module per family; declared in
+`streamwright.core.runtime.operations`, which the engines import) declares each shared operation once, with
 the UNION of the arguments any engine knows and one vocabulary. The first family is `files`:
 
 | Operation | Arguments (one vocabulary) |
@@ -186,13 +198,16 @@ EngineCapabilities(engine, operation_kinds, arguments, checks={})
 
 | Engine | Declared in | Kinds | `object.read` | `object.write` |
 |---|---|---|---|---|
-| source | `streamwright.core.io.file_rules.SOURCE_CAPABILITIES` | read | `path`, `format`, `options`, `on_missing`, `match`, `recursive` | - |
-| duckdb | `streamwright.core.io.file_rules.DUCKDB_CAPABILITIES` | read, write | `path`, `format`, `options`, the ingest keys (`schema_mode`, `columns`, `column_groups`, `vocabulary`, `on_unmapped_column`, `path_pattern`, `row_index`) | `path`, `format`, `mode` (`error`, `overwrite`), `options`, `split_by`, `layout`, `file_name`, `partition_by` |
+| source | `streamwright.core.io.file_rules.FILE_SOURCE_CAPABILITIES` | read | `path`, `format`, `options`, `on_missing`, `match`, `recursive` | - |
+| duckdb | `streamwright.core.io.file_rules.FILE_DUCKDB_CAPABILITIES` | read, write | `path`, `format`, `options`, the ingest keys (`schema_mode`, `columns`, `column_groups`, `vocabulary`, `on_unmapped_column`, `path_pattern`, `row_index`) | `path`, `format`, `mode` (`error`, `overwrite`), `options`, `split_by`, `layout`, `file_name`, `partition_by` |
 | spark | `streamwright.spark.io.file_rules.CAPABILITIES` | read, write | `path`, `format`, `options`, `on_missing`, the ingest keys, `on_mismatch`, `row_errors`, `inject_path_vars` | `path`, `format`, `mode`, `options`, `split_by`, `layout`, `file_name`, `single_file`, `max_splits`, `on_exists` |
 
-`io.files` re-exports them (`streamwright.core.io.files.SOURCE_CAPABILITIES` / `DUCKDB_CAPABILITIES`,
+`io.files` re-exports them (`streamwright.core.io.files.FILE_SOURCE_CAPABILITIES` / `FILE_DUCKDB_CAPABILITIES`,
 `streamwright.spark.io.files.CAPABILITIES`); `file_rules` is the module that does not import DuckDB or pyspark, so
-validation and listing stay cheap. Everything derived from a spec follows the capabilities: the JSON Schema of an
+validation and listing stay cheap. The other families declare theirs the same way (`database_rules`:
+`DATABASE_SOURCE_CAPABILITIES` / `DATABASE_DUCKDB_CAPABILITIES`; `message_rules`: `MESSAGE_SOURCE_CAPABILITIES` /
+`MESSAGE_DUCKDB_CAPABILITIES`), and `streamwright.core.io.capabilities` combines them into each core engine's
+`SOURCE_CAPABILITIES` / `DUCKDB_CAPABILITIES`. Everything derived from a spec follows the capabilities: the JSON Schema of an
 operation for an engine (only its arguments and choices), `describe()`, the guide's Engines column, certification and
 the MCP connector contract (each engine describes the connector with its own capabilities).
 
@@ -211,6 +226,9 @@ class SourceSession(Protocol):
     def close(self) -> None: ...
 # open() gets the context of the request that connects (calls made while connecting); read() the context of the
 # request that reads - its stream's rate limit, retry policy, metrics and log fields (`context.where`)
+# also here: HttpSourceAdapter, the `source` adapter of declarative HTTP connectors
+#   (adapters={"source": "streamwright.core.sdk.engines.source:HttpSourceAdapter"}), and the helpers of SDK-transport
+#   sessions: make_caller / translate_errors / translate_pages (vendor exceptions -> ConnectorError), standalone_context
 
 # streamwright.core.sdk.engines.duckdb  (engine: DuckDBJob)
 class DuckDBAdapter(Protocol):
@@ -224,8 +242,8 @@ class SparkAdapter(Protocol):
     def hadoop_settings(self, name: str, connection: ResolvedConnection) -> Mapping[str, str]: ...  # never secret values
     def read(self, context: SparkContext, operation: Operation, arguments: Mapping) -> "DataFrame": ...
     def write(self, context: SparkContext, frame, operation: Operation, arguments: Mapping) -> WriteReceipt: ...
-class SparkMessagingAdapter(Protocol):                     # consume / publish operations
-    def poll(...); def ack(...); def publish(...); def destination(arguments) -> str
+    # a messaging connector's adapter (consume / publish operations) instead opens its broker:
+    def open_broker(self, connection: ResolvedConnection): ...  # -> poll(...), ack(...), publish(...), destination(...)
 ```
 
 **Reusable behaviour is offered as io helpers, not base-class hierarchies.** Both engine packages have the same
@@ -236,8 +254,12 @@ streamwright.core.io                       (source and duckdb engines)
 ├── files.py          ObjectStore, FileLocation; source: open_file_session -> FileSession (read_files);
 │                     duckdb: configure_store_secrets, read_sql(context, arguments, locate=),
 │                     write_files(context, arguments, locate=) (COPY: csv, tsv, json, jsonl, parquet);
-│                     re-exports SOURCE_CAPABILITIES, DUCKDB_CAPABILITIES, check_read, check_write
-├── file_rules.py     SOURCE_CAPABILITIES, DUCKDB_CAPABILITIES, check_read, check_write   (no DuckDB import)
+│                     re-exports FILE_SOURCE_CAPABILITIES, FILE_DUCKDB_CAPABILITIES, check_read, check_write
+├── file_rules.py     FILE_SOURCE_CAPABILITIES, FILE_DUCKDB_CAPABILITIES, check_read, check_write   (no DuckDB import)
+├── database_rules.py DATABASE_SOURCE_CAPABILITIES, DATABASE_DUCKDB_CAPABILITIES, the database/table checks
+├── message_rules.py  MESSAGE_SOURCE_CAPABILITIES, job_capabilities(engine), the polling policy (sdk.messaging)
+├── capabilities.py   SOURCE_CAPABILITIES, DUCKDB_CAPABILITIES: each core engine's, combined from the families
+├── downloads.py      the rows of the files async jobs produce (csv, jsonl, json; zip, gzip)
 ├── locations.py      ObjectStore, FileLocation, the URL rules (no `?`, `%`, `#`, `..`; root containment)
 ├── local.py          LocalLocation: the roots of local files (real paths), glob / match resolution
 └── file_formats.py   formats, reader options, the DuckDB query of one file, AccessError/ReadError/MissingError
@@ -248,6 +270,13 @@ streamwright.spark.io                      (spark engine)
 └── file_rules.py     CAPABILITIES, check_read, check_write, READ_OPTIONS, WRITE_OPTIONS  (no pyspark import)
 (later: jdbc.py with JdbcDialect, delta.py, messaging.py; core: databases)
 ```
+
+**Layers.** `streamwright.core.sdk` is a re-export facade for connectors: what it exports is declared lower down -
+the contract, the operation catalog (`runtime.operations`), apply sessions (`runtime.apply`), query builder calls
+(`runtime.queries`), did-you-mean hints (`runtime.text.suggest`, as `sdk.suggest`), the SDK-transport helpers and
+the declarative HTTP adapter (`runtime.api_calls`, `runtime.http_adapter`) in `runtime`; the engines' capabilities and
+messaging policy in `io`; the test fakes in `sdk.testing.fakes`. `runtime`, `io`, `net`, `sql` and `config` never
+import `sdk`, `engine`, `validation` or `outputs` (`io`'s DuckDB adapters build on `jobs`).
 
 `FileLocation` has the same meaning in both: the connection's roots; `resolve_path(path)` takes a URL of the
 connection's scheme or a key relative to the first root and refuses anything outside the roots. An s3 adapter is a few
@@ -276,9 +305,9 @@ the import, and uses the definition with its capabilities: the source engine dir
 `jobs.duckdb.definition_adapter` (a step's `read: <format>` selects the read operation whose `format` takes it;
 outputs use the write operation, whose `mode` choices the engine supports are the modes), SparkJob through
 `streamwright.spark.runtime.definition`. `definition.load_adapter(engine)` imports the adapter only when a job uses
-the engine. An entry point whose target is not a `ConnectorDefinition` was written for the pre-contract API and is
-refused (`PluginError`: "<name> (<distribution>) targets the pre-contract connector API; it needs an update to
-connector contract v1 (docs/design/connector-contract.md)").
+the engine. An entry point whose target is not a `ConnectorDefinition` is refused (`PluginError`: "<name>
+(<distribution>) is not a ConnectorDefinition: a connector package's entry point names its CONNECTOR
+(docs/design/connector-contract.md)").
 
 **Which connectors an engine can use** is derived from the definitions, never from a group of the engine's own: a
 job engine (`streamwright.core.jobs.engine.JobEngine`, registered in `streamwright.job_kinds`) runs on the engine
@@ -316,15 +345,18 @@ validated* vocabulary. They are never the limit of what a user can pass. Two lay
      e.g. `*.password`, `sasl.oauthbearer.client.secret`); such values are registered for redaction.
 
 **Execution policy: one vocabulary, every engine.** Paging, retries, rate limits and error handling are declared with
-the same keys wherever they apply. An engine states once (in its capabilities) which of them it honours:
+the same keys wherever they apply, in a `policy:` group (a source's top-level `policy:` holds the defaults `retry` and
+`rate_limit`; an HTTP request's `paginator` is in its `operation:`). An engine states once (in its capabilities) which of
+them it honours:
 
 | Key | Meaning | Where |
 |---|---|---|
-| `retry` `{max_attempts, backoff, max_delay, codes}` | transient-error retries of calls/reads/writes | stream, step, output |
-| `rate_limit` `{requests, per}` | client-side throttling of calls | stream, step |
-| `paginator` / `page_size` | HTTP paging; vendor page or batch size | request, step |
-| `on_error: fail \| skip \| warn` | a failed partition/file/record batch | stream (`on_partition_error`), step, output |
-| `timeout` | per-call timeout | stream, step, output |
+| `retry` `{max_attempts, backoff, max_delay, codes}` | transient-error retries of calls/reads/writes | `policy:` of a source, stream, step, output |
+| `rate_limit` `{requests, per}` | client-side throttling of calls | `policy:` of a source, stream, step |
+| `paginator` | HTTP paging | an HTTP request's `operation:` (source `http:` default) |
+| `page_size` | vendor page or batch size | `policy:` of a step |
+| `on_error: fail \| skip \| warn` | a failed partition/file/record batch | `policy:` of a stream (`on_partition_error`), step, output |
+| `timeout` | per-call timeout | `policy:` of a stream, step, output |
 
 Defaults are identical across engines. An unsupported key is an `unsupported-argument` error naming the engine, never
 silently ignored. Which provider error codes are worth retrying is data, not code: a connector declares its defaults as
@@ -361,12 +393,18 @@ a removed argument, a new edge) and force a code change for something that is co
 
 - **Operations are patterns.** An `Operation`'s `service` and `method` may be glob patterns (`*`, `?`, `[…]`); such
   an *operation family* matches every concrete `service.method` of the vendor that fits it. The patterns encode the
-  connector's safety policy (e.g. read-only) and the argument shape, never a list of names:
-  - meta_ads: `*.api_get` and `*.get_*` (any Marketing API object; reads only);
-  - microsoft_ads: `*Service.Get*`, `*Service.Search*`, `*Service.Find*`, `ReportingService.SubmitGenerateReport`,
-    `ReportingService.PollGenerateReport`;
-  - google_ads: `GoogleAdsService.search` / `search_stream` (typed: `customer_id`, `query`) and the read methods
-    (`get_*`, `list_*`) of any `*Service`, whose request fields are vendor arguments.
+  connector's safety policy (which methods read, which write, and whether a write may be sent again) and the
+  argument shape, never a list of names:
+  - meta_ads: reads `*.api_get` and `*.get_*` (any Marketing API object); writes `*.create_*`, `*.api_update`,
+    `*.api_delete`, and the exact `AdsPixel.create_event` (the Conversions API: a chunk per request);
+  - microsoft_ads: reads `*Service.Get*`, `*Service.Search*`, `*Service.Find*`,
+    `ReportingService.SubmitGenerateReport`, `ReportingService.PollGenerateReport`; writes `*Service.Add*`,
+    `*Service.Update*`, `*Service.Delete*` and `CampaignManagementService.Apply*Conversion*`;
+  - google_ads: reads `GoogleAdsService.search` / `search_stream` (typed: `customer_id`, `query`) and the read
+    methods (`get_*`, `list_*`) of any `*Service`, whose request fields are vendor arguments; writes
+    `*Service.mutate_*` (not idempotent) and `*UploadService.upload_*` (conversion uploads, deduplicated by Google).
+  A write family is an apply operation (§4): a source stream or call step refuses it; only a job's apply output
+  runs it.
   `ConnectorDefinition.operation(service, method)` returns the exact operation first, else the first matching family
   bound to the concrete names (a concrete `Operation`), so engines, validation and logs never see a pattern.
 - **Existence is the vendor's answer.** Whether `AdAccount.get_insights` or `CampaignManagementService.GetAdsByIds`

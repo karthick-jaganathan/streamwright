@@ -9,8 +9,9 @@ loading, typed inputs, checker, JSON schema, state store, batch runner and write
 explicit form, with the same options). Validation never needs secret values. Exit codes: 0 success (a run the lock
 policy skipped too), 1 invalid job, failed run or lock held, 2 usage or input error.
 
-- `validate JOB [--config F] [--set NAME=VALUE] [--strict] [--graph]`, `plan JOB`: no secrets, no state.
-- `run JOB [--secrets F] [--set NAME=VALUE] [--summary [FILE]] [--job-key KEY] [--state-lock-policy
+- `validate JOB [--config F] [--set NAME=VALUE] [--strict] [--graph] [--input FILE|-]`, `plan JOB`: no secrets, no
+  state; `--input` also checks a payload against `spec.input`.
+- `run JOB [--secrets F] [--set NAME=VALUE] [--input FILE|-] [--summary [FILE]] [--job-key KEY] [--state-lock-policy
   fail|wait|prune] [--state-lock-timeout 5m] [--once|--drain|--available-now|--follow [--interval 10s]]
   [--max-messages N] [--failed-job-policy abandon|retry|block] [--max-job-attempts N] [--apply-state-migrations]
   [--dry-run]`: unfinished batches of the run's scope resume first (a failed one is abandoned, retried or stops the
@@ -20,9 +21,10 @@ policy skipped too), 1 invalid job, failed run or lock held, 2 usage or input er
   run only checks the state tables: create them once with `streamwright duckdb state migrate JOB`, or let the run do
   it with `--apply-state-migrations` (see State, scopes and locks: Migrations).
 - `streamwright duckdb state ACTION JOB [--overlay F] [--config F] [--set ...] [--secrets F]`: `list [--limit N] [--scope TEXT] [--json]`, `status`,
-  `show JOB_ID`, `retry JOB_ID [--no-run]`, `abandon JOB_ID`, `leases [--json]`, `purge [--older-than 30d] [--scope
-  TEXT]`, `migrate [--dry-run]`, `check` (see State, scopes and locks); `streamwright state migrate|show|check --url
-  URL`: the state tables of a database URL.
+  `show JOB_ID` (with its outbox: events and apply rows, their outcomes), `retry JOB_ID [--no-run]`, `abandon
+  JOB_ID`, `resend|skip JOB_ID [--output NAME]` (apply rows with an unknown outcome: see Apply outputs), `leases
+  [--json]`, `purge [--older-than 30d] [--scope TEXT]`, `migrate [--dry-run]`, `check` (see State, scopes and locks);
+  `streamwright state migrate|show|check --url URL`: the state tables of a database URL.
 - Options belong to their command: a source's `--stream` or `--output` given to a job, `--strict` or `--log-level`
   to a state action other than `retry` (which runs the job and takes its `--allow-connector` and logging options) is
   a usage error (exit 2).
@@ -30,7 +32,10 @@ policy skipped too), 1 invalid job, failed run or lock held, 2 usage or input er
   `duckdb run`, `duckdb state`, `state migrate`).
 
 ## Manifest
-- `spec.config` / `spec.secrets`: typed input definitions (`type`, `items`, `required`, `default`), as in a source.
+- `spec.config` / `spec.secrets`: typed input definitions (`type`, `items`, `required`, `default`), as in a source,
+  with optional constraints `enum`, `pattern` (matched in full), `minimum`, `maximum`, `max_length` (a list input:
+  each item), checked on every value given (`--set`, files, lookups).
+- `spec.input`: the rows a run is given (`--input`), as the table `input` (see Input payloads).
   Secrets come from `--secrets FILE` or `STREAMWRIGHT_SECRET_<NAME>` and may appear **only in a connection's
   credential keys** (the keys its adapter or connector declares as secret).
 - `connections`: `provider` plus that provider's keys. `duckdb` (a database file, attached under the connection's
@@ -44,12 +49,25 @@ policy skipped too), 1 invalid job, failed run or lock held, 2 usage or input er
   - `read`: a connection and `read:` (files: `parquet | csv | json | auto` with `path`, `options`, `schema_mode`,
     `row_index`, `columns`, `column_groups`, `path_pattern`, `vocabulary`, `on_unmapped_column`; databases:
     `table` or `query`). `path` may be `{{ step.column }}`. Planned reads pin their file list in the batch.
-  - call: a connection and a connector call (`service`/`method`/`arguments`, or `request`), optional
-    `partitions: [{from, field, name}]` (crossed) and `sql` over the table `records` (column `record`); see Call
+  - call: a connection and an `operation:` its connector runs (a call `{service, method, arguments}`, or an HTTP
+    request `{path, ...}`), optional `partitions: [{from, field, name}]` (crossed) and `sql` over the table `records` (column `record`); see Call
     steps.
   - `source` + `stream`: a StreamWright source folder (relative to the job's folder) and one of its streams.
-  - consume: a broker connection (`kafka`, `sqs`) with `service: message`, `method: consume` (see Brokers).
-- `outputs`: `connection`, `step` or `sql`, and a required `mode` (publish outputs take none: see Brokers). What else is allowed depends on the writer:
+  - consume: a broker connection (`kafka`, `sqs`) with `operation: {service: message, method: consume}` (see Brokers).
+  - `log:` (any step): log its rows each batch, on the `streamwright.steps` logger with the step's log context:
+    `message` (required; `{column}` placeholders of the step's columns - a dotted name such as `{campaign.name}` is one column - NULL as `null`), `level`
+    (`debug | info | warning`, default `info`), `max_rows` (1..1000, default 20). One line per row,
+    `step NAME: MESSAGE`, then `step NAME: ... and N more row(s)`; none for zero rows. The engine reads
+    `LIMIT max_rows + 1` (a `COUNT(*)` only when there are more); a view step runs its query again. Lines are
+    redacted and cut to 1000 characters; a placeholder the step's result lacks fails the step. `streamwright serve`
+    logs only `step NAME: N row(s) (row values are not logged by streamwright serve)`.
+    ```yaml
+    - name: skipped_actions
+      sql: SELECT i.name, e.resource_name FROM input AS i JOIN existing_actions AS e USING (name)
+      log: {message: "conversion action {name} already exists ({resource_name}): not created", max_rows: 50}
+    ```
+- `outputs`: `connection`, `step` or `sql`, and a required `mode` (publish outputs take none: see Brokers; apply
+  outputs neither: see Apply outputs). What else is allowed depends on the writer:
   tables (`append | overwrite | merge`, `table`, `primary_key`), files (`overwrite | error`, `path`, `format`:
   `csv | tsv | json | jsonl | parquet`; `path` is the file, or with a `file_name` template the folder: `file_name`
   (and `layout`, its folders, e.g. `{today:%Y/%m}`) names one file, or with `split_by` one file per split (see File
@@ -59,7 +77,7 @@ policy skipped too), 1 invalid job, failed run or lock held, 2 usage or input er
   `schema_evolution`). Modes are the same words on every engine. A key the writer does not read is an error;
   modes that are not safe to replay (table `append`, files `error`) are warnings.
 - `runtime`: `threads`, `memory_limit`, `temp_directory`, `timeout_seconds` (per batch), `limits`
-  (`reference_values`, `read_groups`, `events`) and `state`: `{connection: NAME, schema: streamwright}` (a
+  (`reference_values`, `read_groups`, `events`, `apply_rows`) and `state`: `{connection: NAME, schema: streamwright}` (a
   `duckdb`, `postgres` or `mysql` connection) or `{sqlite: PATH}`, plus `ttl_seconds`, `job_key` (a batch with that
   key runs once per scope), `failed_job_policy` and `max_job_attempts` (see Delivery), `apply_migrations` (below),
   `scope` and `lock` (below).
@@ -163,18 +181,19 @@ batches, as JSON. A `source` + `stream` step loads its records the same way.
   `campaign.id` in the query) and extract it from `record`.
 - **Extract scalars with `->>`.** `record->>'$.campaign.id'` returns VARCHAR; cast it for other types
   (`(record->>'$.metrics.clicks')::BIGINT`). Dot notation (`record.campaign.id`) and `->` keep the value as JSON,
-  so a CSV or TSV output writes it as a quoted JSON string (`"""18497872503"""`), while Parquet hides the issue.
+  so a CSV or TSV output writes it as a quoted JSON string (`"""1234567890"""`), while Parquet hides the issue.
 
 ```yaml
 - name: ad_groups
   connection: google_ads_api
-  service: GoogleAdsService
-  method: search_stream
+  operation:
+    service: GoogleAdsService
+    method: search_stream
+    arguments:
+      customer_id: "{{ config.customer_id }}"
+      query: {gaql: {select: [campaign.id, ad_group.id, ad_group.name], from: ad_group,
+                     where: [{field: campaign.id, op: "=", type: int, value: "{{ partition.campaign_id }}"}]}}
   partitions: [{from: campaigns, field: campaign_id}]
-  arguments:
-    customer_id: "{{ config.customer_id }}"
-    query: {gaql: {select: [campaign.id, ad_group.id, ad_group.name], from: ad_group,
-                   where: [{field: campaign.id, op: "=", type: int, value: "{{ partition.campaign_id }}"}]}}
   sql: |
     SELECT record->>'$.campaign.id'               AS campaign_id,
            record->>'$.ad_group.id'               AS ad_group_id,
@@ -182,20 +201,21 @@ batches, as JSON. A `source` + `stream` step loads its records the same way.
     FROM records
 ```
 
-A REST API connector (an `http.request` connector: restapi, openai_ads, ...) takes a `request` instead of
-`service`/`method`. Its connection holds the authentication keys and the HTTP defaults (`base_url`, `headers`,
-`params_encoding`, `paginator`, `records`, `retry`, `rate_limit`) directly, with no `http:` block; the request's
-`path` is relative to `base_url`, or an absolute URL. Each REST connector's guide has a complete job.
+A REST API connector (an `http.request` connector: restapi, openai_ads, ...) takes an HTTP request as its
+`operation:` - `{path, method, params, headers, json, records, paginator}` - instead of a call. Its connection holds the authentication keys, the HTTP defaults in `http: {base_url, headers,
+params_encoding, paginator, records}` and the default `policy: {retry, rate_limit}`; the request's `path` is relative
+to `http.base_url`, or an absolute URL. Each REST connector's guide has a complete job.
 
 ```yaml
 - name: campaigns
   connection: ads_api            # provider: openai_ads, type: bearer, token, base_url: https://api.ads.openai.com
-  request:
+  operation:
     path: /v1/campaigns
     params: {account_id: "{{ config.account_id }}", limit: 100}
     records: {path: data}        # where the records are in each response
-  paginator: {type: cursor, token_path: last_id, param: after, has_more_path: has_more}
-  retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
+    paginator: {type: cursor, token_path: last_id, param: after, has_more_path: has_more}
+  policy:
+    retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
   sql: SELECT record->>'id' AS campaign_id, record->>'name' AS campaign_name FROM records
 ```
 
@@ -246,9 +266,10 @@ connections:
 steps:
   - name: orders
     connection: bus
-    service: message
-    method: consume
-    arguments: {destination: orders, group_id: orders-loader, from: earliest, max_wait: 5s}
+    operation:
+      service: message
+      method: consume
+      arguments: {destination: orders, group_id: orders-loader, from: earliest, max_wait: 5s}
     sql: |                       # optional: over the table `input`; default SELECT * FROM input
       SELECT message_id, key, json_extract_string(body, '$.id') AS order_id, headers['source'] AS origin
       FROM input
@@ -256,14 +277,15 @@ outputs:
   - {name: save, connection: wh, step: orders, table: orders, mode: merge, primary_key: [order_id]}
   - name: loaded
     connection: bus
-    service: message
-    method: publish
-    arguments: {destination: orders-loaded, key: order_id}
+    operation:
+      service: message
+      method: publish
+      arguments: {destination: orders-loaded, key: order_id}
     sql: SELECT order_id, origin FROM orders
 ```
 
 - `input`: the batch's messages: `message_id`, `key`, `body` (text), `headers` (`MAP(VARCHAR, VARCHAR)`),
-  `timestamp`. A job has at most one consume step; its `arguments` are the connector's (Kafka: `destination`,
+  `timestamp`. A job has at most one consume step; its `operation.arguments` are the connector's (Kafka: `destination`,
   `group_id`, `from`, `options`; SQS: the queue URL as `destination`, `visibility_timeout`), plus `max_messages` and
   `max_wait`.
 - A batch: poll, then run the steps, write the outputs (each with its receipt), compute the publish outputs into the
@@ -271,7 +293,7 @@ outputs:
   outbox. A batch that fails is not acknowledged: its pinned messages are processed again by `state retry` or the
   next run, and Kafka redelivers them to the group. Delivery is at least once; an event's dedupe key is
   `job:batch:output` (Kafka: each event's `dedupe-key` header, `job:batch:output:N`).
-- A publish output takes `sql` or `step`, and `arguments` (`destination`; Kafka `key`: the column that keys each
+- A publish output takes `sql` or `step`, and `operation.arguments` (`destination`; Kafka `key`: the column that keys each
   event; SQS `group_id`); no `mode`, `table` or `path`. Each row is one event (a JSON object), at most
   `runtime.limits.events` (10000) per output and batch. After the writes, `_commits` (output, table_name, version,
   rows, batch_id) and `_file_errors` (step, path, reason) describe them, for events about what was written.
@@ -280,6 +302,155 @@ outputs:
   interrupted (exit 130), pausing `--interval` (10s) after an empty poll. `--max-messages N` (500) caps a batch; the
   step's `max_messages` wins; `0` only resumes unfinished batches and relays the outbox. A job without a consume step
   refuses the modes other than `--once` (each batch would be new work). `runtime.timeout_seconds` bounds each batch.
+
+## Apply outputs
+An apply output sends its rows to a connector's **apply operation** - a row each: create or update objects, send
+conversions or events - and keeps every row's outcome. It names the operation like a call: a connection of a
+connector (not a DuckDB adapter) and `operation: {service, method, arguments}`; `apply:` says how the rows are sent
+and judged, `policy:` how the calls retry. `streamwright connectors NAME` and the connector's guide list its apply
+operations and their arguments.
+
+```yaml
+outputs:
+  - name: upload_conversions
+    connection: ads_api                       # e.g. provider: google_ads
+    step: valid_conversions                   # or sql: each row is one operation's payload
+    operation:
+      service: ConversionUploadService
+      method: upload_click_conversions
+      arguments: {customer_id: "{{ config.customer_id }}"}
+    apply:
+      chunk_size: 2000                          # rows per call; default and maximum: the operation's max_chunk
+      on_row_error: fail                        # fail (default): a rejected row makes the run exit 1 | continue
+      nulls: error                              # error (default) | skip_field | clear
+      on_unknown: hold                          # hold (default) | reconcile
+      allow_remove: false                       # rows may use the operation's destructive actions (e.g. op: remove)
+    policy:
+      retry: {max_attempts: 5, backoff: exponential}
+      rate_limit: {requests: 5, per: 1s}
+    log:                                        # once the rows are sent: a line per row of the SELECT
+      sql: |
+        SELECT gclid, outcome.error_code AS code, outcome.error_message AS error
+        FROM upload_conversions WHERE outcome.status = 'failed'
+      message: "gclid {gclid} rejected: {code}: {error}"
+      level: warning                            # debug | info (default) | warning; max_rows: 20 (1..1000)
+```
+
+- **Rows.** Each column is a field of the vendor's object (its guide says which, e.g. `campaign.name`,
+  `network_settings.target_google_search`); a column `op` picks the row's action when the operation has several
+  (create, update, remove; default the first). A row whose `op` is not an action, a destructive action without
+  `allow_remove: true`, or a NULL under `nulls: error` fails alone (`INVALID_ACTION`, `REMOVE_NOT_ALLOWED`,
+  `NULL_VALUE`) and is never sent. `skip_field` leaves NULL fields out; `clear` sends them as "clear this field".
+- **Delivery (at least once, honest).** The rows are committed to the batch's outbox with the batch, with the
+  rendered `arguments` pinned; then, chunk by chunk, each chunk is marked in flight before its call and its rows'
+  outcomes (the vendor's result, or an error code and message) are stored after it. A row the vendor rejects fails
+  alone; a call the vendor rejects as a whole fails its rows. A completed batch is never applied again.
+- **Unknown outcomes.** A call cut short (the run stopped mid-call, or a transient error outlasted the retries)
+  leaves its rows in flight. An idempotent operation (one the vendor deduplicates, e.g. conversion uploads) sends
+  them again at the next run. Otherwise `on_unknown: hold` stops the run (exit 1) until you check the vendor and run
+  `state resend JOB JOB_ID` (send them again: they may be applied twice) or `state skip JOB JOB_ID` (mark them
+  failed, `UNKNOWN_OUTCOME`); `reconcile` asks the connector what exists, where it can. A non-idempotent
+  operation's call is sent once (`policy.retry` does not apply to it): a call that timed out may have been applied,
+  so it is never resent within the run.
+- **Failed rows.** Under `on_row_error: fail`, a rejected row fails its batch (exit 1); the next run deals with it
+  as `runtime.state.failed_job_policy` says. `abandon` (default) sends nothing again. `retry` sends again only the
+  batch's `failed` rows of its `on_row_error: fail` outputs (never an applied row; in-flight rows keep the rules
+  above; rows skipped as `UNKNOWN_OUTCOME` stay failed); a row keeps its attempts and last error until then.
+  Rejected again, the batch fails again, retried while `max_job_attempts` allows. `block` waits for `state retry`
+  (which sends every failed row of the batch again, skipped rows excepted) or `state abandon`.
+- **Caps.** `runtime.limits.apply_rows` (100000) caps the rows of one output and batch: a runaway join fails the
+  batch before any call. `state show JOB JOB_ID` lists every row's status, attempts, result and error.
+- **`log:` (apply outputs only).** Once a run has sent a batch's rows of the output, `output NAME: MESSAGE` per row
+  of `sql` (one SELECT; default: every row) on `streamwright.output`, up to `max_rows`. `sql` reads a table named
+  after the output: its columns, and `outcome` (`status` applied|failed, `error_code`, `error_message`, `result`
+  JSON of what the vendor returned, `row` from 1). `{outcome.status}`, `{outcome.result.resource_name}` reach into
+  it; `{{ batch.id }}` is the batch. It runs in an in-memory DuckDB with only the results (no files, no network); a
+  `log:` that cannot run is a warning, never a failure; under serve it logs only the number of rows.
+- **REST API connectors** (those that declare `http.send`: restapi and the HTTP ads connectors) take a request
+  instead of a call: `operation: {path, method, params, headers, json, records}` with the connection's base URL,
+  headers and auth. `method` is POST (default), PUT, PATCH or DELETE; PUT and DELETE are idempotent (retried per
+  `policy.retry`), POST and PATCH are sent once. Each row is one request whose body is the row (without `op`), or
+  `json` rendered with `{{ row }}` / `{{ row.<column> }}` (also in `path`, `params`, `headers`, e.g.
+  `/campaigns/{{ row.id }}`); a 4xx fails only its row (error code: the status). `json` with `{{ rows }}` (e.g.
+  `{elements: "{{ rows }}"}`) sends the chunk's rows in one request instead, every row getting the call's outcome
+  (with `records: {path}` a list, item n for row n). A request cut short keeps the rows sent before it; the rest stay
+  in flight. The output's `policy` defaults to the connection's.
+- **Dry runs** are the vendor's, as an argument of its operation where it has one (google_ads: `validate_only:
+  true` checks every row and changes nothing): a job that wants one declares a config input and passes it on.
+- The summary's `outputs` counts the applied rows; a log line per batch says `applied: ... rows=N, failed=M`.
+
+## Input payloads
+A job may take its rows from the caller instead of reading them: `spec.input` declares them, `--input FILE` (or `-`
+for stdin; a JSON array of objects or NDJSON) gives them, and the steps read them as the table `input` (the table a
+consume step fills: a job has one or the other).
+
+```yaml
+spec:
+  input:
+    columns:                                  # typed like spec.config inputs, not required unless `required: true`
+      gclid: {type: string, required: true}
+      conversion_value: {type: number, minimum: 0}
+      currency_code: {type: string, enum: [USD, EUR]}
+    max_rows: 10000                           # default 10000
+    max_bytes: 104857600                      # default 100 MB, checked before parsing
+    unknown_columns: reject                   # reject (default) | drop
+    retain: until_complete                    # until_complete (default) | none
+steps:
+  - name: valid_conversions
+    sql: SELECT * FROM input WHERE conversion_value > 0
+```
+
+- The payload is read and checked before a batch exists: a row that does not fit (an unknown or missing column, a
+  type, a constraint, a repeated key, nesting deeper than 32) fails the run with every problem listed (exit 2). The
+  columns are loaded with their declared types (string VARCHAR, integer BIGINT, number DOUBLE, boolean BOOLEAN, date
+  DATE, list `T[]`), with no inference and no file.
+- The rows are pinned in the batch, so a retry reads the same rows, and removed from the state store when the batch
+  completes (only their SHA-256 and count stay). `retain: none` never stores them: a failed batch then cannot be
+  resumed (abandon it). Row values are never logged.
+- A job with `spec.input` needs `--input` to start new work (`--max-messages 0` only resumes); `--job-key` makes a
+  given payload's work run once.
+
+## Serving over HTTP
+`streamwright serve SERVE_YAML` is the job CLI as a REST API: `POST /v1/jobs/JOB/runs` with `{"set": {...},
+"input": [...]}` is `duckdb run --set ... --input ...`; `streamwright worker SERVE_YAML --processes N` runs what it
+queues, N at once (sw_requests in the state store, created at start; `pip install "streamwright[serve]"`).
+`streamwright queue purge SERVE_YAML --older-than 30d` deletes ended runs (cron); `queue migrate` upgrades the tables.
+`sudo streamwright systemd install` writes the systemd units of serve, worker and a daily purge (`/etc/systemd/system`).
+
+```yaml
+# serve.yaml: nothing is reachable unless it is listed
+bind: 127.0.0.1:8080                        # a non-loopback address needs `auth`
+state: {url: "postgresql://sw:{{ secrets.state_password }}@pg/streamwright"}   # optional on loopback: queue.db
+# or state: {connection: {provider: postgres, host: pg, database: streamwright, user: sw,
+#                         password: "{{ secrets.state_password }}"}, schema: sw}
+metrics: {enabled: true}                    # Prometheus text at /metrics (an authenticated caller's jobs)
+auth:
+  api_keys: [{id: crm_prod, sha256_env: SW_KEY_CRM_SHA256, claims: {tenant: t1}}]   # digests only
+  jwt: {issuer: https://idp.example.com, audience: streamwright, jwks_url: https://idp.example.com/jwks}
+jobs:
+  client_feed_upload:
+    manifest: jobs/client_feed_upload.yaml
+    principals: [crm_prod]                  # API key ids or JWT subjects
+    set: {tenant_id: {from_claim: tenant}}  # bound (or {value: ...}); every other spec.config input is settable
+    payload: {max_bytes: 5MB}
+    server_options: {fan_out_concurrency: 4}   # the operator's run flags; never a request's
+    limits: {concurrency: 4, rate: {requests: 10, per: 1m}, timeout: 2h, wait_seconds: 30}
+    on_busy: reject                         # a run of the same scope is active: 409, or queue
+```
+
+- **Never settable by a request:** inputs bound in serve.yaml, inputs with a `lookup:` (a value would skip the
+  lookup), secrets. A request body has only `set`, `input` and `options.async`; anything else is `422`.
+- **Refused at start:** a settable text input used in SQL (`sql`, a read `query`, `arguments.query`, a lookup
+  `query`) needs an `enum` or `pattern` of letters, digits and `_ - . : @ +`; one used in a connection, `path`,
+  `file_name`, `layout`, `table`, `arguments.path`/`destination` or a lookup `command`/`secret_id`, letters, digits
+  and `_ - : @ + = ,` (no `/ . * ? [ { %`). Numbers, booleans and dates are always safe.
+- **Idempotency-Key** (required for jobs with apply outputs) is per caller and job, bound to the body (another body:
+  `422`), and is the run's job key: a run a worker takes over resumes its batches.
+- A worker claims one run per scope at once, renews its claim, runs it in a child process (killed past
+  `limits.timeout`); a dead worker's runs are taken over after its claim (a minute) ends. Callers see an error code;
+  the cause is in the worker's log and the run's row. Endpoints: `GET /v1/jobs`, `POST /v1/jobs/JOB/runs|validate`,
+  `GET /v1/jobs/JOB/plan|status`, `GET /v1/runs/ID`, `/healthz`, `/readyz`, `/openapi.json`, `/metrics`. Several
+  hosts behind a load balancer share one `state` database; `limits.rate` and `concurrency` hold across them.
 
 ## Lookups and accounts
 Inputs can be fetched at run time instead of given up front: `spec.lookups` declares where values come from, and an
@@ -341,14 +512,17 @@ runtime:
 
 ## Log context and labels
 Inside a job run every line says whom it is about, so runs and `runtime.fan_out` passes that run side by side can be
-told apart. Text lines carry a tag after the logger name: the job, its `runtime.log.labels`, the fan-out item, and the
-step, output or lookup at work. JSON lines carry each key (`job`, `labels`, `item`, `scope`, `job_id`, `step`,
-`output`, `lookup`), for every logger, SDK lines included:
+told apart. Text lines carry a tag after the logger name: the job, its `runtime.log.labels`, the fan-out item, the
+step, output or lookup at work, and the run's request id (`req=`). JSON lines carry each key (`job`, `labels`, `item`,
+`scope`, `job_id`, `step`, `output`, `lookup`, `request_id`), for every logger, SDK lines included:
 
 ```
-[...] INFO streamwright.source [ads_campaigns tenant=t1 region=eu account=a1 step=campaigns]: ...
-[...] INFO streamwright.duckdb [ads_campaigns tenant=t1 region=eu account=a1 output=save]: ...
+[...] INFO streamwright.source [ads_campaigns tenant=t1 region=eu account=a1 step=campaigns req=sw_2Lw...]: ...
+[...] INFO streamwright.duckdb [ads_campaigns tenant=t1 region=eu account=a1 output=save req=sw_2Lw...]: ...
 ```
+
+Every run gets a new request id (`sw_` and 22 URL-safe characters), the same on all its lines, passes and threads,
+and kept in its batches' metadata (`state show`): grep one id for one run.
 
 ```yaml
 runtime:
@@ -386,14 +560,14 @@ says (`--failed-job-policy` overrides it for one run):
 - Other scopes keep running either way. `state list` shows each batch's ATTEMPTS.
 
 ## Execution policy
-Every step and output takes the one execution-policy vocabulary (connector contract v1.2 §6a), with the same keys and
-defaults as a source stream and a SparkJob:
+Every step and output takes the one execution-policy vocabulary in its `policy:` group (connector contract v1.2 §6a),
+with the same keys and defaults as a source stream's `policy:` and a SparkJob's:
 
 - `retry {max_attempts, backoff, max_delay, codes}` — a transient read or write is retried through the one shared
   retry. On a call step the connector's own retries apply; on a `read` step or an output a transient I/O error is
   retried.
-- `rate_limit {requests, per}` and `paginator` / `page_size` — throttle and page a **call step** (`page_size` also
-  bounds the batch size records load in).
+- `rate_limit {requests, per}` and `page_size` — throttle and page a **call step** (`page_size` also bounds the batch
+  size records load in; an HTTP step's `paginator` is in its `operation:`).
 - `timeout` (seconds, or a duration like `30s`) — bounds each call, read or write.
 - `on_error: fail | skip | warn` — `fail` (default) fails the batch; `skip`/`warn` tolerate a failed step (an empty
   placeholder table lets dependents run) or output (a skipped receipt lets the batch complete), `warn` only logging.
