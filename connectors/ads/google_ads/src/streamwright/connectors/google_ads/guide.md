@@ -114,6 +114,36 @@ any `<Service>.get_*` / `list_*` read method of the installed library works the 
   (`record->>'$.campaign.id'`, which returns text) and cast numbers and dates. IDs are 64-bit: keep them as text or
   BIGINT. Money fields are in micros.
 
+## Performance reports
+
+Google Ads has no async reports: a GAQL query is the report, and `search_stream` returns its rows at once, so use a
+normal `operation:` (no `async_job`). The stream above is the campaign template. One query covers the whole
+customer; for ad groups, query `FROM ad_group` rather than one query per campaign:
+
+```yaml
+requests:
+  - name: raw_ad_group_performance
+    operation:
+      service: GoogleAdsService
+      method: search_stream
+      arguments:
+        customer_id: "{{ partition.customer_id }}"
+        query:
+          gaql:
+            select: [campaign.id, ad_group.id, ad_group.name, segments.date,
+                     metrics.impressions, metrics.clicks, metrics.cost_micros]
+            from: ad_group
+            where:
+              - {field: segments.date, op: BETWEEN, type: date, value: ["{{ window.start }}", "{{ window.end }}"]}
+```
+
+**Entity sync or reports.** Each GAQL resource (`campaign`, `ad_group`, `ad_group_criterion`, ...) reads every row of
+the customer in one query, and selects its parent's fields (`campaign.id`) for the join. To read only a few
+campaigns, filter with `campaign.id IN` in the same query rather than partitioning by campaign (one query each).
+
+**Case-sensitive values.** GAQL enums are upper case (`ENABLED`, `SEARCH`); field paths are lower case
+(`segments.date`, `metrics.cost_micros`).
+
 ## Query builder
 
 `query` takes either form:

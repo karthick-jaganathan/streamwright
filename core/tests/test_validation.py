@@ -688,10 +688,8 @@ def test_async_job_checks():
         request(d)["async_job"]["results"] = {}
     issues = [issue for issue in check(without_call) if issue.code == "missing-key"]
     assert found(issues) == [
-        ("missing-key", "streams[0].requests[0].async_job.submit", "`submit` needs an `operation:`: async jobs run "
-                                                                   "through a connector"),
-        ("missing-key", "streams[0].requests[0].async_job.results", "`results` needs an `operation:`: async jobs run "
-                                                                    "through a connector"),
+        ("missing-key", "streams[0].requests[0].async_job.submit", "`submit` needs an `operation:`"),
+        ("missing-key", "streams[0].requests[0].async_job.results", "`results` needs an `operation:`"),
     ]
 
 
@@ -1631,18 +1629,28 @@ def test_async_job_values_are_type_checked():
     assert codes(check(mutate)) == [(ERROR, "bad-value")] * 3
 
 
-def test_async_jobs_and_http_requests_need_the_right_auth():
-    def http_job(d):
-        stream(d)["requests"] = [{"name": "raw_campaigns", "async_job": {
-            "submit": {"operation": {"path": "/reports", "method": "POST"}},
-            "poll": {"operation": {"method": "Poll"}, "every": "15s", "timeout": "30m",
-                     "done_when": {"path": "Status", "equals": "Success"}},
-            "results": {"operation": {"path": "/reports/{{ submit.id }}"}},
-        }}]
-    issues = check(http_job)
-    assert codes(issues) == [(ERROR, "bad-value")] * 2
-    assert "`submit`'s operation must be a call" in messages(issues) and "`results`'s operation must be a call" in \
-        messages(issues)
+def test_an_async_job_of_requests_is_checked_like_requests():
+    def http_job(poll, results_path="/reports/{{ submit.id }}/rows"):
+        def mutate(d):
+            stream(d)["requests"] = [{"name": "raw_campaigns", "async_job": {
+                "submit": {"operation": {"path": "/reports", "method": "POST", "json": {"type": "daily"}}},
+                "poll": dict(poll, every="15s", timeout="30m", done_when={"path": "status", "equals": "COMPLETED"}),
+                "results": {"operation": {"path": results_path, "records": {"path": "rows"},
+                                          "paginator": {"type": "cursor", "next_url_path": "next"}}},
+            }}]
+        return mutate
+    assert check(http_job({"operation": {"path": "/reports/{{ submit.id }}"}})) == []
+    issues = check(http_job({"operation": {"path": "/reports/{{ poll.id }}", "method": "FETCH"}},
+                            results_path="/reports/{{ poll.url }}"))
+    assert found(issues) == [
+        ("unavailable-reference", "streams[0].requests[0].async_job.poll.operation.path",
+         "{{ poll.id }} cannot be used here; available: config, partition, submit, today"),
+        ("bad-value", "streams[0].requests[0].async_job.poll.operation.method",
+         "unknown HTTP method 'FETCH' (did you mean 'PATCH'?); one of: GET, POST, PUT, PATCH, DELETE")]
+    issues = check(http_job({"operation": {"method": "Poll"}}))
+    assert found(issues) == [("bad-value", "streams[0].requests[0].async_job.poll.operation.method",
+                              "a poll that is a call runs on the connector in `auth.provider`; with built-in auth, "
+                              "poll with a request (path, method, ...)")]
 
     def http_with_provider(d):
         d["auth"] = {"provider": "google_ads", "refresh_token": "{{ secrets.token }}"}

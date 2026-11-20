@@ -411,7 +411,10 @@ a removed argument, a new edge) and force a code change for something that is co
   exists is decided by the installed SDK (attribute lookup, WSDL, discovery document) at run time. An unknown name is
   a clear, non-retryable error naming the SDK and version, with "did you mean" suggestions drawn from the SDK by
   introspection. A connector may declare `surface="module:function"` (a pure introspection of the installed library,
-  no network); `validate` calls it when the library is importable, so typos are still caught before a run.
+  no network); `validate` calls it when the library is importable, so typos are still caught before a run. It may
+  also declare `describe_type="module:function"`: `describe_type(name)` gives a vendor type from the installed
+  library, offline (`{kind: enum, values}` or `{kind: object, fields}`, None when unknown). The MCP tool
+  `describe_connector_type` answers with it, so agents use the values the API accepts (exact case) without guessing.
 - **Allowed constants** are the connector's own vocabulary, not the vendor's: its declared fields and aliases, its
   query-builder grammar (e.g. the GAQL builder's operators), the keys it consumes itself (e.g. kafka's
   `destination`, `group_id`), and transport mechanics (pagination cursor keys the client must own). Examples in

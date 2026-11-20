@@ -1,0 +1,73 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+description: Sponsored Products campaign performance, one row per campaign per day, from a v3 async report.
+
+# A v3 report is an async job: POST the report, poll it until COMPLETED, then download its gzip JSON file (a
+# presigned URL, fetched without the API's headers). An empty file is a window without traffic: no rows.
+incremental:
+  cursor_field: date
+  start: "{{ config.start_date }}"
+  window: 30d                      # spCampaigns daily reports span at most 31 days
+  lookback: 14d                    # attributed sales restate for up to 14 days
+requests:
+  - name: raw_sp_campaign_report
+    async_job:
+      submit:
+        operation:
+          path: /reporting/reports
+          method: POST
+          headers: {Content-Type: application/vnd.createasyncreportrequest.v3+json}
+          json:
+            name: "sp_campaigns {{ window.start | date('%Y-%m-%d') }}"
+            startDate: "{{ window.start | date('%Y-%m-%d') }}"
+            endDate: "{{ window.end | date('%Y-%m-%d') }}"
+            configuration:
+              adProduct: SPONSORED_PRODUCTS     # enums are upper case: SPONSORED_PRODUCTS, DAILY, GZIP_JSON
+              reportTypeId: spCampaigns
+              groupBy: [campaign]
+              columns: [date, campaignId, campaignName, impressions, clicks, cost, purchases7d, sales7d]
+              timeUnit: DAILY
+              format: GZIP_JSON
+      poll:
+        operation:
+          path: "/reporting/reports/{{ submit.reportId }}"
+        every: 30s
+        timeout: 3h                # large accounts' reports can take a while
+        done_when: {path: status, equals: COMPLETED}
+        fail_when: {path: status, equals: FAILED}
+      download: {url: "{{ poll.url }}", format: json, compression: gzip}
+
+transform:
+  mode: page
+  steps:
+    - name: sp_campaign_report
+      select: |
+        SELECT
+          (record->>'date')::DATE                       AS date,
+          record->>'campaignId'                         AS campaign_id,
+          record->>'campaignName'                       AS campaign_name,
+          coalesce((record->>'impressions')::BIGINT, 0) AS impressions,
+          coalesce((record->>'clicks')::BIGINT, 0)      AS clicks,
+          coalesce((record->>'cost')::DOUBLE, 0)        AS cost,
+          coalesce((record->>'purchases7d')::BIGINT, 0) AS purchases_7d,
+          coalesce((record->>'sales7d')::DOUBLE, 0)     AS sales_7d
+        FROM raw_sp_campaign_report
+
+export:
+  sp_campaign_report:
+    step: sp_campaign_report
+    primary_key: [campaign_id, date]

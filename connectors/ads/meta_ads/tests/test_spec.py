@@ -93,3 +93,12 @@ def test_retry_codes_are_the_specs_and_a_stream_replaces_them():
     assert ConnectorContext("meta_ads", str, default_codes=CONNECTOR.retry_codes).retryable(error)
     replaced = ConnectorContext("meta_ads", str, retry={"codes": [2446079]}, default_codes=CONNECTOR.retry_codes)
     assert replaced.retryable(error) and not replaced.retryable(_graph_error(613, None, transient=True))
+
+
+def test_types_are_described_from_the_installed_sdk():
+    level = components.describe_type("meta_ads", "AdsInsights.Level")
+    assert level["kind"] == "enum" and set(level["values"]) >= {"account", "campaign", "adset", "ad"}
+    insights = components.describe_type("meta_ads", "AdsInsights")
+    assert insights["fields"]["impressions"] == "string" and "AdsInsights.DatePreset" in insights["enums"]
+    assert components.describe_type("meta_ads", "AdsInsights.Nope") is None
+    assert components.describe_type("meta_ads", "NoSuchObject") is None

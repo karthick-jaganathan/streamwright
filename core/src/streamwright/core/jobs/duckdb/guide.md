@@ -50,7 +50,7 @@ policy skipped too), 1 invalid job, failed run or lock held, 2 usage or input er
     `row_index`, `columns`, `column_groups`, `path_pattern`, `vocabulary`, `on_unmapped_column`; databases:
     `table` or `query`). `path` may be `{{ step.column }}`. Planned reads pin their file list in the batch.
   - call: a connection and an `operation:` its connector runs (a call `{service, method, arguments}`, or an HTTP
-    request `{path, ...}`), optional `partitions: [{from, field, name}]` (crossed) and `sql` over the table `records` (column `record`); see Call
+    request `{path, ...}`) or an `async_job:` (a report job), optional `partitions: [{from, field, name}]` (crossed) and `sql` over the table `records` (column `record`); see Call
     steps.
   - `source` + `stream`: a StreamWright source folder (relative to the job's folder) and one of its streams.
   - consume: a broker connection (`kafka`, `sqs`) with `operation: {service: message, method: consume}` (see Brokers).
@@ -218,6 +218,51 @@ to `http.base_url`, or an absolute URL. Each REST connector's guide has a comple
     retry: {codes: [429, 500, 502, 503, 504], max_attempts: 5, backoff: exponential}
   sql: SELECT record->>'id' AS campaign_id, record->>'name' AS campaign_name FROM records
 ```
+
+### Async reports
+
+A call step may take `async_job:` instead of `operation:` (one or the other, not both) to run a report job: the
+same grammar as a source request's `async_job` - `submit`, `poll` (`operation`, `every`, `timeout`, `done_when`,
+`fail_when`) and exactly one of `results` or `download`. Each part's `operation:` is what the connector takes: a
+call for SDK connectors (Microsoft Ads, Meta Ads, ...), an HTTP request for REST connectors (Amazon Ads, restapi,
+...); `poll.operation.service` defaults to the submit's. The records land in `records` like a call step's.
+
+```yaml
+- name: report
+  connection: ads                  # provider: microsoft_ads
+  async_job:
+    submit:
+      operation:
+        service: ReportingService
+        method: SubmitGenerateReport
+        arguments:
+          request:
+            ReportRequest:
+              "@type": CampaignPerformanceReportRequest
+              Aggregation: Daily
+              Format: Csv
+              ExcludeReportHeader: true
+              ExcludeReportFooter: true
+              Columns: [TimePeriod, AccountId, CampaignId, CampaignName, Impressions, Clicks, Spend]
+              Scope: {AccountIds: ["{{ config.account_id }}"]}
+              Time: {PredefinedTime: Yesterday}
+    poll:
+      operation: {method: PollGenerateReport, arguments: {request: {ReportRequestId: "{{ submit.result }}"}}}
+      every: 15s
+      timeout: 30m
+      done_when: {path: Status, equals: Success}
+      fail_when: {path: Status, equals: Error}
+    download: {url: "{{ poll.ReportDownloadUrl }}", format: csv, compression: zip}
+  sql: SELECT record->>'CampaignId' AS campaign_id, (record->>'Impressions')::BIGINT AS impressions FROM records
+```
+
+- `{{ submit.* }}` / `{{ poll.* }}` are the responses (a response that is not a mapping is `{{ submit.result }}`).
+  The download URL is fetched without the connection's credentials; an empty URL or file gives no records.
+- Call steps have no incremental windows (`{{ window.* }}` is source-only): set the range with `{{ config.* }}`, a
+  relative range of the API (`PredefinedTime`, `date_preset`) or step partitions.
+- Inline or a source step: inline suits a one-off, self-contained job. Use a source stream (and a `source` +
+  `stream` step) when the report is reused, read incrementally (windows, lookback, bookmarks) or shared by several
+  jobs.
 
 ## File names
 A file output's `path` is the file; with `file_name` it is the folder, and `file_name` names the file inside it

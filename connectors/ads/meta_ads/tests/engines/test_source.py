@@ -17,8 +17,10 @@
 
 import datetime
 import json
+import logging
 import os
 from types import MappingProxyType
+from urllib.parse import parse_qsl
 
 import pytest
 import requests
@@ -86,7 +88,8 @@ def test_the_meta_ads_example_runs_end_to_end(graph, capsys, caplog, monkeypatch
     today = datetime.date.today().isoformat()
     graph.routes[("GET", INSIGHTS)] = two_pages(graph)
     metadata_routes(graph)
-    assert cli.main(["run", EXAMPLE, "--set", "account_ids=123", "--set", "start_date=today",
+    streams = ["--stream", "ad_sets", "--stream", "campaign_insights", "--stream", "campaigns"]  # the report: below
+    assert cli.main(["run", EXAMPLE, "--set", "account_ids=123", "--set", "start_date=today", *streams,
                      "--log-level", "DEBUG"]) == 0
     messages = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     records = {name: [m["record"] for m in messages if m["type"] == "RECORD" and m["stream"] == name]
@@ -184,6 +187,59 @@ def test_objects_are_read_with_api_get(graph):
     assert graph.requests[0]["params"]["fields"] == "id,name,status"
 
 
+def report_routes(graph, statuses, rows):
+    """An async insights report: POST starts run 777, GET 777 answers `statuses` in turn, its insights are `rows`."""
+    graph.routes[("POST", INSIGHTS)] = lambda request: (200, {"report_run_id": "777"})
+    graph.routes[("GET", "/v26.0/777/")] = lambda request: (200, dict(statuses.pop(0), id="777"))
+
+    def insights(request):
+        if not rows:
+            return 200, {"data": []}
+        if request["params"].get("after") == "c2":
+            return 200, {"data": rows[1:], "paging": {"cursors": {"after": "c3"}}}
+        return 200, {"data": rows[:1], "paging": {"cursors": {"after": "c2"},
+                                                  "next": graph.url + "/v26.0/777/insights?after=c2"}}
+    graph.routes[("GET", "/v26.0/777/insights")] = insights
+
+
+def test_an_async_insights_report_is_started_polled_and_read_in_pages(graph, caplog):
+    rows = [{"account_id": "123", "campaign_id": "1", "adset_id": "11", "adset_name": "US", "date_start": str(TODAY),
+             "impressions": "10", "clicks": "2", "spend": "1.5"},
+            {"account_id": "123", "campaign_id": "1", "adset_id": "12", "adset_name": "CA", "date_start": str(TODAY),
+             "impressions": "4", "clicks": "0", "spend": "0"}]
+    running = {"async_status": "Job Running", "async_percent_completion": 40}
+    done = {"async_status": "Job Completed", "async_percent_completion": 100}
+    report_routes(graph, [running, done], rows)
+    sleeps = []
+    with caplog.at_level(logging.INFO, logger="streamwright.network"):
+        output = run(load_source(EXAMPLE), sleeps=sleeps, streams=("ad_set_insights_report",))
+    pages = [message.split("get_insights ")[1].split(",")[0] for message in caplog.messages
+             if "AdReportRun.get_insights page" in message]
+    assert pages == ["page 1: 1 record(s)", "page 2: 1 record(s)"]       # one page per Graph API page
+    assert [(r["ad_set_id"], r["impressions"]) for _, r in output.records] == [("11", 10), ("12", 4)]
+    assert sleeps == [15.0]                                     # polled twice: running, then completed
+    submitted, = graph.calls(INSIGHTS)
+    form = dict(parse_qsl(submitted["body"]))                  # the SDK posts the report's parameters as a form
+    assert submitted["method"] == "POST" and (form["level"], json.loads(form["time_range"])["until"]) == (
+        "adset", str(TODAY))
+    assert graph.calls("/v26.0/777/")[0]["params"]["fields"] == "async_status,async_percent_completion"
+
+    report_routes(graph, [done], [])                            # no traffic: the report has no rows
+    assert run(load_source(EXAMPLE), streams=("ad_set_insights_report",)).records == []
+    report_routes(graph, [{"async_status": "Job Failed"}], [])
+    with pytest.raises(SourceError, match=r"the job failed: .*Job Failed"):
+        run(load_source(EXAMPLE), streams=("ad_set_insights_report",))
+
+
+def test_only_a_read_that_can_run_as_a_report_takes_is_async(graph):
+    source = load_source(EXAMPLE)
+    source["streams"] = [page_stream("campaign", {
+        "name": "raw", "sdk": "meta_ads", "service": "Campaign", "method": "api_get",
+        "arguments": {"id": "c1", "is_async": True}}, "SELECT record->>'id' AS id FROM raw")]
+    with pytest.raises(SourceError, match=r"Campaign.api_get does not run as an async report \(is_async\)"):
+        run(source, streams=None)
+
+
 def test_vendor_arguments_are_merged_into_the_graph_params(graph):
     """An undeclared argument is a Graph API parameter, merged into the request's params."""
     graph.routes[("GET", INSIGHTS)] = lambda request: (200, {"data": [{"account_id": "123", "campaign_id": "1"}]})
@@ -209,10 +265,11 @@ def test_network_logs_show_requests_redacted(graph, capsys, monkeypatch, sdk_log
                      "--set", "start_date=today", *logging_options]) == 0
     err = capsys.readouterr().err
     today = datetime.date.today().isoformat()
-    # two API pages, one page of records: the SDK pages the edge, streamwright counts the calls
-    assert "INFO streamwright.network: stream 'campaign_insights', request 'raw_campaign_insights', partition " \
-           "{\"account_id\": \"123\"}, window %s..%s: meta_ads AdAccount.get_insights page 1: 2 record(s), " % (
-               today, today) in err
+    # two API pages, logged as two pages: the SDK follows the cursor, streamwright counts and logs each page
+    for number in (1, 2):
+        assert "INFO streamwright.network: stream 'campaign_insights', request 'raw_campaign_insights', partition " \
+               "{\"account_id\": \"123\"}, window %s..%s: meta_ads AdAccount.get_insights page %d: 1 record(s), " % (
+                   today, today, number) in err
     assert "2 request(s) (raw_campaign_insights: 2)" in err
     proof = graph.calls(INSIGHTS)[0]["params"]["appsecret_proof"]
     if sdk_logs:

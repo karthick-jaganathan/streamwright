@@ -32,7 +32,7 @@ def codes(issues):
 def test_the_connector_declares_http_requests_run_by_the_engine():
     connector = components.load("openai_ads")
     assert select_transport(connector) == "http"
-    assert [operation.name for operation in CONNECTOR.operations] == ["http.request"]
+    assert [operation.name for operation in CONNECTOR.operations] == ["http.request", "http.send"]
 
 
 def test_the_token_is_a_secret_reference_and_other_authentication_is_refused():

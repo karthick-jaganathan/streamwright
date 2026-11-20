@@ -53,6 +53,7 @@ __all__ = [
     "component_problems",
     "declared_auth",
     "describe",
+    "describe_type",
     "guide",
     "load",
     "load_query_builder",
@@ -166,6 +167,17 @@ def load(name, allowed=None, registry=None):
     return definition
 
 
+def describe_type(name, type_name, registry=None):
+    """
+    What installed connector `name` knows of the vendor type `type_name`, from its installed library and offline:
+    {kind: enum, values} or {kind: object, fields} (with `connector` and `name`), or None when the connector does not
+    know the type or offers no type lookup (`definition.describe_type`). ComponentLoadError when it is not installed.
+    """
+    lookup = load(name, registry=registry).load_describe_type()
+    found = lookup(type_name) if lookup is not None else None
+    return None if found is None else dict(found, connector=name, name=type_name)
+
+
 def guide(name, capabilities=(), registry=None):
     """
     The user guide installed connector `name` ships (its `guide.md`, with the tables generated from its definition;
@@ -246,8 +258,9 @@ def sdk_call(request):
 
 
 def poll_call(submit, poll):
-    """An async job's poll call: the submit's service, the poll's method and arguments."""
-    return {"service": submit.get("service"), "method": poll.get("method"), "arguments": poll.get("arguments")}
+    """An async job's poll call: its service (default: the submit's), method and arguments."""
+    return {"service": poll.get("service") or submit.get("service"), "method": poll.get("method"),
+            "arguments": poll.get("arguments")}
 
 
 def request_body(item):
@@ -263,10 +276,10 @@ def sdk_calls(request):
     job = request.get("async_job")
     if not job:
         return []
-    submit = job.get("submit") or {}
+    submit, poll = job.get("submit") or {}, job.get("poll")
     calls = sdk_calls(submit)
-    if calls and job.get("poll"):
-        calls.append(poll_call(submit, job["poll"]))
+    if isinstance(poll, dict) and "http" not in poll and (calls or poll.get("service")):
+        calls.append(poll_call(submit, poll))
     return calls + sdk_calls(job.get("results") or {})
 
 

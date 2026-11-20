@@ -73,7 +73,7 @@ requests:
           CampaignType: [Search, Shopping, PerformanceMax]   # without it, only Search
         # account_id / customer_id: the SOAP header's account and customer (defaults: the request's, the connection's)
       records: {path: Campaign}          # one record per campaign in the response
-  # Reports: ReportingService.SubmitGenerateReport with a ReportRequest (the connector polls and downloads it)
+  # Reports: an async_job request (see Performance reports)
 
 transform:
   mode: page
@@ -100,6 +100,77 @@ export:
 - A transform reads each record from the request's table as the column `record` (and the partition's values as
   `partition`): extract values with `->>` (`record->>'Id'`); `records: {path: Campaign}` makes each item of the
   response's `Campaign` list one record.
+
+## Performance reports
+
+Reports are async: the request is an `async_job` that submits a `ReportRequest`, polls it, then downloads the zipped
+CSV. A copy-pasteable stream (one row per campaign per day, a 30-day window per report):
+
+```yaml
+partitions:
+  - {name: account_id, values: "{{ config.account_ids }}"}
+incremental: {cursor_field: date, start: "{{ config.start_date }}", window: 30d, lookback: 30d}
+requests:
+  - name: raw_campaign_performance
+    async_job:
+      submit:
+        operation:
+          service: ReportingService
+          method: SubmitGenerateReport
+          arguments:
+            request:
+              ReportRequest:
+                "@type": CampaignPerformanceReportRequest   # SOAP type, built by the connector
+                Aggregation: Daily
+                Format: Csv
+                ExcludeReportHeader: true
+                ExcludeReportFooter: true
+                Columns: [TimePeriod, AccountId, CampaignId, CampaignName, Impressions, Clicks, Spend]
+                Scope: {AccountIds: ["{{ partition.account_id }}"]}
+                Time: {CustomDateRangeStart: "{{ window.start }}", CustomDateRangeEnd: "{{ window.end }}"}
+      poll:
+        operation:                 # service defaults to the submit's (ReportingService)
+          method: PollGenerateReport
+          arguments: {request: {ReportRequestId: "{{ submit.result }}"}}   # the submit returns the bare id
+        every: 15s
+        timeout: 30m
+        done_when: {path: Status, equals: Success}
+        fail_when: {path: Status, equals: Error}
+      download: {url: "{{ poll.ReportDownloadUrl }}", format: csv, compression: zip}
+transform:
+  mode: page
+  steps:
+    - name: campaign_performance
+      select: |                    # report values are text: cast them
+        SELECT record->>'AccountId'                          AS account_id,
+               record->>'CampaignId'                         AS campaign_id,
+               record->>'CampaignName'                       AS campaign_name,
+               (record->>'TimePeriod')::DATE                 AS date,
+               coalesce((record->>'Impressions')::BIGINT, 0) AS impressions,
+               coalesce((record->>'Clicks')::BIGINT, 0)      AS clicks,
+               coalesce((record->>'Spend')::DOUBLE, 0)       AS spend
+        FROM raw_campaign_performance
+export:
+  campaign_performance:
+    step: campaign_performance
+    primary_key: [account_id, campaign_id, date]
+```
+
+- Other reports: change `"@type"` (`AdGroupPerformanceReportRequest`, `KeywordPerformanceReportRequest`, ...) and
+  `Columns`. The download URL is fetched without the connection's credentials; an empty URL (no data in the range)
+  gives 0 rows, not an error.
+- In a DuckDBJob or SparkJob, the same `async_job:` goes on a call step instead of `operation:` (use
+  `{{ config.* }}` or `Time: {PredefinedTime: Yesterday}`: call steps have no windows).
+
+**Entity sync or reports.** `GetAdGroupsByCampaignId` (and other per-campaign reads) partitioned by campaign is one
+call per campaign (N+1), slow on large accounts. For metrics, use a report scoped to the account: it covers every
+campaign and ad group in one job. For entity settings, partition by account where the API has an account-level read
+(`GetCampaignsByAccountId`), and keep per-campaign fan-out for what has none. A campaign without ad groups reads as 0
+rows.
+
+**Case-sensitive values.** Enum values are PascalCase as the API spells them: `Aggregation: Daily`,
+`Format: Csv`, `PredefinedTime: Last30Days`, `CampaignType: [Search, Shopping]`. `TimePeriod` is not allowed as a
+column with `Aggregation: Summary`.
 
 ## Engines
 

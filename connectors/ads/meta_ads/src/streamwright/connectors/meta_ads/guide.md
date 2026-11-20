@@ -41,8 +41,8 @@ auth:
 
 ### Vendor arguments
 
-Any argument that is not a declared one (`id`, `fields`, `params`) is a Graph API parameter forwarded verbatim into
-the request's `params` (e.g. `breakdowns`, `time_increment`, `action_breakdowns`, `filtering`):
+Any argument that is not a declared one (`id`, `fields`, `params`, `is_async`) is a Graph API parameter forwarded
+verbatim into the request's `params` (e.g. `breakdowns`, `time_increment`, `action_breakdowns`, `filtering`):
 
 ```yaml
 arguments:
@@ -106,6 +106,73 @@ export:
   `partition`): extract values with `->>` (`record->>'campaign_id'`) and cast the numbers, which the API sends as
   text.
 
+## Performance reports
+
+For short ranges, read the `get_insights` edge directly (above). For many ad sets or ads, or long ranges, run an
+async insights report: `is_async: true` on a `get_insights` read starts the report and returns its report run
+`{id, report_run_id}`; poll the `AdReportRun`, then read its rows. Only reads that run as a report take `is_async`
+(others fail with an error).
+
+```yaml
+partitions:
+  - {name: account_id, values: "{{ config.account_ids }}"}
+incremental: {cursor_field: date, start: "{{ config.start_date }}", window: 28d, lookback: 28d}
+requests:
+  - name: raw_ad_set_insights_report
+    async_job:
+      submit:
+        operation:
+          service: AdAccount
+          method: get_insights
+          arguments:
+            id: "act_{{ partition.account_id }}"
+            is_async: true
+            fields: [account_id, campaign_id, adset_id, adset_name, date_start, impressions, clicks, spend]
+            params:
+              level: adset
+              time_increment: 1
+              time_range: {since: "{{ window.start }}", until: "{{ window.end }}"}
+      poll:
+        operation:
+          service: AdReportRun     # the report run, not the account (service defaults to the submit's)
+          method: api_get
+          arguments: {id: "{{ submit.id }}", fields: [async_status, async_percent_completion]}
+        every: 15s
+        timeout: 1h
+        done_when: {path: async_status, equals: Job Completed}
+        fail_when: {path: async_status, in: [Job Failed, Job Skipped]}
+      results:
+        operation:
+          service: AdReportRun
+          method: get_insights     # the report's rows, paged by the connector
+          arguments: {id: "{{ submit.id }}", params: {limit: 500}}
+transform:
+  mode: page
+  steps:
+    - name: ad_set_insights_report
+      select: |
+        SELECT record->>'adset_id'                           AS ad_set_id,
+               (record->>'date_start')::DATE                 AS date,
+               coalesce((record->>'impressions')::BIGINT, 0) AS impressions,
+               coalesce((record->>'spend')::DOUBLE, 0)       AS spend
+        FROM raw_ad_set_insights_report
+export:
+  ad_set_insights_report:
+    step: ad_set_insights_report
+    primary_key: [ad_set_id, date]
+```
+
+In a DuckDBJob or SparkJob, the same `async_job:` goes on a call step instead of `operation:` (with
+`{{ config.* }}` dates: call steps have no windows).
+
+**Entity sync or reports.** Read entities from the account's edges (`AdAccount.get_campaigns`,
+`AdAccount.get_ad_sets`, `AdAccount.get_ads`), partitioned by account, not from each campaign's edges partitioned by
+campaign (one call per campaign). For metrics, one account-level `get_insights` with `level: adset` (or `ad`) covers
+every object in the account.
+
+**Case-sensitive values.** Graph API enums are lower case: `level: adset`, `date_preset: last_30d`,
+`time_increment: 1`. Report run statuses are as Meta sends them: `Job Completed`, `Job Failed`, `Job Skipped`.
+
 ## Apply outputs (writes)
 
 A DuckDBJob or SparkJob output can write to Meta, a row per object or event (the engine guide's Apply outputs section
@@ -155,7 +222,7 @@ outputs:
 - **Services & Methods**: resolved dynamically against the installed `facebook_business` library (contract v1.3 §6b).
   Reads are the operation families `*.api_get` (read any object) and `*.get_*` (read any of its edges); writes are
   `*.create_*`, `*.api_update`, `*.api_delete` and `AdsPixel.create_event` (apply outputs, above); which objects (`AdAccount`, `Campaign`, `Ad`, ...), edges and fields exist is whatever the installed SDK exposes.
-- **Streaming**: Yields rows in cursor pages of up to 500 records.
+- **Streaming**: Yields rows one Graph API page at a time (`params.limit` sets the page size); each page is one request, logged as `page N`.
 - **Throttling**: backs off as the `x-business-use-case-usage` headers ask. An error carries its Graph API code and
   subcode; the spec's `retry_codes` (throttling and temporary codes such as `4`, `17`, `613`, `80004`) are retried by
   default, as are errors Meta flags transient and HTTP 5xx. A stream's `retry: {codes: [...]}` replaces that list.

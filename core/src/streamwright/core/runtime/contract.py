@@ -124,6 +124,9 @@ class ConnectorDefinition:
     query_builders: Mapping[str, str] = dataclasses.field(default_factory=lambda: MappingProxyType({}))
     secret_key_patterns: tuple[str, ...] = ()  # vendor connection keys that may bear a secret reference (redacted)
     surface: str | None = None  # "module:function": a pure introspection of the installed library (contract v1.3 §6b)
+    # "module:function": describe_type(name) -> {kind: enum, values} or {kind: object, fields}, from the installed
+    # library, offline (None: unknown); what `describe_connector_type` answers
+    describe_type: str | None = None
     # the provider error codes worth retrying by default (data, not code); a stream's `retry.codes` replace them
     retry_codes: tuple[str | int, ...] = ()
     # the vendor library's logger names (for --log NAME=LEVEL); `streamwright connectors` lists them
@@ -156,8 +159,9 @@ class ConnectorDefinition:
         if not set(self.adapters) <= ALL_ENGINES or not all(TARGET_PATTERN.match(target) for target in targets):
             raise DefinitionError("connector %s: adapters are {engine: 'module:Class'} for %s" % (
                 self.name, ", ".join(ENGINES)))
-        if self.surface is not None and not TARGET_PATTERN.match(self.surface):
-            raise DefinitionError("connector %s: surface is a 'module:function'" % self.name)
+        for hook in ("surface", "describe_type"):
+            if getattr(self, hook) is not None and not TARGET_PATTERN.match(getattr(self, hook)):
+                raise DefinitionError("connector %s: %s is a 'module:function'" % (self.name, hook))
         if not all(NAME_PATTERN.match(name) and TARGET_PATTERN.match(target)
                    for name, target in self.query_builders.items()):
             raise DefinitionError("connector %s: query_builders are {name: 'module:Class'}" % self.name)
@@ -220,6 +224,15 @@ class ConnectorDefinition:
         except ImportError:
             return None
 
+    def load_describe_type(self) -> Callable[[str], dict[str, Any] | None] | None:
+        """The vendor type lookup (`describe_type(name)`), or None: the connector has none or its library is absent."""
+        if self.describe_type is None:
+            return None
+        try:
+            return _load_target(self.describe_type)
+        except ImportError:
+            return None
+
     def operations_for(self, capabilities: EngineCapabilities) -> tuple[Operation, ...]:
         """
         The operations an engine runs for this connector: none when the connector has no adapter for it, and none
@@ -273,6 +286,7 @@ class ConnectorDefinition:
                 "secret_keys": [item.name for item in self.secret_fields],
                 "secret_key_patterns": list(self.secret_key_patterns),
                 "vendor_arguments": True, "dynamic_surface": self.surface is not None,
+                "describes_types": self.describe_type is not None,
                 "retry_codes": list(self.retry_codes),
                 "operations": [item.describe() for item in self.operations],
                 "capabilities": {item.engine: self.capabilities_for(item).describe(self.operations_for(item))

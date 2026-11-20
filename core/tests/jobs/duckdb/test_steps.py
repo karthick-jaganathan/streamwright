@@ -24,6 +24,7 @@ import duckdb
 import pytest
 import yaml
 
+from streamwright.core.jobs import calls
 from streamwright.core.jobs.duckdb import steps
 from streamwright.core.jobs.duckdb.engine import run_job
 from streamwright.core.jobs.duckdb.steps import _load_records
@@ -217,10 +218,10 @@ def test_each_partition_of_a_source_step_resumes_from_its_own_bookmarks(tmp_path
             started.append((self.account, state))
             return Collected({"cursor": self.account})
 
-    monkeypatch.setattr(steps, "load_source", lambda path: {})
-    monkeypatch.setattr(steps, "plan_source", lambda source: SimpleNamespace(streams={}))
-    monkeypatch.setattr(steps, "source_inputs", lambda source, config, secrets: (config, {}))
-    monkeypatch.setattr(steps, "SourceRunner", Runner)
+    monkeypatch.setattr(calls, "load_source", lambda path: {})       # the shared source-step code (jobs.calls)
+    monkeypatch.setattr(calls, "plan_source", lambda source: SimpleNamespace(streams={}))
+    monkeypatch.setattr(calls, "source_inputs", lambda source, config, secrets: (config, {}))
+    monkeypatch.setattr(calls, "SourceRunner", Runner)
     step = {"name": "rows", "source": str(tmp_path), "stream": "rows",
             "partitions": [{"from": "accounts", "field": "a", "name": "account"}]}
     with duckdb.connect() as con:

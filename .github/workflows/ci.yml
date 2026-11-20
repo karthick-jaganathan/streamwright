@@ -113,5 +113,5 @@ jobs:
             echo "$out" | grep -qx "Name: $c" || { echo "missing connector: $c"; exit 1; }
           done
 
-      - name: Lint and run tests
-        run: make test
+      - name: Lint and run tests (the ad connectors too)
+        run: make test-all

@@ -39,6 +39,10 @@ spec:
       type: string
       required: false
       description: "Amazon Advertising Profile ID (sent as Amazon-Advertising-API-Scope)"
+    start_date:
+      type: date
+      default: "-30d"
+      description: "The first day the report streams read (later runs resume from their bookmarks)"
   secrets:
     amazon_client_id: {type: string}
     amazon_client_secret: {type: string}

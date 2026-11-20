@@ -16,6 +16,7 @@ spec:
   config:
     api_url: {type: string, default: "https://advertising-api.amazon.com"}
     profile_id: {type: string, required: false, description: "Amazon Advertising Profile ID"}
+    start_date: {type: date, default: "-30d"}   # the first day report streams read
   secrets:
     amazon_client_id: {type: string, required: true}
     amazon_client_secret: {type: string, required: true}
@@ -93,6 +94,74 @@ Any key in an HTTP `operation:`'s `params` block is a query parameter forwarded 
 parameters you call are whatever the API exposes, never a closed list in the connector (contract v1.3 §6b). For
 example `params: {statusFilter: ENABLED}` reaches the request URL unchanged; pagination cursors the paginator
 injects take precedence.
+
+## Performance reports
+
+Metrics come from v3 reports, which are async: POST the report, poll it until `COMPLETED`, then download its gzip
+JSON file. Each part of the `async_job` is an HTTP request, like a stream's `operation:`:
+
+```yaml
+incremental:
+  cursor_field: date
+  start: "{{ config.start_date }}"
+  window: 30d                      # spCampaigns daily reports span at most 31 days
+  lookback: 14d                    # attributed sales restate for up to 14 days
+requests:
+  - name: raw_sp_campaign_report
+    async_job:
+      submit:
+        operation:
+          path: /reporting/reports
+          method: POST
+          headers: {Content-Type: application/vnd.createasyncreportrequest.v3+json}
+          json:
+            name: "sp_campaigns {{ window.start | date('%Y-%m-%d') }}"
+            startDate: "{{ window.start | date('%Y-%m-%d') }}"
+            endDate: "{{ window.end | date('%Y-%m-%d') }}"
+            configuration:
+              adProduct: SPONSORED_PRODUCTS
+              reportTypeId: spCampaigns
+              groupBy: [campaign]
+              columns: [date, campaignId, campaignName, impressions, clicks, cost, purchases7d, sales7d]
+              timeUnit: DAILY
+              format: GZIP_JSON
+      poll:
+        operation:
+          path: "/reporting/reports/{{ submit.reportId }}"   # GET by default
+        every: 30s
+        timeout: 3h                # large accounts' reports can take a while
+        done_when: {path: status, equals: COMPLETED}
+        fail_when: {path: status, equals: FAILED}
+      download: {url: "{{ poll.url }}", format: json, compression: gzip}
+transform:
+  mode: page
+  steps:
+    - name: sp_campaign_report
+      select: |
+        SELECT (record->>'date')::DATE                       AS date,
+               record->>'campaignId'                         AS campaign_id,
+               coalesce((record->>'impressions')::BIGINT, 0) AS impressions,
+               coalesce((record->>'clicks')::BIGINT, 0)      AS clicks,
+               coalesce((record->>'cost')::DOUBLE, 0)        AS cost
+        FROM raw_sp_campaign_report
+export:
+  sp_campaign_report:
+    step: sp_campaign_report
+    primary_key: [campaign_id, date]
+```
+
+- The download is a presigned URL: it is fetched without the source's headers and token. An empty file (a window
+  without traffic) gives 0 rows.
+- Other reports: change `reportTypeId` (`spAdvertisedProduct`, `spTargeting`, ...), `groupBy` and `columns`.
+- In a DuckDBJob or SparkJob, the same `async_job:` goes on a call step instead of `operation:` (with
+  `{{ config.* }}` dates: call steps have no windows).
+
+**Entity sync or reports.** The list endpoints (`/v2/sp/campaigns`, `/v2/sp/adGroups`, `/v2/sp/keywords`) return the
+whole profile, each item with its `campaignId`: read each once and join in SQL instead of one request per campaign.
+For metrics, one report covers every campaign of the profile.
+
+**Case-sensitive values.** Enums are upper case: `SPONSORED_PRODUCTS`, `DAILY`, `GZIP_JSON`, statuses `COMPLETED`
+and `FAILED`.
 
 ## DuckDBJob
 

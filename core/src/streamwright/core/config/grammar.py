@@ -32,7 +32,9 @@ internal shape, translated in place (the validator's line marks follow the mappi
                                                   http: {path, ...}, records, paginator (flat on the item)
     async_job
       results: {operation: {..., records}}        results: {sdk, service, ...}, records (on the item)
-      poll:    {operation: {method, arguments}}   poll: {method, arguments}
+      poll:    {operation: {[service], method, arguments}}
+                                                  poll: {service, method, arguments} (service: the submit's)
+               {operation: {path, method, ...}}   poll: {http: {path, ...}}
       download (json): records on the item, as before (a download is not an operation)
 
 The internal keys are not part of the public grammar: `problems` reports them as unknown keys; `public_path` maps
@@ -46,7 +48,8 @@ __all__ = ["OPERATION_KEYS", "POLL_OPERATION_KEYS", "SOURCE_POLICY_KEYS", "STREA
 
 OPERATION_KEYS = ("service", "method", "arguments", "records", "path", "params", "headers", "json",
                   "params_encoding", "paginator")
-POLL_OPERATION_KEYS = ("method", "arguments")
+POLL_OPERATION_KEYS = ("service", "method", "arguments", "path", "params", "headers", "json", "params_encoding")
+_POLL_CALL_KEYS = ("service", "method", "arguments")
 SOURCE_POLICY_KEYS = ("retry", "rate_limit")
 STREAM_POLICY_KEYS = ("retry", "rate_limit", "timeout", "on_error")
 _CALL_KEYS = ("service", "method", "arguments", "records")
@@ -109,8 +112,8 @@ def _group(owner, name, keys, path, what):
     return found
 
 
-def _operation_problems(item, path, what):
-    found = _group(item, "operation", OPERATION_KEYS, path, what)
+def _operation_problems(item, path, what, keys=OPERATION_KEYS):
+    found = _group(item, "operation", keys, path, what)
     operation = _mapping(item.get("operation"))
     if operation is not None:
         call, request = sorted(set(operation) & _CALL_ONLY), sorted(set(operation) & _REQUEST_ONLY)
@@ -135,9 +138,9 @@ def _item_problems(item, path, what):
 
 
 def _poll_problems(poll, path):
-    found = _group(poll, "operation", POLL_OPERATION_KEYS, path, "`poll`")
+    found = _operation_problems(poll, path, "`poll`", POLL_OPERATION_KEYS)
     found += [_unknown(path, poll, key, "`poll`", "it is written in `poll.operation:`") for key in poll
-              if key in POLL_OPERATION_KEYS]
+              if key in (*_POLL_CALL_KEYS, "http")]
     return found
 
 
@@ -215,8 +218,10 @@ def to_internal(source):
             if _mapping(job.get("results")) is not None and "records" in job["results"]:
                 item["records"] = job["results"].pop("records")      # the item's records select the results'
             poll = _mapping(job.get("poll"))
-            if poll is not None:
-                _lift(poll, "operation", POLL_OPERATION_KEYS)
+            if poll is not None and operation_kind(poll.get("operation")) == "request":
+                poll["http"] = poll.pop("operation")           # the same mapping: it keeps the request's line marks
+            elif poll is not None:
+                _lift(poll, "operation", _POLL_CALL_KEYS)
     return source
 
 

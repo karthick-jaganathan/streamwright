@@ -42,11 +42,8 @@ import json
 import os
 from types import MappingProxyType
 
-from streamwright.core.config.loader import load_source
 from streamwright.core.engine.runner import SourceRunner
-from streamwright.core.engine.sql import plan_source
-from streamwright.core.engine.values import partition_key
-from streamwright.core.jobs.calls import ephemeral_source, partition_scopes, record_value, source_inputs
+from streamwright.core.jobs.calls import ephemeral_source, partition_scopes, record_value, source_records, source_step
 from streamwright.core.jobs.refs import decode_value, encode_value
 from streamwright.core.jobs.step_log import LOG_KEY
 from streamwright.core.sql.quote import quote_ident, quote_literal
@@ -73,8 +70,8 @@ _COMMON = ("name", "description", LOG_KEY)
 STEP_KEYS = MappingProxyType({
     SQL: (*_COMMON, "sql", "materialize"),
     READ: (*_COMMON, "connection", "read", "materialize"),
-    CALL: (*_COMMON, "connection", "service", "method", "arguments", "request", "paginator", "retry", "rate_limit",
-           "partitions", "sql"),
+    CALL: (*_COMMON, "connection", "service", "method", "arguments", "request", "paginator", "async_job", "retry",
+           "rate_limit", "partitions", "sql"),
     SOURCE: (*_COMMON, "source", "stream", "config", "partitions", "sql"),
     CONSUME: (*_COMMON, "connection", "service", "method", "arguments", "sql", "materialize"),
 })
@@ -96,10 +93,9 @@ def classify_step(step, connections):
         return None, "a step needs `sql`, a `connection` (with `read` or a connector call) or a `source`"
     if "read" in step:
         return READ, None
-    # (`call` / `http`: an operation as written before it was one group; the grammar reports it, once)
-    if any(key in step for key in ("service", "method", "request", "call", "http")):
+    if any(key in step for key in ("service", "method", "request", "async_job")):
         return CALL, None
-    return None, "a step with a connection needs `read:`, or an `operation:` of its connector"
+    return None, "a step with a connection needs `read:`, an `operation:` of its connector or an `async_job:`"
 
 
 def message_kind(item, connections, adapters):
@@ -195,45 +191,24 @@ def _source_path(run, step):
     return path
 
 
-def _carry_key(step, kind, scope):
-    """
-    Where a call/source step keeps its bookmarks in `carry`. A source step's partition scope is config, which its
-    bookmarks' keys do not include, so each scope resumes from its own; a call step's scope is a stream partition
-    (bookmarked per partition already), so its scopes share one state.
-    """
-    if kind == SOURCE and scope:
-        return "bookmarks:%s:%s" % (step["name"], partition_key(scope))
-    return "bookmarks:%s" % step["name"]
-
-
 def _collect(run, step, kind):
     run.record_columns = None
     if kind == SOURCE:
-        source, stream = load_source(_source_path(run, step)), step.get("stream")
-        source_plan = plan_source(source)
-        planned = source_plan.streams.get(stream)
-        if planned is not None and len(planned.exports) == 1:
-            run.record_columns = planned.columns.get(planned.exports[0][2])
-    else:
-        source, stream, source_plan = None, step["name"], None
+        source, plan, run.record_columns = source_step(_source_path(run, step), step.get("stream"))
+        yield from source_records(step, source, plan, _scopes(run, step), carry=run.carry, secrets=run.secrets,
+                                  allowed_connectors=run.allowed_connectors, error=StepError)
+        return
+    # a call step's scope is a stream partition (bookmarked per partition already): its scopes share one state
+    carry_key = "bookmarks:%s" % step["name"]
     for scope in _scopes(run, step):
-        carry_key = _carry_key(step, kind, scope)
-        state = run.carry.get(carry_key)
-        if kind == SOURCE:
-            config, secrets = source_inputs(source, dict(step.get("config") or {}, **scope), run.secrets)
-            runner = SourceRunner(source, config, secrets, allowed_connectors=run.allowed_connectors, plan=source_plan)
-            collected = runner.collect(stream, state=state)
-            for _, record in collected:
-                yield record
-        else:
-            connection = run.declared_connections[step["connection"]]
-            runner = SourceRunner(ephemeral_source(step, connection, scope), run.config, run.secrets,
-                                  allowed_connectors=run.allowed_connectors)
-            collected = runner.collect(stream, state=state)
-            for _, record in collected:
-                yield record_value(record)
+        connection = run.declared_connections[step["connection"]]
+        runner = SourceRunner(ephemeral_source(step, connection, scope), run.config, run.secrets,
+                              allowed_connectors=run.allowed_connectors)
+        collected = runner.collect(step["name"], state=run.carry.get(carry_key))
+        for _, record in collected:
+            yield record_value(record)
         if collected.partial:
-            raise StepError("step %s: stream %s was loaded partially" % (step["name"], stream))
+            raise StepError("step %s: stream %s was loaded partially" % (step["name"], step["name"]))
         run.carry[carry_key] = collected.state
 
 

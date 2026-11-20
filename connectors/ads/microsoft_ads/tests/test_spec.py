@@ -100,3 +100,12 @@ def test_retry_codes_are_the_specs_and_a_stream_replaces_them():
     assert ConnectorContext("microsoft_ads", str, default_codes=CONNECTOR.retry_codes).retryable(error)
     assert not ConnectorContext("microsoft_ads", str, retry={"codes": [117]},
                                 default_codes=CONNECTOR.retry_codes).retryable(error)
+
+
+def test_types_are_described_from_the_bundled_wsdls():
+    aggregation = components.describe_type("microsoft_ads", "ReportAggregation")
+    assert aggregation["kind"] == "enum" and "Daily" in aggregation["values"]
+    assert aggregation["service"] == "ReportingService"
+    request = components.describe_type("microsoft_ads", "CampaignPerformanceReportRequest")
+    assert request["fields"]["Aggregation"] == "ReportAggregation" and request["fields"]["Time"] == "ReportTime"
+    assert components.describe_type("microsoft_ads", "NoSuchType") is None

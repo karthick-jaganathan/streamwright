@@ -110,3 +110,12 @@ def test_retry_codes_are_the_specs_and_a_stream_replaces_them():
     assert ConnectorContext("google_ads", str, default_codes=CONNECTOR.retry_codes).retryable(error)
     assert not ConnectorContext("google_ads", str, retry={"codes": ["INTERNAL"]},
                                 default_codes=CONNECTOR.retry_codes).retryable(error)
+
+
+def test_types_are_described_from_the_installed_library():
+    status = components.describe_type("google_ads", "CampaignStatusEnum")
+    assert status["kind"] == "enum" and "PAUSED" in status["values"]
+    assert components.describe_type("google_ads", "CampaignStatus")["values"] == status["values"]
+    campaign = components.describe_type("google_ads", "Campaign")
+    assert campaign["fields"]["status"] == "CampaignStatusEnum.CampaignStatus" and campaign["fields"]["id"] == "int64"
+    assert components.describe_type("google_ads", "NoSuchThing") is None

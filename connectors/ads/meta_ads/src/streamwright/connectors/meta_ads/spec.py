@@ -33,6 +33,10 @@ _ARGUMENTS = (
           description="the object's id, e.g. act_<account id> for an account"),
     Field("fields", ("list", "string"), item_type="string", description="the fields to read (text: comma-separated)"),
     Field("params", "mapping", description="the call's parameters, e.g. level and time_range of insights"),
+    Field("is_async", "boolean",
+          description="start the read as an async report (get_insights): the read gives the report run "
+                      "{id, report_run_id}, polled with AdReportRun.api_get, its rows read with "
+                      "AdReportRun.get_insights"),
 )
 
 
@@ -93,5 +97,6 @@ CONNECTOR = ConnectorDefinition(
     # Graph API error codes worth retrying (throttling, temporary errors); a stream's `retry.codes` replace them
     retry_codes=(1, 2, 4, 17, 32, 341, 613, 80000, 80001, 80002, 80003, 80004, 80005, 80006, 80008, 80009, 80014),
     surface="streamwright.connectors.meta_ads.client:surface",
+    describe_type="streamwright.connectors.meta_ads.type_info:describe_type",
     loggers=("urllib3",)  # facebook_business sends its requests through requests/urllib3,
 )

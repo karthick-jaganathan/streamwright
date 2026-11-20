@@ -95,6 +95,7 @@ CONNECTOR = ConnectorDefinition(
                service="CampaignManagementService"),
     ),
     adapters={"source": "streamwright.connectors.microsoft_ads.engines.source:MicrosoftAdsSourceAdapter"},
+    describe_type="streamwright.connectors.microsoft_ads.type_info:describe_type",
     validator="streamwright.connectors.microsoft_ads.client:validate_connection",
     # SOAP error codes (InternalError, CallRateExceeded, ConcurrentRequestOverLimit) and OAuth errors worth
     # retrying; a stream's `retry.codes` replace them

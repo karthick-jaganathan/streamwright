@@ -17,7 +17,9 @@
 
 """Job requests (HTTP, SDK and async jobs) and paginators."""
 
+import copy
 
+from streamwright.core.engine import rules
 from streamwright.core.validation import vocabulary as spec
 from streamwright.core.validation.checker import ERROR
 from streamwright.core.validation.requests import HttpChecker, RequestChecker
@@ -28,14 +30,19 @@ class AsyncJobSection(RequestPartitionSection):
     """Async job and paginator validation."""
 
     def check_job_request(self, request, path, *, container, key, info, scopes):
-        """The `submit` or `results` request of an async job: an `operation:` that is a call (a request is reported)."""
+        """The `submit` or `results` part of an async job: an `operation:`, a call or an HTTP request."""
         if not self._expect(isinstance(request, dict), "a mapping", request, path, container=container, key=key):
             return
         if "sdk" in request:
             self.check_sdk_request(request, path, scopes, info)
+        elif "http" in request:
+            self.check_http_request(request["http"], (*path, "http"), request, scopes, info)
+            if key == "results" and "paginator" in request:
+                paged = copy.copy(info)
+                paged.request_kind = "http"                    # REST results page like a request
+                self.check_paginator(request["paginator"], (*path, "paginator"), request, paged)
         else:
-            self.error("missing-key", path, "`%s` needs an `operation:`: async jobs run through a connector" % key,
-                       container, key)
+            self.error("missing-key", path, "`%s` needs an `operation:`" % key, container, key)
 
     def check_http_request(self, http, path, container, scopes, info):
         HttpChecker(self, info).check_request(http, path, container, scopes, info)
@@ -52,29 +59,34 @@ class AsyncJobSection(RequestPartitionSection):
         if len(outputs) != 1:
             self.error("bad-value", path, "`async_job` needs exactly one of `download` or `results`", container,
                        "async_job")
-        base = self.scopes(info)
-        for part in ("submit", "results"):
-            if isinstance(job.get(part), dict) and "http" in job[part]:
-                self.error("bad-value", (*path, part), "`%s`'s operation must be a call (service, method, "
-                           "arguments): async jobs run through a connector (its `poll` calls the same service)" % part,
-                           job, part)
-        if "submit" in job and not (isinstance(job["submit"], dict) and "http" in job["submit"]):
+        if "submit" in job:
             self.check_job_request(job["submit"], (*path, "submit"), container=job, key="submit", info=info,
-                                   scopes=base)
+                                   scopes=self.scopes(info))
         if "poll" in job:
             self._check_poll(job, (*path, "poll"), info)
         if "download" in job:
             self._check_download(job, (*path, "download"), info)
-        if "results" in job and not (isinstance(job["results"], dict) and "http" in job["results"]):
+        if "results" in job:
             self.check_job_request(job["results"], (*path, "results"), container=job, key="results", info=info,
                                    scopes=self.scopes(info, "submit", "poll"))
 
     def _check_poll(self, job, ppath, info):
-        poll = self.check_mapping(job["poll"], spec.POLL_KEYS, ppath, container=job, key="poll", what="`poll`",
-                                  required=("method", "every", "timeout", "done_when"))
+        poll = job["poll"]
+        is_request = isinstance(poll, dict) and "http" in poll
+        poll = self.check_mapping(poll, spec.POLL_KEYS, ppath, container=job, key="poll", what="`poll`",
+                                  required=("every", "timeout", "done_when") if is_request else
+                                  ("method", "every", "timeout", "done_when"))
         if poll is None:
             return
-        self.check_strings(poll, ("method",), ppath, "a method name")
+        if is_request:
+            self.check_http_request(poll["http"], (*ppath, "http"), poll, self.scopes(info, "submit"), info)
+        else:
+            self.check_strings(poll, ("service", "method"), ppath, "a name")
+            problem = rules.transport_problem("sdk", self.auth_transport, self.auth_provider)
+            if problem or self.auth_provider is None:
+                self.error("bad-value", (*ppath, "method"), problem or "a poll that is a call runs on the connector in "
+                           "`auth.provider`; with built-in auth, poll with a request (path, method, ...)", poll,
+                           "method")
         for duration in ("every", "timeout"):
             if duration in poll:
                 self.check_duration(poll[duration], (*ppath, duration), poll, duration)
@@ -86,7 +98,14 @@ class AsyncJobSection(RequestPartitionSection):
                     self.check_strings(condition, ("path",), (*ppath, name), "a dotted path")
                 if condition is not None and len([k for k in ("equals", "in") if k in condition]) != 1:
                     self.error("bad-value", (*ppath, name), "needs exactly one of `equals` or `in`", poll, name)
-        self.check_templates(poll, ppath, container=job, key="poll", scopes=self.scopes(info, "submit"), stream=info)
+        if not is_request:                                  # a request checks its own templates
+            self.check_templates(poll, ppath, container=job, key="poll", scopes=self.scopes(info, "submit"),
+                                 stream=info)
+            return
+        for name in ("done_when", "fail_when"):
+            if name in poll:
+                self.check_templates(poll[name], (*ppath, name), container=poll, key=name,
+                                     scopes=self.scopes(info, "submit"), stream=info)
 
     def _check_download(self, job, dpath, info):
         download = self.check_mapping(job["download"], spec.DOWNLOAD_KEYS, dpath, container=job, key="download",

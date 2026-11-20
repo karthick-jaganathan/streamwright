@@ -25,6 +25,7 @@ ask for).
 import datetime
 import difflib
 import importlib
+import inspect
 import json
 import pkgutil
 from collections.abc import Callable, Iterator, Mapping
@@ -43,7 +44,6 @@ from streamwright.core.sdk.network import http_details
 __all__ = ["api_message", "bound_method", "connect", "export", "read_pages", "surface", "translate_error",
            "validate_connection"]
 
-PAGE_SIZE: Final = 500
 TIMEOUT_SECONDS: Final = 300  # insights can take minutes
 _NODE_METHODS: Final = ("api_get", "api_update", "api_delete")
 Call = Callable[..., Any]
@@ -162,7 +162,7 @@ def bound_method(api: FacebookAdsApi, service: str, identifier: Any, method: str
 
 def read_pages(api: FacebookAdsApi, service: str, method: str, arguments: Mapping[str, Any],
                call: Call, *, vendor: Mapping[str, Any] | None = None) -> Iterator[list[dict[str, Any]]]:
-    """The pages of one read: the object itself (`api_get`), or an edge's records in pages of PAGE_SIZE.
+    """The pages of one read: the object itself (`api_get`), or an edge's records, one page per Graph API page.
 
     `vendor` are the operation's undeclared arguments: Graph API parameters (time_increment, breakdowns,
     action_breakdowns, filtering, action_attribution_windows, ...), merged into the request's `params` (an explicit
@@ -173,25 +173,24 @@ def read_pages(api: FacebookAdsApi, service: str, method: str, arguments: Mappin
     if isinstance(fields, str):
         fields = [field.strip() for field in fields.split(",") if field.strip()]
     params = _jsonable({**(vendor or {}), **(arguments.get("params") or {})})
+    if arguments.get("is_async"):  # an async report: the read starts it and gives its report run
+        if "is_async" not in inspect.signature(read).parameters:
+            raise ConnectorError("meta_ads: %s.%s does not run as an async report (is_async); get_insights does" % (
+                service, method), retryable=False)
+        yield [export(call(lambda: read(fields=fields, params=params, is_async=True)))]
+        return
     result = call(lambda: read(fields=fields, params=params))  # edges load their first page here
     if method == "api_get":
         yield [export(result)]
         return
-    load_next_page = result.load_next_page
-
-    def next_page() -> Any:  # every later page: rate limit and retries; none once the edge is read (no request)
-        if getattr(result, "_finished_iteration", False):
-            return False
-        return call(load_next_page)
-    result.load_next_page = next_page
-    page: list[dict[str, Any]] = []
-    for item in result:
-        page.append(export(item))
-        if len(page) >= PAGE_SIZE:
+    # the SDK cursor holds one Graph API page (`_queue`); each page is handed on before the next is fetched, and every
+    # fetch goes through `call` (rate limit, retries); none once the edge is read (`_finished_iteration`)
+    while True:
+        page = [export(item) for item in result._queue]
+        if page:
             yield page
-            page = []
-    if page:
-        yield page
+        if result._finished_iteration or not call(result.load_next_page):
+            return
 
 
 def _regain_seconds(headers: Mapping[str, Any] | None) -> float | None:

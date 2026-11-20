@@ -256,7 +256,8 @@ def read_pages(connection: MicrosoftAdsConnection, service: str, method: str, ar
                                 arguments.get("customer_id") or None)
     operation = _resolve_method(client, service, method)
     values = _Builder(client.factory, method).arguments(request)
-    yield _plain(call(lambda: operation(**values)))
+    result = _plain(call(lambda: operation(**values)))
+    yield None if result == "" else result      # an empty response element (no items): suds gives it as ""
 
 
 # * ------

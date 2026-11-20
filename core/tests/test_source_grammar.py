@@ -77,6 +77,18 @@ def test_the_groups_translate_into_the_engine_shape():
     assert grammar.to_internal(internal) == internal       # translating the engine shape changes nothing
 
 
+def test_a_poll_is_a_call_on_its_own_service_or_a_request():
+    def poll(operation):
+        source = {"auth": {"provider": "meta_ads"}, "streams": [{"name": "s", "requests": [{"name": "r", "async_job": {
+            "submit": {"operation": {"service": "AdAccount", "method": "get_insights"}},
+            "poll": {"operation": operation, "every": "5s"}}}]}]}
+        return grammar.to_internal(source)["streams"][0]["requests"][0]["async_job"]["poll"]
+    assert poll({"service": "AdReportRun", "method": "api_get", "arguments": {"id": 1}}) == {
+        "every": "5s", "service": "AdReportRun", "method": "api_get", "arguments": {"id": 1}}
+    assert poll({"path": "/reports/{{ submit.id }}", "method": "GET"}) == {
+        "every": "5s", "http": {"path": "/reports/{{ submit.id }}", "method": "GET"}}
+
+
 def test_a_grouped_source_is_valid():
     assert issues(SDK_SOURCE, code="unknown-key") == []
     assert [issue for issue in validate_text(SDK_SOURCE, "s.yaml") if issue.severity == ERROR] == []

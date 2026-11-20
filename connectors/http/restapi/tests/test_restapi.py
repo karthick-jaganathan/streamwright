@@ -17,9 +17,12 @@
 
 import json
 
+import duckdb
 import requests
 import yaml
 
+from streamwright.core.jobs.duckdb.engine import run_job
+from streamwright.core.jobs.duckdb.plugin import JOB_ENGINE
 from streamwright.core.sdk.testing import ERROR, MemoryOutput, SourceRunner, run_cli, validate_text
 
 
@@ -220,3 +223,55 @@ def test_cli_connector_lines_includes_restapi(capsys):
     assert run_cli(["connectors"]) == 0
     text = capsys.readouterr().out
     assert "restapi" in text
+
+
+def test_a_duckdb_job_step_runs_a_rest_report_job_inline(api, tmp_path):
+    """submit (POST), poll (GET until done), then results read with the connection's http defaults (records)."""
+    statuses = [{"status": "RUNNING"}, {"status": "DONE"}]
+    with api:
+        api.routes[("POST", "/v1/reports")] = lambda request: (200, {"id": "r9"})
+        api.routes[("GET", "/v1/reports/r9")] = lambda request: (200, statuses.pop(0))
+        api.routes[("GET", "/v1/reports/r9/rows")] = lambda request: (200, {"data": [{"day": "2026-10-01", "n": 3}]})
+        job = {
+            "kind": "DuckDBJob", "name": "report", "spec": {"secrets": {"token": {"type": "string"}}},
+            "connections": {"api": {"provider": "restapi", "type": "bearer", "token": "{{ secrets.token }}",
+                                    "http": {"base_url": api.url, "records": {"path": "data"}}},
+                            "wh": {"provider": "duckdb", "path": str(tmp_path / "wh.duckdb")}},
+            "steps": [{"name": "report", "connection": "api", "async_job": {
+                "submit": {"operation": {"path": "/v1/reports", "method": "POST", "json": {"kind": "daily"}}},
+                "poll": {"operation": {"path": "/v1/reports/{{ submit.id }}"}, "every": "1s", "timeout": "1m",
+                         "done_when": {"path": "status", "equals": "DONE"}},
+                "results": {"operation": {"path": "/v1/reports/{{ submit.id }}/rows"}}},
+                "sql": "SELECT record->>'day' AS day, (record->>'n')::INT AS n FROM records"}],
+            "outputs": [{"name": "out", "connection": "wh", "step": "report", "table": "report", "mode": "overwrite"}],
+            "runtime": {"state": {"sqlite": str(tmp_path / "state.db"), "apply_migrations": True}}}
+        assert JOB_ENGINE.validate_job(job).valid
+        assert run_job(job, secrets={"token": "t"}).exit_code == 0
+        assert [json.loads(call["body"]) for call in api.calls("/v1/reports")] == [{"kind": "daily"}]
+        assert len(api.calls("/v1/reports/r9")) == 2
+    with duckdb.connect(str(tmp_path / "wh.duckdb"), read_only=True) as con:
+        assert con.execute("SELECT day, n FROM report").fetchall() == [("2026-10-01", 3)]
+
+
+def test_an_inline_async_job_is_checked_like_a_sources():
+    """A poll needs every, timeout and done_when (durations as `15s`, a condition with equals or in)."""
+    def issues(poll, **job):
+        manifest = {"kind": "DuckDBJob", "name": "report", "spec": {"secrets": {"token": {"type": "string"}}},
+                    "connections": {"api": {"provider": "restapi", "type": "bearer", "token": "{{ secrets.token }}",
+                                            "http": {"base_url": "https://api.example.com"}}},
+                    "steps": [{"name": "report", "connection": "api", "async_job": dict({
+                        "submit": {"operation": {"path": "/reports", "method": "POST"}},
+                        "poll": dict({"operation": {"path": "/reports/{{ submit.id }}"}}, **poll),
+                        "results": {"operation": {"path": "/reports/{{ submit.id }}/rows"}}}, **job)}],
+                    "outputs": [{"name": "out", "connection": "api", "step": "report",
+                                 "operation": {"path": "/sink", "method": "POST"}}]}
+        return sorted((issue.code, issue.path, issue.message) for issue in JOB_ENGINE.validate_job(manifest).issues
+                      if issue.path.startswith("steps"))
+    missing = issues({})
+    assert [(code, path) for code, path, _ in missing] == [
+        ("missing-key", "steps[0].async_job.poll.done_when"), ("missing-key", "steps[0].async_job.poll.every"),
+        ("missing-key", "steps[0].async_job.poll.timeout")]
+    bad = issues({"every": "soon", "timeout": "30m", "done_when": {"path": "status"}})
+    assert [message for _, _, message in bad] == [
+        "async_job.poll.done_when needs exactly one of `equals` or `in`",
+        "async_job.poll.every: invalid duration 'soon' (expected e.g. 15s, 30m, 1h, 7d)"]

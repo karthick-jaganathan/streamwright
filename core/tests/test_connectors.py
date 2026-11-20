@@ -20,6 +20,7 @@ import gzip
 import io
 import json
 import logging
+import re
 import sys
 import zipfile
 from unittest.mock import MagicMock
@@ -399,7 +400,7 @@ def test_sdk_requests_take_no_headers(fake):
     assert fake.calls == []
 
 
-def test_async_jobs_submit_poll_and_download(api, fake):
+def test_async_jobs_submit_poll_and_download(api, fake, caplog):
     url = api.url + "/files/report.zip?sig=SAS-SECRET-123"
     statuses = [{"Status": "Pending"}, {"Status": "Success", "Url": url}]
     fake.handlers["submit"] = lambda arguments: ["job-" + arguments["account"]]
@@ -408,7 +409,14 @@ def test_async_jobs_submit_poll_and_download(api, fake):
         "b.csv": "AccountId,TimePeriod,Clicks\r\na1,2026-10-02,\r\n",
         "a.csv": "AccountId,TimePeriod,Clicks\r\na1,2026-10-01,5\r\n"}))
     clock = FakeClock()
-    output = run(job_source(), clock=clock)
+    with caplog.at_level(logging.INFO):
+        output = run(job_source(), clock=clock)
+    assert [message for message in caplog.messages if "the job" in message or "submitted" in message] == [
+        "stream 'rows': submitted the job: job-a1",
+        "stream 'rows': the job is not done yet: Status=Pending (check 1, after 0 s); checking again in 10 s",
+        "stream 'rows': the job is done: Status=Success (check 2, after 10 s)"]
+    steps = [match.group(1) for match in map(re.compile(r"async job ([^:]+):").search, caplog.messages) if match]
+    assert steps == ["submit", "poll (check 1)", "poll (check 2)", "download"]   # each call's network line
     assert [r for _, r in output.records] == [{"account": "a1", "day": "2026-10-01", "clicks": 5},
                                               {"account": "a1", "day": "2026-10-02", "clicks": 0}]
     assert [(c["method"], c["arguments"]) for c in fake.calls] == [
@@ -436,9 +444,10 @@ def test_async_jobs_fail_or_time_out(fake, statuses, problem):
 def test_async_jobs_without_a_file_and_download_errors(api, fake, caplog):
     fake.handlers["submit"] = lambda arguments: ["job"]
     fake.handlers["status"] = lambda arguments: [{"Status": "Success", "Url": None}]
-    with caplog.at_level(logging.DEBUG, logger="streamwright.source"):
+    with caplog.at_level(logging.INFO, logger="streamwright.source"):
         assert run(job_source()).records == [] and api.requests == []
-    assert "stream 'rows': submitted the job job" in caplog.text and "job status: Status=Success" in caplog.text
+    assert "stream 'rows': submitted the job: job" in caplog.text
+    assert "stream 'rows': the job is done: Status=Success (check 1, after 0 s)" in caplog.text
     assert "the job finished without a file to download, which usually means no data" in \
         caplog.text
 

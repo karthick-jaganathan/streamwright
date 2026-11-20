@@ -38,7 +38,14 @@ from streamwright.core.jobs.duckdb.steps import (
     step_kind,
 )
 from streamwright.core.jobs.fields import Field
-from streamwright.core.jobs.grammar import APPLY_FIELD, CONNECTION_GROUPS, OPERATION_FIELD, POLICY_FIELD, public_key
+from streamwright.core.jobs.grammar import (
+    APPLY_FIELD,
+    ASYNC_JOB_FIELD,
+    CONNECTION_GROUPS,
+    OPERATION_FIELD,
+    POLICY_FIELD,
+    public_key,
+)
 from streamwright.core.jobs.locking import STATE_FIELDS
 from streamwright.core.jobs.log_labels import LOG_FIELD
 from streamwright.core.jobs.lookups.rules import FAN_OUT_FIELD, LOOKUPS_FIELD
@@ -86,7 +93,7 @@ _STEP_FIELDS = MappingProxyType({
     "vocabulary": Field("array", items=_named(name=Field("string", required=True),
                                               type=Field("string", required=True))),
     "on_unmapped_column": Field("string", enum=ingest.UNMAPPED_COLUMN_POLICIES),
-    "operation": OPERATION_FIELD, "policy": POLICY_FIELD,
+    "operation": OPERATION_FIELD, "policy": POLICY_FIELD, "async_job": ASYNC_JOB_FIELD,
     "partitions": Field("array", items=_named(**{"from": Field("string", required=True),
                                                   "field": Field("string", required=True), "name": _TEXT}),
                         description="call steps: one call per distinct value of `field` in the step `from` (crossed "
@@ -145,7 +152,7 @@ class DuckDBRules(JobRules):
     reserved_names = RESERVED_NAMES | {RECORDS_TABLE}
     builtin_references = frozenset(["batch.id", "batch.ts"])
     step_reference_keys = frozenset(["path", "target_predicate", "replace_where"])
-    source_reference_keys = frozenset(["request", "arguments", "paginator", "config"])
+    source_reference_keys = frozenset(["request", "arguments", "paginator", "async_job", "config"])
     step_kinds = STEP_KEYS
 
     def __init__(self, adapters, connectors=None):

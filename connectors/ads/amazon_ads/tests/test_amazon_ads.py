@@ -15,6 +15,10 @@
 # * limitations under the License.
 # **************************************************************************/
 
+import datetime
+import gzip
+import json
+
 import pytest
 import responses
 
@@ -234,6 +238,55 @@ def test_rate_limit_retry():
     assert len(responses.calls) == 3
     table = _records(output, "profiles")
     assert len(table) == 1
+
+
+def _report_routes(rows):
+    """Token, the v3 report (pending, then completed with a presigned file URL) and its gzip JSON file of `rows`."""
+    responses.add(responses.POST, "https://api.amazon.com/auth/o2/token",
+                  json={"access_token": "access_tok_456", "expires_in": 3600})
+    responses.add(responses.POST, "https://advertising-api.amazon.com/reporting/reports",
+                  json={"reportId": "rep-1", "status": "PENDING"})
+    responses.add(responses.GET, "https://advertising-api.amazon.com/reporting/reports/rep-1",
+                  json={"reportId": "rep-1", "status": "PROCESSING"})
+    responses.add(responses.GET, "https://advertising-api.amazon.com/reporting/reports/rep-1",
+                  json={"reportId": "rep-1", "status": "COMPLETED",
+                        "url": "https://offline-report-storage.s3.amazonaws.com/rep-1.json.gz?X-Amz-Signature=SIG"})
+    responses.add(responses.GET, "https://offline-report-storage.s3.amazonaws.com/rep-1.json.gz",
+                  body=gzip.compress(json.dumps(rows).encode("utf-8")))
+
+
+@responses.activate
+def test_a_v3_report_is_submitted_polled_and_downloaded():
+    _report_routes([{"date": "2026-10-01", "campaignId": "c1", "campaignName": "Brand", "impressions": 120,
+                     "clicks": 7, "cost": 3.5, "purchases7d": 1, "sales7d": 19.99}])
+    secrets = {"amazon_client_id": "client_123", "amazon_client_secret": "secret_123",
+               "amazon_refresh_token": "refresh_123"}
+    output, sleeps = MemoryOutput(), []
+    _runner(_load_amazon_source("sp_campaign_report"), {"profile_id": "prof_1", "start_date": "2026-10-01"},
+            secrets, output=output, today=datetime.date(2026, 10, 3), sleep=sleeps.append).run()
+    assert _records(output, "sp_campaign_report") == [
+        {"date": "2026-10-01", "campaign_id": "c1", "campaign_name": "Brand", "impressions": 120,
+         "clicks": 7, "cost": 3.5, "purchases_7d": 1, "sales_7d": 19.99}]
+    assert sleeps == [30.0]
+    submit = responses.calls[1].request
+    assert submit.headers["Content-Type"] == "application/vnd.createasyncreportrequest.v3+json"
+    assert submit.headers["Amazon-Advertising-API-Scope"] == "prof_1"
+    body = json.loads(submit.body)
+    assert (body["startDate"], body["endDate"], body["configuration"]["timeUnit"]) == (
+        "2026-10-01", "2026-10-03", "DAILY")             # a window includes today (the bookmark stops before it)
+    download = responses.calls[-1].request
+    assert "Authorization" not in download.headers and "Amazon-Advertising-API-Scope" not in download.headers
+
+
+@responses.activate
+def test_a_report_without_traffic_gives_no_rows():
+    _report_routes([])
+    secrets = {"amazon_client_id": "client_123", "amazon_client_secret": "secret_123",
+               "amazon_refresh_token": "refresh_123"}
+    output = MemoryOutput()
+    _runner(_load_amazon_source("sp_campaign_report"), {"profile_id": "prof_1", "start_date": "2026-10-01"},
+            secrets, output=output, today=datetime.date(2026, 10, 3), sleep=lambda seconds: None).run()
+    assert _records(output, "sp_campaign_report") == []
 
 
 def test_missing_auth():

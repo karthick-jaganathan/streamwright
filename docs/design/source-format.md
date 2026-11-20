@@ -1089,7 +1089,7 @@ from the performance streams (e.g. entities daily, performance hourly):
 |---|---|
 | `google_ads` | `campaigns`, `ad_groups`, `keywords`, `location_targets`, `audience_targets`, `campaign_performance`, `ad_group_hierarchy` (two requests, run mode, batched ad group queries) |
 | `microsoft_ads` | `campaigns`, `ad_groups` (from `campaigns`), `keywords` (from `ad_groups`), `location_targets` (from `campaigns`), `audience_targets` (from `ad_groups`), `campaign_performance`, `ad_group_tree` (two requests, run mode) |
-| `meta_ads` | `campaigns`, `ad_sets` (with their targeting), `campaign_insights` |
+| `meta_ads` | `campaigns`, `ad_sets` (with their targeting), `campaign_insights`, `ad_set_insights_report` (an async insights report) |
 | `files_demo` | `customers` (a JSON lines file per day), `orders` (a glob of CSV files), `products` (a Parquet file) |
 | `s3_demo` | `customers` (a JSON lines object per day), `orders` (a glob of CSV objects), `events` (Parquet parts picked by a regex) |
 | `gcs_demo` | `orders` (a glob of CSV objects), `events` (Parquet parts picked by a regex) |
@@ -1213,13 +1213,21 @@ convention a request is named `raw_<entity>`, e.g. `raw_campaigns`.
   `arguments: {schema, table, columns, where}`) runs read-only SELECT queries. All read with DuckDB, on a connection
   of the connector's own, each row one record (examples 5 to 7 in [Worked examples](#worked-examples)). There is no
   other request kind for them.
-- `async_job`: `submit` (`operation:`, a call), `poll` (`operation: {method, arguments}` of the same service, `every`, `timeout`,
-  `done_when`, `fail_when`) and `download` (`url`, `format`: csv / jsonl / json, `compression`: zip / gzip) or
-  `results` (`operation:`, a call; its `records` select the results). The submit and poll responses are the `submit` and `poll` scopes; one that is not a
-  mapping (e.g. a job ID) is `submit.result`. `poll` runs every `every` until `done_when` matches; `fail_when` or
-  `timeout` fails the request like an API error. Files are downloaded without the API's credentials (report URLs are
+- `async_job`: `submit` (`operation:`), `poll` (`operation:`, `every`, `timeout`, `done_when`, `fail_when`) and
+  `download` (`url`, `format`: csv / jsonl / json, `compression`: none / zip / gzip) or `results` (`operation:`; its
+  `records` and `paginator` select and page the results, like a request's). Each part's `operation:` is what the
+  connector named in `auth.provider` takes, as for `operation` above: a call (`service`, `method`, `arguments`) for an
+  SDK connector, or an HTTP request (`path`, `method`, `params`, `headers`, `json`) with built-in auth or a REST API
+  connector. A poll that is a call needs an SDK connector; with built-in auth the poll is a request. The poll's
+  `service` is optional and defaults to the submit's; set it when the poll reads another object (Meta Ads submits to
+  `AdAccount` and polls the `AdReportRun`).
+  The submit and poll responses are the `submit` and `poll` scopes: a single-record response is that record
+  (`{{ submit.id }}`), and one that is not a mapping (e.g. a job ID) is `submit.result`. `poll` runs every `every`
+  until `done_when` (`{path, equals}` or `{path, in: [...]}`) matches; `fail_when` or `timeout` fails the request
+  like an API error. Files are downloaded without the connection's credentials or headers (report URLs are
   pre-signed, and their query strings are redacted); csv and jsonl give one record per row (empty csv cells are
-  null), json is read with the request item's `records.path` (a download is not a call), and a missing URL means no data.
+  null), json is read with the request item's `records.path` (a download is not a call). An empty download URL means
+  the window had no data, and an empty file has no rows: both give 0 rows, not an error.
 - Query builders are components: in a request's `operation`, a mapping with a single key that is an
   installed query builder's name, such as `query: {gaql: {...}}`, is replaced by the query text the builder writes
   from it, after its references are rendered with their types. The builder checks, quotes and escapes every value,

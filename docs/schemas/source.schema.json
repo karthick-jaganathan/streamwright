@@ -61,20 +61,7 @@
               "$ref": "#/definitions/poll_condition"
             },
             "operation": {
-              "additionalProperties": false,
-              "properties": {
-                "<<": {},
-                "arguments": {
-                  "type": "object"
-                },
-                "method": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "method"
-              ],
-              "type": "object"
+              "$ref": "#/definitions/poll_operation"
             },
             "timeout": {
               "description": "e.g. 15s, 30m, 1h, 7d",
@@ -91,10 +78,10 @@
           "type": "object"
         },
         "results": {
-          "$ref": "#/definitions/call_request"
+          "$ref": "#/definitions/job_request"
         },
         "submit": {
-          "$ref": "#/definitions/call_request"
+          "$ref": "#/definitions/job_request"
         }
       },
       "required": [
@@ -293,19 +280,6 @@
       },
       "required": [
         "method"
-      ],
-      "type": "object"
-    },
-    "call_request": {
-      "additionalProperties": false,
-      "properties": {
-        "<<": {},
-        "operation": {
-          "$ref": "#/definitions/call"
-        }
-      },
-      "required": [
-        "operation"
       ],
       "type": "object"
     },
@@ -653,6 +627,19 @@
         "null"
       ]
     },
+    "job_request": {
+      "additionalProperties": false,
+      "properties": {
+        "<<": {},
+        "operation": {
+          "$ref": "#/definitions/operation"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "type": "object"
+    },
     "operation": {
       "description": "What the request invokes on the auth.provider connector, which decides the kind: a call (service, method, arguments) of an SDK connector, or an HTTP request (path, method, params, ...).",
       "oneOf": [
@@ -976,6 +963,68 @@
         "path"
       ],
       "type": "object"
+    },
+    "poll_operation": {
+      "description": "The status check: a call (service defaults to the submit's) or an HTTP request.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "<<": {},
+            "arguments": {
+              "type": "object"
+            },
+            "method": {
+              "type": "string"
+            },
+            "service": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "method"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "<<": {},
+            "headers": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": "object"
+            },
+            "json": {},
+            "method": {
+              "enum": [
+                "GET",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE"
+              ]
+            },
+            "params": {
+              "type": "object"
+            },
+            "params_encoding": {
+              "enum": [
+                "plain",
+                "dotted"
+              ]
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "rate_limit": {
       "additionalProperties": false,

@@ -1,0 +1,74 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# One row per ad set per day, from an async insights report: for many ad sets or long ranges, an async report is
+# one request per window instead of paging the insights edge (and Meta does not time it out).
+partitions:
+  - {name: account_id, values: "{{ config.account_ids }}"}
+incremental:
+  cursor_field: date
+  start: "{{ config.start_date }}"
+  window: 28d
+  lookback: 28d                    # attribution windows restate results for up to 28 days
+policy:
+  retry: {max_attempts: 5, max_delay: 5m}   # throttling can last minutes
+requests:
+  - name: raw_ad_set_insights_report
+    async_job:
+      submit:                      # starts the report: gives the report run {id, report_run_id}
+        operation:
+          service: AdAccount
+          method: get_insights
+          arguments:
+            id: "act_{{ partition.account_id }}"
+            is_async: true
+            fields: [account_id, campaign_id, adset_id, adset_name, date_start, impressions, clicks, spend]
+            params:
+              level: adset
+              time_increment: 1
+              time_range: {since: "{{ window.start }}", until: "{{ window.end }}"}
+      poll:
+        operation:
+          service: AdReportRun     # the report run, not the account
+          method: api_get
+          arguments: {id: "{{ submit.id }}", fields: [async_status, async_percent_completion]}
+        every: 15s
+        timeout: 1h
+        done_when: {path: async_status, equals: Job Completed}
+        fail_when: {path: async_status, in: [Job Failed, Job Skipped]}
+      results:
+        operation:
+          service: AdReportRun
+          method: get_insights     # the report's rows, paged by the connector
+          arguments: {id: "{{ submit.id }}", params: {limit: 500}}
+transform:
+  mode: page
+  steps:
+    - name: ad_set_insights_report
+      select: |                    # SQL (DuckDB) over each page of records: insights numbers are text
+        SELECT record->>'account_id'                         AS account_id,
+               record->>'campaign_id'                        AS campaign_id,
+               record->>'adset_id'                           AS ad_set_id,
+               record->>'adset_name'                         AS ad_set_name,
+               (record->>'date_start')::DATE                 AS date,
+               coalesce((record->>'impressions')::BIGINT, 0) AS impressions,
+               coalesce((record->>'clicks')::BIGINT, 0)      AS clicks,
+               coalesce((record->>'spend')::DOUBLE, 0)       AS spend
+        FROM raw_ad_set_insights_report
+export:
+  ad_set_insights_report:
+    step: ad_set_insights_report
+    primary_key: [ad_set_id, date]

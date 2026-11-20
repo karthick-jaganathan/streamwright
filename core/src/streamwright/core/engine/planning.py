@@ -37,9 +37,6 @@ def stream_problems(runner, stream):
         problems += ["%s: %s" % (components.path_text(("requests", position, *path)), message)
                      for path, message, _ in components.check_queries(request, runner.allowed_connectors,
                                                                       runner.query_builders.builders)]
-        if "async_job" in request and "sdk" not in (request["async_job"].get("submit") or {}):
-            problems.append("%s: an async job's `submit` must be a call (its `poll` calls the same "
-                            "service)" % where)
         problem = _transport_problem(runner, request, calls)
         if problem:
             problems.append("%s: %s" % (where, problem))
@@ -59,7 +56,8 @@ def _transport_problem(runner, request, calls):
 
 def _http_requests(request):
     job = request.get("async_job") or {}
-    return [part["http"] for part in (request, job.get("submit") or {}, job.get("results") or {}) if "http" in part]
+    parts = (request, job.get("submit") or {}, job.get("poll") or {}, job.get("results") or {})
+    return [part["http"] for part in parts if isinstance(part, dict) and "http" in part]
 
 
 def prepare_run(runner, selected):

@@ -38,7 +38,7 @@ TEXT_FORMAT = "[%(asctime)s] %(levelname)s %(name)s%(context_tag)s: %(message)s"
 FIELDS = ("event", "stream", "partition", "window", "request", "export", "exports", "connector", "call", "method",
           "url", "page", "records", "pages", "requests", "retries", "failed_partitions", "streams", "outputs",
           "duration_ms", "status", "code", "attempt", "bytes", "path", "table", "outcome", "database", "job_id",
-          "run_id", "queue_wait_ms")
+          "run_id", "queue_wait_ms", "job_request", "job_status", "checks", "job_step")   # job_*: an async job's
 # the log context's keys (runtime/logs/context.py): JSON lines carry them for every logger, labels as one object
 CONTEXT_KEYS = ("job", "labels", "item", "scope", "job_id", "step", "output", "lookup")
 
@@ -76,8 +76,9 @@ def utc_now():
 
 def describe(where, request=True):
     """
-    "stream 'x', request 'y', partition {...}, window 2026-09-01..2026-09-07": the parts `where` has (a mapping with
-    stream, request, partition and window keys; `request`: whether to name the request).
+    "stream 'x', request 'y', partition {...}, window 2026-09-01..2026-09-07, async job poll (check 2)": the parts
+    `where` has (a mapping with stream, request, partition, window and job_step keys; `request`: whether to name the
+    request).
     """
     parts = ["stream %r" % where["stream"]] if where.get("stream") else []
     if request and where.get("request"):
@@ -86,6 +87,8 @@ def describe(where, request=True):
         parts.append("partition %s" % json.dumps(where["partition"], sort_keys=True, default=str))
     if where.get("window"):
         parts.append("window %s..%s" % (where["window"]["start"], where["window"]["end"]))
+    if where.get("job_step"):
+        parts.append("async job %s" % where["job_step"])
     return ", ".join(parts)
 
 

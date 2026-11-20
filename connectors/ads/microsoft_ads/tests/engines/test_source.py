@@ -27,6 +27,7 @@ import urllib.error
 import zipfile
 from types import MappingProxyType
 
+import duckdb
 import pytest
 from bingads import service_client
 from bingads.authorization import OAuthTokens, _UriOAuthService
@@ -34,7 +35,10 @@ from bingads.exceptions import OAuthTokenRequestException
 from suds.transport import Reply, TransportError
 from suds.transport.http import HttpTransport
 
+from streamwright.connectors.microsoft_ads import client
 from streamwright.core import cli
+from streamwright.core.jobs.duckdb.engine import run_job
+from streamwright.core.jobs.duckdb.plugin import JOB_ENGINE
 from streamwright.core.sdk.testing import MemoryOutput, SourceError, SourceRunner, load_source
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
@@ -301,6 +305,65 @@ def test_the_microsoft_ads_example_runs_end_to_end(soap, api, capsys, caplog, mo
     assert "SAS-SECRET" not in caplog.text and "access-1" not in caplog.text
 
 
+def _report_job(tmp_path, api_url, **step):
+    """A DuckDBJob whose call step runs a campaign report inline (submit, poll, zip CSV) into a DuckDB table."""
+    async_job = {
+        "submit": {"operation": {"service": "ReportingService", "method": "SubmitGenerateReport", "arguments": {
+            "request": {"ReportRequest": {
+                "@type": "CampaignPerformanceReportRequest", "Aggregation": "Daily", "Format": "Csv",
+                "ExcludeReportHeader": True, "ExcludeReportFooter": True,
+                "Columns": ["TimePeriod", "AccountId", "CampaignId", "CampaignName", "Impressions", "Clicks", "Spend"],
+                "Scope": {"AccountIds": ["{{ config.account_id }}"]}, "Time": {"PredefinedTime": "Yesterday"}}}}}},
+        "poll": {"operation": {"method": "PollGenerateReport",
+                               "arguments": {"request": {"ReportRequestId": "{{ submit.result }}"}}},
+                 "every": "15s", "timeout": "30m", "done_when": {"path": "Status", "equals": "Success"},
+                 "fail_when": {"path": "Status", "equals": "Error"}},
+        "download": {"url": "{{ poll.ReportDownloadUrl }}", "format": "csv", "compression": "zip"}}
+    report_step = dict({"name": "report", "connection": "ads", "async_job": async_job,
+                        "sql": "SELECT record->>'CampaignId' AS campaign_id, "
+                               "(record->>'Impressions')::BIGINT AS impressions FROM records"}, **step)
+    return {
+        "kind": "DuckDBJob", "name": "ads_report",
+        "spec": {"config": {"account_id": {"type": "string", "default": "123456"}},
+                 "secrets": {name: {"type": "string", "required": True} for name in SECRETS}},
+        "connections": {"ads": {"provider": "microsoft_ads", "customer_id": "555",
+                                **{name: "{{ secrets.%s }}" % name for name in SECRETS}},
+                        "wh": {"provider": "duckdb", "path": str(tmp_path / "wh.duckdb")}},
+        "steps": [report_step],
+        "outputs": [{"name": "out", "connection": "wh", "step": "report", "table": "report", "mode": "overwrite"}],
+        "runtime": {"state": {"sqlite": str(tmp_path / "state.db"), "apply_migrations": True}}}
+
+
+def test_a_report_runs_inline_in_a_duckdb_job_step(soap, api, tmp_path):
+    soap.handlers["SubmitGenerateReport"] = submitted(lambda xml: "job-1")
+    soap.handlers["PollGenerateReport"] = lambda xml: status("Success", api.url + "/reports/job-1.zip?sig=SAS")
+    api.routes[("GET", "/reports/job-1.zip")] = lambda request: (200, report([
+        ["2026-10-02", "123456", "11", "Brand", "1000", "50", "12.5"], ["2026-10-02", "123456", "12", "Generic", "4",
+                                                                       "0", "0"]]))
+    job = _report_job(tmp_path, api.url)
+    assert JOB_ENGINE.validate_job(job).valid
+    assert run_job(job, secrets=dict(SECRETS)).exit_code == 0
+    with duckdb.connect(str(tmp_path / "wh.duckdb"), read_only=True) as con:
+        assert con.execute("SELECT * FROM report ORDER BY campaign_id").fetchall() == [("11", 1000), ("12", 4)]
+    submit = unprefixed(next(xml for operation, xml in soap.sent if operation == "SubmitGenerateReport"))
+    assert "<AccountIds><long>123456</long></AccountIds>" in submit.replace("a:", "")
+
+
+def test_an_inline_report_is_checked_before_it_runs(tmp_path):
+    def codes(job):
+        return [(issue.code, issue.message) for issue in JOB_ENGINE.validate_job(job).issues
+                if issue.code == "bad-call"]
+    both = _report_job(tmp_path, "http://x", operation={"service": "CampaignManagementService",
+                                                        "method": "GetCampaignsByAccountId"})
+    assert codes(both) == [("bad-call", "a call step has an `operation:` or an `async_job:`, not both")]
+    job = _report_job(tmp_path, "http://x")
+    job["steps"][0]["async_job"]["results"] = {"operation": {"path": "/rows"}}
+    assert codes(job) == [
+        ("bad-call", "`async_job` needs exactly one of `results` or `download`"),
+        ("bad-call", "async_job.results: microsoft_ads is an SDK connector: the operation is a call (service, method, "
+                     "arguments), not an HTTP request")]
+
+
 def test_reports_are_polled_until_done(soap, api, caplog):
     caplog.set_level(logging.INFO, logger="streamwright.source")
     statuses = [status("Pending"), status("Pending"), status("Success", api.url + "/r.zip")]
@@ -372,6 +435,21 @@ def test_operations_are_built_from_the_wsdl(soap):
         run(source)
 
 
+def test_a_response_without_items_is_an_empty_page(soap):
+    account_entities(soap)
+    connection = client.connect({**SECRETS, "environment": "production", "customer_id": "555",
+                                 "account_id": "123456"}, lambda token: None)
+
+    def pages(campaign):
+        return list(client.read_pages(connection, "CampaignManagementService", "GetAdGroupsByCampaignId",
+                                      {"request": {"CampaignId": campaign}}, lambda send: send()))
+    assert [group["Id"] for group in pages("11")[0]["AdGroup"]] == [111, 112]
+    assert pages("12") == [None]                                # <AdGroups></AdGroups>: suds gives ""
+    soap.handlers["GetAdGroupsByCampaignId"] = lambda xml: response("GetAdGroupsByCampaignId",
+                                                                    '<AdGroups i:nil="true"/>')
+    assert pages("12") == [None]
+
+
 def test_an_operation_the_wsdl_does_not_declare_fails_naming_it(soap):
     account_entities(soap)
     source = load_source(EXAMPLE)
@@ -428,10 +506,10 @@ def test_network_logs_show_the_soap_messages_redacted(soap, api, capsys, monkeyp
                      "--set", "customer_id=555", "--set", "start_date=today", *logging_options]) == 0
     err = capsys.readouterr().err
     where = "stream 'campaign_performance', request 'raw_campaign_performance', partition {\"account_id\": " \
-            "\"123456\"}, window %s..%s: " % (today, today)
-    assert where + "microsoft_ads ReportingService.SubmitGenerateReport: " in err
-    assert where + "microsoft_ads ReportingService.PollGenerateReport: " in err
-    assert "INFO streamwright.network: " + where + "GET %s/r.zip?sv=1&sig=***: 200, " % api.url in err
+            "\"123456\"}, window %s..%s, async job " % (today, today)        # each call names its step of the job
+    assert where + "submit: microsoft_ads ReportingService.SubmitGenerateReport: " in err
+    assert where + "poll (check 1): microsoft_ads ReportingService.PollGenerateReport: " in err
+    assert "INFO streamwright.network: " + where + "download: GET %s/r.zip?sv=1&sig=***: 200, " % api.url in err
     if sdk_logs:
         assert "DEBUG suds.client: sending to (https://reporting.api.bingads.microsoft.com/" in err
         assert re.search(r"<\w+:DeveloperToken>\*\*\*</\w+:DeveloperToken>", err)

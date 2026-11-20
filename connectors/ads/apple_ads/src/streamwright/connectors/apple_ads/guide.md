@@ -94,6 +94,37 @@ parameters you call are whatever the API exposes, never a closed list in the con
 example `params: {statusFilter: ENABLED}` reaches the request URL unchanged; pagination cursors the paginator
 injects take precedence.
 
+## Performance reports
+
+Reports in this API are synchronous queries: a `POST /v1/reports/...` request returns the rows under `result.rows`,
+so a report is a normal request, no `async_job`. To read by date window, make the stream incremental and put the
+window dates in `timeRange`:
+
+```yaml
+requests:
+  - name: raw_campaign_reports
+    operation:
+      path: /v1/reports/apps/campaigns/query
+      method: POST
+      json:
+        pagination: {pageSize: 100, fetchTotalCount: true}
+        timeRange:
+          startTime: "{{ window.start | date('%Y-%m-%d') }}"
+          endTime: "{{ window.end | date('%Y-%m-%d') }}"
+          granularity: DAILY
+      records: {path: result.rows}
+```
+
+Impression-share custom reports are async, and only in the deprecated Campaign Management API v5: you
+`POST /api/v5/custom-reports`, then `GET /api/v5/custom-reports/{id}` until `state` is `COMPLETED` (states `QUEUED`,
+`PENDING`, `COMPLETED`, `FAILED`), then download the CSV at `downloadUri`. Apple allows up to 10 such reports per 24
+hours, each up to 30 days. If you still use them, they fit an `async_job` with `download: {format: csv}`.
+
+**Entity sync or reports.** The query endpoints read across campaigns (`/v1/adgroups/query` returns every ad group
+with its `campaignId`): prefer them to one request per campaign. Report queries also cover every campaign at once.
+
+**Case-sensitive values.** Enums are upper case: `granularity: DAILY`, statuses such as `ENABLED`.
+
 ## DuckDBJob
 
 A complete DuckDBJob that calls this connector (`streamwright duckdb validate` checks it offline; only the account values and the secret are yours):

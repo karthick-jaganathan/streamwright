@@ -89,6 +89,7 @@ CONNECTOR = ConnectorDefinition(
     adapters={"source": "streamwright.connectors.google_ads.engines.source:GoogleAdsSourceAdapter"},
     validator="streamwright.connectors.google_ads.client:validate_connection",
     surface="streamwright.connectors.google_ads.surface:surface",
+    describe_type="streamwright.connectors.google_ads.type_info:describe_type",
     query_builders={"gaql": "streamwright.connectors.google_ads.gaql:GaqlBuilder"},
     # gRPC statuses and Google Ads error names worth retrying; a stream's `retry.codes` replace them
     retry_codes=("RESOURCE_EXHAUSTED", "UNAVAILABLE", "DEADLINE_EXCEEDED", "INTERNAL", "ABORTED",

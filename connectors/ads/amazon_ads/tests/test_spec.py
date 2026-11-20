@@ -37,7 +37,7 @@ def codes(issues):
 
 def test_the_connector_declares_http_requests_run_by_the_engine():
     assert select_transport(components.load("amazon_ads")) == "http"
-    assert [operation.name for operation in CONNECTOR.operations] == ["http.request"]
+    assert [operation.name for operation in CONNECTOR.operations] == ["http.request", "http.send"]
 
 
 def test_oauth_credentials_are_secret_references_including_the_client_id():

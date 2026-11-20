@@ -153,20 +153,26 @@ def _definitions():
                       "description": "What the request invokes on the auth.provider connector, which decides the kind: "
                                      "a call (service, method, arguments) of an SDK connector, or an HTTP request "
                                      "(path, method, params, ...)."},
-        "call_request": _obj({"operation": _ref("call")}, required=("operation",)),
+        "job_request": _obj({"operation": _ref("operation")}, required=("operation",)),
+        "poll_operation": {"oneOf": [
+            _obj({"service": _STR, "method": _STR, "arguments": {"type": "object"}}, required=("method",)),
+            _obj({"path": _STR, "method": _enum(HTTP_METHODS), "params": {"type": "object"},
+                  "headers": {"type": "object", "additionalProperties": _STR}, "json": {},
+                  "params_encoding": _enum(PARAMS_ENCODING_TYPES)}, required=("path",))],
+            "description": "The status check: a call (service defaults to the submit's) or an HTTP request."},
         "poll_condition": _obj({"path": _STR, "equals": {}, "in": {"type": "array"}}, required=("path",)),
         "async_job": {
             "type": "object",
             "properties": {
-                "submit": _ref("call_request"),
+                "submit": _ref("job_request"),
                 "poll": _obj({
-                    "operation": _obj({"method": _STR, "arguments": {"type": "object"}}, required=("method",)),
+                    "operation": _ref("poll_operation"),
                     "every": _DURATION, "timeout": _DURATION,
                     "done_when": _ref("poll_condition"), "fail_when": _ref("poll_condition"),
                 }, required=("operation", "every", "timeout", "done_when")),
                 "download": _obj({"url": _STR, "format": _enum(DOWNLOAD_FORMATS), "compression": _enum(COMPRESSIONS)},
                                  required=("url", "format")),
-                "results": _ref("call_request"),
+                "results": _ref("job_request"),
             },
             "required": ["submit", "poll"],
             "oneOf": [{"required": ["download"]}, {"required": ["results"]}],

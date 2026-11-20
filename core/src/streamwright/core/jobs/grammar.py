@@ -44,7 +44,7 @@ from types import MappingProxyType
 
 from streamwright.core.jobs.fields import Field
 
-__all__ = ["APPLY_FIELD", "APPLY_KEYS", "CALL_KEYS", "CONNECTION_GROUPS", "CONNECTION_HTTP_KEYS",
+__all__ = ["APPLY_FIELD", "APPLY_KEYS", "ASYNC_JOB_FIELD", "CALL_KEYS", "CONNECTION_GROUPS", "CONNECTION_HTTP_KEYS",
            "CONNECTION_POLICY_KEYS", "NULLS", "ON_ROW_ERROR", "ON_UNKNOWN", "OPERATION_FIELD", "POLICY_FIELD",
            "POLICY_KEYS", "REQUEST_KEYS", "grammar_problems", "operation_kind", "public_connection_key", "public_key",
            "public_path", "to_internal"]
@@ -74,6 +74,25 @@ OPERATION_FIELD = Field("object", fields={
     "paginator": Field("object", description="a request: how the pages are followed")},
     description="what the item invokes on its connection's connector: a call (service, method, arguments) of an SDK "
                 "connector, or a request (path, method, params, ...) of a REST API connector")
+_JOB_PART = Field("object", fields={"operation": OPERATION_FIELD}, description="a call or a request")
+_CONDITION = Field("object", fields={"path": Field("string", required=True), "equals": Field(),
+                                     "in": Field("array")})
+ASYNC_JOB_FIELD = Field("object", fields={
+    "submit": Field("object", required=True, fields={"operation": OPERATION_FIELD},
+                    description="starts the job; its response is {{ submit.* }}"),
+    "poll": Field("object", required=True, fields={
+        "operation": Field("object", fields={**OPERATION_FIELD.fields, "service": Field(
+            "string", description="a call: the service (default: the submit's)")}),
+        "every": Field("string", required=True, description="how often to check, e.g. 15s"),
+        "timeout": Field("string", required=True, description="how long to wait in all, e.g. 30m"),
+        "done_when": Field("object", required=True, fields=_CONDITION.fields), "fail_when": _CONDITION},
+        description="checks the job until done_when; its response is {{ poll.* }}"),
+    "results": _JOB_PART,
+    "download": Field("object", fields={"url": Field("string", required=True),
+                                        "format": Field("string", required=True, enum=("csv", "jsonl", "json")),
+                                        "compression": Field("string", enum=("none", "zip", "gzip"))})},
+    description="call steps: a report job (submit, poll, then results or a download) instead of an `operation:`; "
+                "the source engine runs it (docs/design/source-format.md, async jobs)")
 POLICY_FIELD = Field("object", fields={
     "retry": _OBJECT, "rate_limit": _OBJECT, "page_size": Field("integer", minimum=1),
     "on_error": Field("string", enum=("fail", "skip", "warn")),

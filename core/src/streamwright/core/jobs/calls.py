@@ -26,12 +26,22 @@ manifest's `operation:`, optionally paged (`paginator`), throttled (`rate_limit`
 manifest grammar is translated by streamwright.core.jobs.grammar.
 """
 
+import copy
 import itertools
 import json
 
-from streamwright.core.config.inputs import resolve_inputs
+from streamwright.core.config import grammar as source_grammar
+from streamwright.core.config.inputs import InputError, parse_duration, resolve_inputs
+from streamwright.core.config.loader import load_source
 from streamwright.core.engine.runner import SourceRunner
-from streamwright.core.jobs.grammar import CONNECTION_HTTP_KEYS, CONNECTION_POLICY_KEYS, public_connection_key
+from streamwright.core.engine.sql import plan_source
+from streamwright.core.engine.values import partition_key
+from streamwright.core.jobs.grammar import (
+    CONNECTION_HTTP_KEYS,
+    CONNECTION_POLICY_KEYS,
+    operation_kind,
+    public_connection_key,
+)
 from streamwright.core.runtime import components
 from streamwright.core.runtime.contract_validation import check_connection
 from streamwright.core.runtime.source_connectors import select_transport
@@ -39,7 +49,7 @@ from streamwright.core.runtime.text import suggest
 
 __all__ = ["HTTP_DEFAULT_KEYS", "PARTITION_KEYS", "call_problems", "call_records", "connection_problems",
            "ephemeral_source", "partition_dependencies", "partition_problems", "partition_scopes", "record_value",
-           "source_inputs"]
+           "source_carry_key", "source_inputs", "source_records", "source_step"]
 
 # a REST connection's request defaults, flat in the internal shape (a manifest's `http:` and `policy:` groups)
 HTTP_DEFAULT_KEYS = (*CONNECTION_HTTP_KEYS, *CONNECTION_POLICY_KEYS)
@@ -74,9 +84,14 @@ def partition_scopes(step, values):
 
 
 def ephemeral_source(step, connection, scope=None):
-    """An ephemeral source with one stream: the step's call, its records as returned by the connector."""
+    """
+    An ephemeral source with one stream: the step's call (or its async job, as a source writes one), its records as
+    returned by the connector.
+    """
     request = {"name": "raw"}
-    if "request" in step:
+    if "async_job" in step:
+        request["async_job"] = copy.deepcopy(step["async_job"])         # translated with the source below
+    elif "request" in step:
         spec = step["request"]
         request["http"] = {k: spec[k] for k in ("path", "method", "params", "headers", "json") if k in spec}
         if "records" in spec:
@@ -96,7 +111,46 @@ def ephemeral_source(step, connection, scope=None):
         stream["partitions"] = [{"name": name, "values": [value]} for name, value in scope.items()]
     http = {k: connection[k] for k in HTTP_DEFAULT_KEYS if k in connection}
     auth = {k: v for k, v in connection.items() if k not in http}
-    return {"kind": "source", "name": "step_%s" % step["name"], "auth": auth, "http": http, "streams": [stream]}
+    return source_grammar.to_internal({"kind": "source", "name": "step_%s" % step["name"], "auth": auth, "http": http,
+                                       "streams": [stream]})
+
+
+def source_step(path, stream):
+    """
+    (source, plan, columns) of a `source:` step: its folder loaded and planned once per run, and `columns`, the
+    [(name, DuckDB type)] of the stream's export when it has exactly one (None otherwise).
+    """
+    source = load_source(path)
+    plan = plan_source(source)
+    planned = plan.streams.get(stream)
+    columns = planned.columns.get(planned.exports[0][2]) if planned is not None and len(planned.exports) == 1 else None
+    return source, plan, columns
+
+
+def source_carry_key(step, scope):
+    """
+    Where a `source:` step keeps its bookmarks in a batch's `carry`: per partition scope, which is config the
+    bookmarks' keys do not include, so each scope resumes from its own.
+    """
+    return "bookmarks:%s:%s" % (step["name"], partition_key(scope)) if scope else "bookmarks:%s" % step["name"]
+
+
+def source_records(step, source, plan, scopes, *, carry, secrets, allowed_connectors=None, error=ValueError):
+    """
+    The records of a `source:` step (every engine): its stream run once per partition scope (the step's `config`
+    plus the scope's values), each scope's bookmarks kept in `carry`; a partial load raises `error`.
+    """
+    stream = step.get("stream")
+    for scope in scopes:
+        key = source_carry_key(step, scope)
+        config, secret_values = source_inputs(source, dict(step.get("config") or {}, **scope), secrets)
+        runner = SourceRunner(source, config, secret_values, allowed_connectors=allowed_connectors, plan=plan)
+        collected = runner.collect(stream, state=carry.get(key))
+        for _, record in collected:
+            yield record
+        if collected.partial:
+            raise error("step %s: stream %s was loaded partially" % (step["name"], stream))
+        carry[key] = collected.state
 
 
 def source_inputs(source, provided, secrets):
@@ -182,6 +236,8 @@ def call_problems(step, connection):
     if definition is None:
         return []
     is_http = select_transport(definition) == "http"
+    if "async_job" in step:
+        return _async_job_problems(step, definition, is_http)
     if "request" in step:
         if not is_http:
             return [("bad-call", "%s is an SDK connector: its operation is a call (service, method, arguments), not "
@@ -198,3 +254,43 @@ def call_problems(step, connection):
                              "...), not a call (service, arguments)" % definition.name, False)]
     call = {key: step.get(key) for key in ("service", "method", "arguments")}
     return [("bad-call", problem, False) for problem in components.check_call(definition, call)]
+
+
+def _async_job_problems(step, definition, is_http):
+    """A call step's async job: one of `results`/`download`, and each part an operation its connector takes."""
+    if any(key in step for key in ("service", "method", "request")):
+        return [("bad-call", "a call step has an `operation:` or an `async_job:`, not both", False)]
+    job = step["async_job"] if isinstance(step["async_job"], dict) else {}
+    problems = []
+    if len([key for key in ("results", "download") if key in job]) != 1:
+        problems.append(("bad-call", "`async_job` needs exactly one of `results` or `download`", False))
+    poll = job.get("poll") if isinstance(job.get("poll"), dict) else {}
+    for key in ("every", "timeout"):
+        if isinstance(poll.get(key), str):
+            try:
+                parse_duration(poll[key])
+            except InputError as exc:
+                problems.append(("bad-call", "async_job.poll.%s: %s" % (key, exc), False))
+    for key in ("done_when", "fail_when"):
+        if isinstance(poll.get(key), dict) and len([name for name in ("equals", "in") if name in poll[key]]) != 1:
+            problems.append(("bad-call", "async_job.poll.%s needs exactly one of `equals` or `in`" % key, False))
+    submit = (job.get("submit") or {}).get("operation") if isinstance(job.get("submit"), dict) else None
+    for part in ("submit", "poll", "results"):
+        operation = (job.get(part) or {}).get("operation") if isinstance(job.get(part), dict) else None
+        if not isinstance(operation, dict):
+            continue
+        if operation_kind(operation) == "request":
+            if not is_http:
+                problems.append(("bad-call", "async_job.%s: %s is an SDK connector: the operation is a call (service, "
+                                             "method, arguments), not an HTTP request" % (part, definition.name),
+                                 False))
+            continue
+        if is_http:
+            problems.append(("bad-call", "async_job.%s: %s is a REST API connector: the operation is an HTTP request "
+                                         "(path, method, ...), not a call" % (part, definition.name), False))
+            continue
+        service = operation.get("service") or (submit or {}).get("service")      # a poll's default: the submit's
+        call = {"service": service, "method": operation.get("method"), "arguments": operation.get("arguments")}
+        problems += [("bad-call", "async_job.%s: %s" % (part, problem), False)
+                     for problem in components.check_call(definition, call)]
+    return problems
