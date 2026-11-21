@@ -1,7 +1,7 @@
 # StreamWright serve: the REST API (installed by `streamwright systemd install`)
 [Unit]
 Description=StreamWright serve (REST API)
-Documentation=https://streamwright.web.app/docs/jobs/serve
+Documentation=https://streamwright.net/docs/jobs/serve
 After=network-online.target
 Wants=network-online.target
 
