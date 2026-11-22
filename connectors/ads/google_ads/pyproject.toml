@@ -28,7 +28,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://streamwright.net"
-Documentation = "https://streamwright.net/docs/"
+Documentation = "https://docs.streamwright.net/"
 Repository = "https://github.com/karthick-jaganathan/streamwright"
 "Issue Tracker" = "https://github.com/karthick-jaganathan/streamwright/issues"
 

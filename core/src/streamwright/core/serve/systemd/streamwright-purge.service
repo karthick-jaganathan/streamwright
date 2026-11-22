@@ -1,7 +1,7 @@
 # StreamWright: purge the run queue's ended runs (installed by `streamwright systemd install`)
 [Unit]
 Description=StreamWright: purge the run queue's ended runs
-Documentation=https://streamwright.net/docs/jobs/serve
+Documentation=https://docs.streamwright.net/jobs/serve
 
 [Service]
 Type=oneshot

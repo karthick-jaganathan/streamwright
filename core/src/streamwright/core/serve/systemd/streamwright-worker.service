@@ -1,7 +1,7 @@
 # StreamWright worker: runs the runs serve queues (installed by `streamwright systemd install`)
 [Unit]
 Description=StreamWright worker
-Documentation=https://streamwright.net/docs/jobs/serve
+Documentation=https://docs.streamwright.net/jobs/serve
 After=network-online.target
 Wants=network-online.target
 

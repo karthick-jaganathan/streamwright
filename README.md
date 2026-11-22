@@ -75,7 +75,7 @@ StreamWright is layered so that **what to extract** (a customer's YAML source), 
   networks) locally, in Docker, or as Kubernetes Jobs writing to an object-storage warehouse.
 
 The layers, the `streamwright run` flow and the orchestration flow — with sequence diagrams — are in
-[the architecture page](https://streamwright.net/docs/architecture/). Orchestration details are in the
+[the architecture page](https://docs.streamwright.net/architecture/). Orchestration details are in the
 [orchestration documentation](https://github.com/karthick-jaganathan/streamwright-orchestration).
 
 ## Repository layout
@@ -115,7 +115,7 @@ make check                  # what CI checks
 
 Adding a connector: see [connectors/README.md](connectors/README.md) and the
 [connector contract](docs/design/connector-contract.md). User documentation:
-<https://streamwright.net/docs/>.
+<https://docs.streamwright.net/>.
 
 ## License
 

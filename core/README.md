@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/streamwright.svg)](https://pypi.org/project/streamwright/)
 [![Python](https://img.shields.io/pypi/pyversions/streamwright.svg)](https://pypi.org/project/streamwright/)
 [![License](https://img.shields.io/pypi/l/streamwright.svg)](https://github.com/karthick-jaganathan/streamwright/blob/master/LICENSE)
-[![Docs](https://img.shields.io/badge/docs-streamwright.net-brightgreen.svg)](https://streamwright.net/docs/)
+[![Docs](https://img.shields.io/badge/docs-streamwright.net-brightgreen.svg)](https://docs.streamwright.net/)
 
 Declarative data pipelines in YAML: read from APIs, files, databases and ads platforms, shape with DuckDB SQL,
 write to files, DuckDB, DuckLake, Singer or dlt.
@@ -60,6 +60,6 @@ STREAMWRIGHT_SECRET_API_TOKEN=... sw run my_api --output jsonl:out
 
 ## Links
 
-[Documentation](https://streamwright.net/docs/) ·
-[Quickstart](https://streamwright.net/docs/quickstart/) ·
+[Documentation](https://docs.streamwright.net/) ·
+[Quickstart](https://docs.streamwright.net/quickstart/) ·
 [Source code](https://github.com/karthick-jaganathan/streamwright)
