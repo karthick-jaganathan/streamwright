@@ -60,7 +60,7 @@ folder serves every client. Secrets come from `--secrets FILE` or `STREAMWRIGHT_
 redacted from every log line. Records go to stdout as Singer messages by default; `--output` writes files
 (`jsonl:DIR`, `csv:DIR`, `tsv:DIR`, `parquet:DIR`), or loads DuckDB or DuckLake (`duckdb:PATH`, `ducklake:CATALOG`).
 
-See the [streamwright documentation](https://karthick-jaganathan.github.io/streamwright/core/) — the [command line](https://karthick-jaganathan.github.io/streamwright/core/cli/), [outputs](https://karthick-jaganathan.github.io/streamwright/core/outputs/) and [logging and the run summary](https://karthick-jaganathan.github.io/streamwright/core/logging/) — for every option.
+See the [streamwright documentation](https://docs.streamwright.net/) — the [command line](https://docs.streamwright.net/cli/), [outputs](https://docs.streamwright.net/concepts/outputs/) and [logging](https://docs.streamwright.net/cli/#logging-options) — for every option.
 
 ## Architecture
 
