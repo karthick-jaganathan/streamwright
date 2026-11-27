@@ -59,14 +59,6 @@ Install only the connectors your sources use: `make install-<name>` (e.g. `make 
 | `gcs` | `make install-gcs` | `streamwright-gcs` (DuckDB httpfs) |
 | `postgres` | `make install-postgres` | `streamwright-postgres` (DuckDB postgres extension) |
 
-### dlt
-
-`--output dlt:DESTINATION` needs dlt and the destination's extra:
-
-```bash
-pip install "./core[dlt]" "dlt[duckdb]"     # or "dlt[bigquery]", ...
-```
-
 ## Verify
 
 ```bash
@@ -102,7 +94,7 @@ orchestration, `streamwright-pipeline:local` (streamwright with the ad and reade
 
 ```bash
 make install MODE=dev EXTRAS=serve && make install-connectors MODE=dev
-pip install pytest jsonschema responses httpx "dlt[duckdb]" ruff
+pip install pytest jsonschema responses httpx ruff
 make lint          # ruff + scripts/check_code_standards.py
 make test          # lint, then core, reader and http connector tests
 make test-all      # lint, then every test (the ad connectors too)

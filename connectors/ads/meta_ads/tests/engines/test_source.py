@@ -95,7 +95,7 @@ def test_the_meta_ads_example_runs_end_to_end(graph, capsys, caplog, monkeypatch
     records = {name: [m["record"] for m in messages if m["type"] == "RECORD" and m["stream"] == name]
                    for name in ("ad_sets", "campaign_insights", "campaigns")}
     schemas = {m["stream"]: m["schema"]["properties"] for m in messages if m["type"] == "SCHEMA"}
-    # typed columns keep nested data as one object or list (dlt loads them as JSON instead of child tables)
+    # typed columns keep nested data as one object or list
     assert (schemas["ad_sets"]["targeting"], schemas["ad_sets"]["countries"]) == (
         {"type": ["null", "object"]}, {"type": ["null", "array"]})
     assert records["campaign_insights"] == [

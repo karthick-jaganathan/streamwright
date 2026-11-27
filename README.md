@@ -16,7 +16,7 @@ described in [the source format design](docs/design/source-format.md); the examp
 
 - **`streamwright`** (or shorthand **`sw`**) ([streamwright](core/README.md)) runs sources: built-in auth, partitions, pagination, async
   report jobs, incremental state, retries and rate limits, SQL transform steps; output as Singer messages, JSONL, CSV,
-  TSV or Parquet files, DuckDB or DuckLake tables, or any [dlt](https://dlthub.com/docs) destination.
+  TSV or Parquet files, or DuckDB or DuckLake tables.
 - **`streamwright validate`** (or **`sw validate`**) checks sources without running them; every finding has its file, line
   and YAML path. JSON Schemas for editor autocomplete are in [`docs/schemas/`](docs/schemas/).
 - **`streamwright mcp`** (or **`sw mcp`**) runs the Model Context Protocol (MCP) server for AI coding assistants.
@@ -58,8 +58,7 @@ streamwright run examples/sources/ads/google_ads --config clients/acme/google_ad
 `--config` takes one client's settings (`config` values and the `streams` to run, never secrets), so one source
 folder serves every client. Secrets come from `--secrets FILE` or `STREAMWRIGHT_SECRET_<NAME>` environment variables, and are
 redacted from every log line. Records go to stdout as Singer messages by default; `--output` writes files
-(`jsonl:DIR`, `csv:DIR`, `tsv:DIR`, `parquet:DIR`), loads DuckDB or DuckLake (`duckdb:PATH`, `ducklake:CATALOG`), or,
-with `pip install "streamwright[dlt]"`, a dlt destination (`dlt:bigquery:marketing`).
+(`jsonl:DIR`, `csv:DIR`, `tsv:DIR`, `parquet:DIR`), or loads DuckDB or DuckLake (`duckdb:PATH`, `ducklake:CATALOG`).
 
 See the [streamwright documentation](https://karthick-jaganathan.github.io/streamwright/core/) — the [command line](https://karthick-jaganathan.github.io/streamwright/core/cli/), [outputs](https://karthick-jaganathan.github.io/streamwright/core/outputs/) and [logging and the run summary](https://karthick-jaganathan.github.io/streamwright/core/logging/) — for every option.
 

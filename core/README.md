@@ -6,7 +6,7 @@
 [![Docs](https://img.shields.io/badge/docs-streamwright.net-brightgreen.svg)](https://docs.streamwright.net/)
 
 Declarative data pipelines in YAML: read from APIs, files, databases and ads platforms, shape with DuckDB SQL,
-write to files, DuckDB, DuckLake, Singer or dlt.
+write to files, DuckDB, DuckLake or Singer.
 
 - **No per-connector code**: authentication, paging, retries, rate limits and incremental state are configuration.
 - **Connectors on demand** from the StreamWright hub: `sw connectors -i <name>`.

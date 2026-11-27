@@ -83,7 +83,7 @@ jobs:
         run: streamwright validate --strict --format github examples
 
   connectors:
-    name: Connectors and dlt (Python ${{ matrix.python-version }})
+    name: Connectors (Python ${{ matrix.python-version }})
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -103,7 +103,7 @@ jobs:
           spark="git+https://github.com/karthick-jaganathan/streamwright-spark.git@main"
           python -m pip install "./core[serve]" connectors/*/* "streamwright-spark[all] @ $spark" pytest jsonschema \
             responses httpx \
-            pyarrow deltalake "dlt[duckdb]>=1.0" "ruff==0.17.3"
+            pyarrow deltalake "ruff==0.17.3"
 
       - name: Check the connectors are registered
         run: |

@@ -99,13 +99,12 @@ def build_parser():
                      help="run only this stream, or the stream of this export (repeatable; replaces the --config "
                           "file's `streams`); the streams its `from_stream` partitions come from run too, and every "
                           "stream that runs writes all its exports")
-    run.add_argument("--output", default="singer", metavar="singer|jsonl|csv|tsv|parquet|dlt|duckdb|ducklake",
+    run.add_argument("--output", default="singer", metavar="singer|jsonl|csv|tsv|parquet|duckdb|ducklake",
                      help="singer (default): messages on stdout; jsonl:DIR, csv:DIR, tsv:DIR or parquet:DIR: one file "
                           "per export plus state.json, written atomically (parquet: typed columns, zstd); "
-                          "dlt:DESTINATION[:DATASET]: load into a dlt destination (e.g. dlt:duckdb, "
-                          "dlt:bigquery:marketing), which also keeps the state; duckdb:PATH[:SCHEMA] or "
-                          "ducklake:CATALOG[:SCHEMA]: load into a DuckDB file or DuckLake catalog (a file, or "
-                          "postgres:DSN for a Postgres catalog; data files on S3 with STREAMWRIGHT_DUCKLAKE_DATA_PATH)")
+                          "duckdb:PATH[:SCHEMA] or ducklake:CATALOG[:SCHEMA]: load into a DuckDB file or DuckLake "
+                          "catalog (a file, or postgres:DSN for a Postgres catalog; data files on S3 with "
+                          "STREAMWRIGHT_DUCKLAKE_DATA_PATH)")
     run.add_argument("--file-name", metavar="TEMPLATE",
                      help="with --output jsonl:DIR, csv:DIR, tsv:DIR or parquet:DIR: the path of each export's file "
                           "inside DIR, with {{ export }}, {{ source }}, {{ today }} (YYYY-MM-DD), {{ timestamp }} "
