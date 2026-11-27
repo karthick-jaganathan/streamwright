@@ -200,8 +200,9 @@ section has the policies: chunks, unknown outcomes, `state resend|skip`):
   columns are the resource's field paths, with or without its GAQL prefix (`campaign.name` or `name`,
   `campaign.network_settings.target_google_search`); `op` is `create` (default), `update` (needs `resource_name`;
   its update mask is the row's field columns, so with `nulls: clear` a NULL clears a field) or `remove` (reads
-  `resource_name`; needs `allow_remove: true`). Not idempotent: a call cut short is held for you (`on_unknown`).
-  At most 5000 rows per call.
+  `resource_name`; needs `allow_remove: true`), among the actions the operation has (some are update only, e.g.
+  `CampaignConversionGoalService.mutate_campaign_conversion_goals`: `op: update`). Not idempotent: a call cut short is
+  held for you (`on_unknown`). At most 5000 rows per call.
 - `ConversionUploadService.upload_click_conversions` / `upload_call_conversions`,
   `ConversionAdjustmentUploadService.upload_conversion_adjustments`: a row per conversion (`gclid`,
   `conversion_action`, `conversion_date_time`, `conversion_value`, `currency_code`, ...). Google deduplicates
@@ -209,6 +210,12 @@ section has the policies: chunks, unknown outcomes, `state resend|skip`):
 - Arguments: `customer_id` (required), `partial_failure` (default true: a rejected row fails alone, with its Google
   Ads error code, e.g. `DUPLICATE_CAMPAIGN_NAME`), `validate_only` (default false: true checks every row and changes
   nothing - a dry run); any other argument is a request field (vendor argument, e.g. `response_content_type`).
+- Partial failures: Google applies the valid rows and returns one `GoogleAdsFailure`, each error locating its row
+  (`operations[N]`, `conversions[N]`); a failed row's result is empty. A row fails with every error located on it
+  (the first one's code, all the messages with their fields). A row whose result is empty while Google reports a
+  partial failure never counts as applied: it fails with the errors Google did not locate (or the status's message).
+  The few methods without partial failure (`mutate_campaign_conversion_goals`, `mutate_custom_audiences`,
+  `mutate_asset_groups`, ...) apply all their rows or none: a rejection fails them all.
 - Results: each applied row keeps what Google returned (`resource_name`; for uploads the conversion's `gclid`,
   `conversion_action`, ...), shown by `state show`.
 

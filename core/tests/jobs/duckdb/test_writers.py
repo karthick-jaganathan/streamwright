@@ -59,6 +59,22 @@ def test_table_merge_upserts_on_the_primary_key_every_run(tmp_path):
     assert _query(tmp_path, "SELECT * FROM sales.facts ORDER BY id") == [(1, "GB", "z"), (2, "CA", "b"), (3, "US", "c")]
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_a_merge_refuses_data_that_repeats_a_primary_key(tmp_path, existing):
+    output = {"connection": "wh", "table": "facts", "mode": "merge", "primary_key": ["id", "country"]}
+    if existing:
+        _run(_job(tmp_path, output))
+    result = run_job(_job(tmp_path, output, "SELECT * FROM (VALUES (1, 'US', 'x'), (1, 'US', 'y'), (4, 'FR', 'z'), "
+                                            "(4, 'FR', 'w')) t(id, country, v)"))
+    assert result.exit_code != 0
+    assert "primary_key (id, country) is not unique in the data: (" in str(result.error)
+    assert "is in 2 rows; a merge needs one row per key" in str(result.error)
+    if existing:                                                                    # nothing written
+        assert _query(tmp_path, "SELECT * FROM facts ORDER BY id") == [(1, "US", "a"), (2, "CA", "b"), (3, "US", "c")]
+    else:
+        assert _query(tmp_path, "SELECT count(*) FROM information_schema.tables WHERE table_name = 'facts'") == [(0,)]
+
+
 def test_table_append_adds_by_name_and_overwrite_rewrites(tmp_path):
     _run(_job(tmp_path, {"connection": "wh", "table": "t", "mode": "append"}))
     _run(_job(tmp_path, {"connection": "wh", "table": "t", "mode": "append"},

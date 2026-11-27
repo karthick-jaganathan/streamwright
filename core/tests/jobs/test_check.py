@@ -89,6 +89,14 @@ def test_steps_and_outputs_share_one_namespace_and_reserved_names():
         lambda j: j["connections"].update({"Bad-Name": {"provider": "duckdb", "path": "x"}}))
 
 
+def test_a_jobs_name_may_have_dotted_parts_but_its_steps_names_may_not():
+    assert _changed(lambda j: j.update(name="google_ads.upload_conversions")) == []
+    assert _changed(lambda j: j.update(name="a" * 128)) == []
+    for bad in ("google_ads.", ".orders", "a..b", "Orders.x", "a-b", "a.1b", "a" * 129):
+        assert _changed(lambda j, bad=bad: j.update(name=bad)) == [("bad-value", "name")], bad
+    assert ("bad-value", "steps[0].name") in _changed(lambda j: j["steps"][0].update(name="raw.orders"))
+
+
 def test_secrets_only_in_connection_values_and_never_literal():
     assert _changed(lambda j: j["steps"][2].update(sql="SELECT '{{ secrets.token }}'")) == [
         ("secret-placement", "steps[2].sql")]

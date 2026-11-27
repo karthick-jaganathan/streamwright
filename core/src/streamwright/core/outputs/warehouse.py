@@ -47,6 +47,7 @@ from streamwright.core.outputs.staging import canonical as _canonical
 from streamwright.core.outputs.staging import json_path as _json_path
 from streamwright.core.outputs.staging import quote as _quote
 from streamwright.core.outputs.staging import sql_string as _sql_string
+from streamwright.core.runtime.logs.sql import logged
 from streamwright.core.runtime.templates import to_text
 
 __all__ = ["DuckDBOutput", "DuckLakeOutput"]
@@ -287,7 +288,7 @@ class DuckDBOutput(_WarehouseOutput):
         super().__init__(path, schema, source)
 
     def _connect(self, read_only=False):
-        return duckdb.connect(self.path, read_only=read_only)
+        return logged(duckdb.connect(self.path, read_only=read_only), "output")
 
 
 class DuckLakeOutput(_WarehouseOutput):
@@ -318,7 +319,7 @@ class DuckLakeOutput(_WarehouseOutput):
         return exc if masked == text else RuntimeError(masked)
 
     def _connect(self, read_only=False):
-        connection = duckdb.connect(":memory:")
+        connection = logged(duckdb.connect(":memory:"), "output")
         try:
             load_ducklake(connection)
             s3 = self.settings["s3"]

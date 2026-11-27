@@ -16,7 +16,9 @@
 # **************************************************************************/
 
 import datetime
+import io
 import json
+import logging
 import os
 import time
 from decimal import Decimal
@@ -28,6 +30,7 @@ import yaml
 from streamwright.core import cli
 from streamwright.core.engine import sql
 from streamwright.core.engine.runner import SourceError, SourceRunner, partition_key
+from streamwright.core.runtime.logs import LogSetup
 from streamwright.core.sdk.testing import MemoryOutput, page_stream
 
 TODAY = datetime.date(2026, 10, 3)
@@ -396,3 +399,35 @@ def test_step_output_is_json_ready(api, tmp_path, capsys, monkeypatch):
     assert lines[0].startswith("account_id,campaign_id,campaign_name,status,date,clicks")
     assert lines[1].startswith("a1,11,O'Brien,active,2026-10-02,40,1000,12.35,0.04,USD")
     assert json.loads((out / "state.json").read_text())["bookmarks"]["performance"]
+
+
+def test_a_steps_table_is_replaced_in_one_statement_and_gone_when_its_query_fails():
+    stream = io.StringIO()
+    setup = LogSetup(None, "text", [("streamwright.sql", logging.INFO)], None, stream=stream)
+    sandbox = sql.Sandbox()
+    try:
+        sandbox.create_empty("t", [("a", "INTEGER")])
+        sandbox.create_empty("t", [("b", "VARCHAR")])                      # replaced, not added to
+        assert sandbox.table_columns("t") == [("b", "VARCHAR")]
+        sandbox.materialize("t", "SELECT 1 AS n")
+        sandbox.materialize("t", "SELECT 2 AS n UNION ALL SELECT 3 AS n")
+        assert sandbox.connection.execute("SELECT count(*) FROM t").fetchone() == (2,)
+        assert " DROP " not in stream.getvalue()                            # CREATE OR REPLACE: one statement each
+        with pytest.raises(sql.SqlError, match="missing"):
+            sandbox.materialize("t", "SELECT * FROM missing")
+        with pytest.raises(sql.SqlError):                                    # gone, not holding the earlier rows
+            sandbox.table_columns("t")
+        # page mode: a page whose second step fails leaves that step without a table, not with the last page's rows
+        sandbox.create_raw("raw")
+        scope = {"config": {}, "today": None}
+        steps = [("first", "SELECT record FROM raw", None, None), ("second", "SELECT record FROM raw", None, None)]
+        sandbox.run_page("raw", [{"n": 1}], scope, steps)
+        failing = [steps[0], ("second", "SELECT record FROM raw, missing", None, None)]
+        with pytest.raises(sql.SqlError, match="missing"):
+            sandbox.run_page("raw", [{"n": 2}, {"n": 3}], scope, failing)
+        assert sandbox.connection.execute("SELECT count(*) FROM first").fetchone() == (2,)
+        with pytest.raises(sql.SqlError):
+            sandbox.table_columns("second")
+    finally:
+        sandbox.close()
+        setup.close()

@@ -23,10 +23,11 @@ from types import MappingProxyType
 
 import pytest
 
+from streamwright.core.cli import main as cli_main
 from streamwright.core.jobs.apply import delivery
-from streamwright.core.jobs.duckdb.cli import main
 from streamwright.core.jobs.duckdb.engine import run_job
 from streamwright.core.jobs.duckdb.plugin import JOB_ENGINE
+from streamwright.core.jobs.duckdb.results import describe_output
 from streamwright.core.jobs.state import open_sqlite
 from streamwright.core.runtime import components
 from streamwright.core.runtime.logs.context import stamp
@@ -119,6 +120,11 @@ def _job(tmp_path, rows_sql, *, call=None, apply=None, **output):
 
 
 FIVE = "SELECT k AS key, 'n' || k AS name FROM range(5) t(k) ORDER BY k"
+
+
+def _state(tmp_path, action, *args):
+    """`streamwright state ACTION --url ... ARGS` on the job's state database."""
+    return cli_main(["state", action, "--url", "sqlite:///%s" % (tmp_path / "state.db"), *args])
 
 
 def _outbox(tmp_path):
@@ -226,6 +232,21 @@ def test_a_call_the_vendor_rejects_fails_its_rows_without_holding_them(tmp_path,
         ("applied", None), ("applied", None), ("failed", "PERMISSION_DENIED"), ("failed", "PERMISSION_DENIED"),
         ("applied", None)]
     assert (result.outputs, result.rejected) == ({"push": 3}, {"push": 2})   # what a --summary and serve report
+    assert result.apply_outputs == {"push"}
+    assert describe_output("push", 3, result.rejected, result.apply_outputs) == "push 3 applied, 2 rejected"
+    assert describe_output("table", 7, {}, result.apply_outputs) == "table 7 rows"
+
+
+def test_state_list_shows_an_apply_output_s_rows_in_the_outbox_not_as_written(tmp_path, ledger, capsys):
+    ledger.reject_call = 2
+    assert _run(_job(tmp_path, FIVE, apply={"on_row_error": "continue"})).exit_code == 0
+    capsys.readouterr()
+    assert _state(tmp_path, "list") == 0
+    header, row = capsys.readouterr().out.splitlines()
+    assert "WRITTEN" in header and "OUTBOX" in header and "ROWS" not in header
+    assert " 0        3 applied, 2 failed" in row          # nothing written to a table; the rows' outcomes
+    assert _state(tmp_path, "list", "--json") == 0
+    assert json.loads(capsys.readouterr().out)["outbox"] == {"applied": 3, "failed": 2}
 
 
 def test_a_cut_short_call_is_held_for_a_non_idempotent_operation_then_resent_or_skipped(tmp_path, ledger, capsys):
@@ -236,16 +257,15 @@ def test_a_cut_short_call_is_held_for_a_non_idempotent_operation_then_resent_or_
     assert [status for _, status, *_ in _outbox(tmp_path)] == ["applied", "applied", "in_flight", "in_flight",
                                                               "pending"]
     held = _run(job, job_key="sync-1")
-    assert held.exit_code == 1 and "outcome is unknown" in held.error and "state resend" in held.error
+    assert held.exit_code == 1 and "outcome is unknown" in held.error
+    assert "`streamwright state resend --url URL ledger_sync-00000001`" in held.error
     assert len(ledger.calls) == 2                                          # nothing sent while held
 
     batch = open_sqlite(str(tmp_path / "state.db")).list_batches("ledger_sync")[0]["batch_id"]
-    path = tmp_path / "job.yaml"
-    path.write_text(json.dumps(job))
-    assert main(["state", "show", str(path), batch]) == 0
+    assert _state(tmp_path, "show", batch) == 0
     shown = json.loads(capsys.readouterr().out)
     assert [row["status"] for row in shown["outbox"]] == ["applied", "applied", "in_flight", "in_flight", "pending"]
-    assert main(["state", "resend", str(path), batch]) == 0
+    assert _state(tmp_path, "resend", batch) == 0
     assert "2 held row(s) will be sent again" in capsys.readouterr().out
     resumed = _run(job, job_key="sync-1")
     assert resumed.exit_code == 0, resumed.error
@@ -340,10 +360,8 @@ def test_skip_marks_held_rows_failed_and_the_next_run_carries_on(tmp_path, ledge
     ledger.crash_on_call = 1
     job = _job(tmp_path, FIVE, apply={"on_row_error": "continue"})
     assert _run(job, job_key="sync-2").exit_code == 1
-    path = tmp_path / "job.yaml"
-    path.write_text(json.dumps(job))
     batch = open_sqlite(str(tmp_path / "state.db")).list_batches("ledger_sync")[0]["batch_id"]
-    assert main(["state", "skip", str(path), batch, "--output", "push"]) == 0
+    assert _state(tmp_path, "skip", batch, "--output", "push") == 0
     assert _run(job, job_key="sync-2").exit_code == 0
     assert [(status, code) for _, status, _, _, code in _outbox(tmp_path)] == [
         ("failed", "UNKNOWN_OUTCOME")] * 2 + [("applied", None)] * 3

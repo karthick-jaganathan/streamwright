@@ -23,6 +23,9 @@ Logs go to stderr; stdout is for Singer messages. streamwright's loggers:
 - `streamwright.network` (WARNING by default, so quiet): INFO, one line per API call - HTTP requests and connector SDK
   calls - and the throttling waits; WARNING, retries; DEBUG, the HTTP headers (credentials masked) and bodies.
 - `streamwright.output`: the files and tables written.
+- `streamwright.sql` (WARNING by default, so quiet): INFO, one line per SQL statement streamwright runs (job steps and
+  outputs, source transforms, DuckDB-backed connector reads; the state store's on `streamwright.sql.state`) and how long
+  it took; DEBUG, the complete SQL, parameter values written in (but not under `streamwright serve`).
 SDK loggers keep their own names (ConnectorDefinition.loggers lists a connector's, for `streamwright connectors`).
 
 - LogSetup: one command's logging - streamwright's stderr handler in the text or JSON format (--log-format) or a
@@ -34,7 +37,7 @@ SDK loggers keep their own names (ConnectorDefinition.loggers lists a connector'
   logs each stream's start and end, completed windows and partitions, the progress of long reads and the run's end,
   and gives the run summary that --summary FILE writes.
 
-Modules: lines (loggers, levels, fields), redaction, network (network lines), formatting (JSON lines),
+Modules: lines (loggers, levels, fields), redaction, network (network lines), sql (SQL lines), formatting (JSON lines),
 record_factory, handlers and setup (LogSetup), metrics (RunMetrics) and summary (write_summary).
 """
 
@@ -49,6 +52,7 @@ from streamwright.core.runtime.logs.lines import (
     NETWORK,
     PROGRESS_PAGES,
     PROGRESS_SECONDS,
+    SQL,
     TEXT_FORMAT,
     describe,
     fields,
@@ -71,6 +75,7 @@ __all__ = [
     "NETWORK",
     "PROGRESS_PAGES",
     "PROGRESS_SECONDS",
+    "SQL",
     "TEXT_FORMAT",
     "JsonFormatter",
     "LogSetup",

@@ -19,7 +19,7 @@
 
 from dataclasses import dataclass, field
 
-__all__ = ["RunResult", "apply_counts", "combine_passes"]
+__all__ = ["RunResult", "apply_counts", "combine_passes", "describe_output", "output_counts"]
 
 
 @dataclass
@@ -38,6 +38,26 @@ class RunResult:
     passes: list[dict] = field(default_factory=list)                  # runtime.fan_out: one entry per item
     fan_out: dict | None = None                                       # runtime.fan_out's over and as
     rejected: dict[str, int] = field(default_factory=dict)            # apply output -> rows the vendor rejected
+    # the apply outputs: their `outputs` count is the rows applied (not written), `rejected` the rows refused
+    apply_outputs: set[str] = field(default_factory=set)
+
+
+def output_counts(name, rows, rejected, apply_outputs):
+    """
+    What an output did, for a summary: a table or file output's {rows} written; an apply output's {rows, applied,
+    rejected} (rows: applied, kept for the readers that know only `rows`).
+    """
+    if name in apply_outputs:
+        return {"rows": rows, "applied": rows, "rejected": rejected.get(name, 0)}
+    return {"rows": rows, **({"rejected": rejected[name]} if rejected.get(name) else {})}
+
+
+def describe_output(name, rows, rejected, apply_outputs):
+    """An output's part of a run's recap line: `orders 120 rows`, `upload 2 applied, 2 rejected`."""
+    if name in apply_outputs:
+        return "%s %s applied%s" % (name, "?" if rows is None else rows,
+                                    ", %d rejected" % rejected[name] if rejected.get(name) else "")
+    return "%s %s rows" % (name, "?" if rows is None else rows)
 
 
 def apply_counts(counts):
@@ -56,6 +76,7 @@ def combine_passes(job_name, outcomes, fan_out, redact):
             total.plan = total.plan or result.plan
             total.batches.extend(result.batches)
             total.skipped.update(result.skipped)
+            total.apply_outputs.update(result.apply_outputs)
             for name, rows in result.rejected.items():
                 total.rejected[name] = total.rejected.get(name, 0) + rows
             for name, rows in result.outputs.items():
@@ -63,7 +84,8 @@ def combine_passes(job_name, outcomes, fan_out, redact):
                     total.outputs.get(name, 0) + rows
                 total.locations.setdefault(name, []).extend(result.locations.get(name, ()))
             entry.update(status="skipped" if result.lock_skipped and not result.exit_code else outcome.status,
-                         job_ids=list(result.batches), outputs=dict(result.outputs))
+                         job_ids=list(result.batches), outputs=dict(result.outputs),
+                         **({"rejected": dict(result.rejected)} if result.rejected else {}))
         error = redact("%s: %s" % (type(outcome.error).__name__, outcome.error)) if outcome.error is not None \
             else result.error if result is not None and result.exit_code else None
         if error:

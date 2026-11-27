@@ -56,6 +56,20 @@ def _merge(con, target, source, *, keys, columns, strategy):
         ", ".join("source.%s" % quote_ident(c) for c in columns)))
 
 
+def _unique_keys(con, source, keys, output):
+    """
+    Refuses a merge whose data repeats a primary key: DuckDB (from 2.0.1) would insert every repeat of a new key and
+    update an existing key's row once per repeat, in no set order, rather than fail.
+    """
+    key_list = ", ".join(quote_ident(k) for k in keys)
+    repeated = con.execute("SELECT %s, COUNT(*) FROM %s GROUP BY %s HAVING COUNT(*) > 1 LIMIT 1" % (
+        key_list, source, key_list)).fetchall()
+    if repeated:
+        *values, count = repeated[0]
+        raise ValueError("output %s: primary_key (%s) is not unique in the data: (%s) is in %d rows; a merge needs one "
+                         "row per key" % (output, ", ".join(keys), ", ".join(repr(value) for value in values), count))
+
+
 def write_table(context, catalog, merge_strategy, default_schema="main"):
     """Writes context.source into `spec.table` of `catalog`; a missing table is created from the data."""
     if merge_strategy not in MERGE_STRATEGIES:
@@ -64,6 +78,13 @@ def write_table(context, catalog, merge_strategy, default_schema="main"):
     parts = relation_parts(catalog, spec.table, default_schema)
     target = quote_relation(catalog, spec.table, default_schema)
     rows = con.execute("SELECT COUNT(*) FROM %s" % context.source).fetchall()[0][0]
+    if spec.mode == "merge":
+        columns = [d[0] for d in con.execute("SELECT * FROM %s LIMIT 0" % context.source).description]
+        missing = [k for k in spec.primary_key if k not in columns]
+        if missing:
+            raise ValueError("output %s: primary_key column(s) %s are not in the data" % (
+                spec.name, ", ".join(missing)))
+        _unique_keys(con, context.source, list(spec.primary_key), spec.name)
     if not _exists(con, parts):
         con.execute("CREATE TABLE %s AS SELECT * FROM %s" % (target, context.source))
     elif spec.mode == "overwrite":
@@ -71,11 +92,6 @@ def write_table(context, catalog, merge_strategy, default_schema="main"):
     elif spec.mode == "append":
         con.execute("INSERT INTO %s BY NAME SELECT * FROM %s" % (target, context.source))
     elif spec.mode == "merge":
-        columns = [d[0] for d in con.execute("SELECT * FROM %s LIMIT 0" % context.source).description]
-        missing = [k for k in spec.primary_key if k not in columns]
-        if missing:
-            raise ValueError("output %s: primary_key column(s) %s are not in the data" % (
-                spec.name, ", ".join(missing)))
         _merge(con, target, context.source, keys=list(spec.primary_key), columns=columns, strategy=merge_strategy)
     else:
         raise ValueError("output %s: table writes do not support mode %r" % (spec.name, spec.mode))

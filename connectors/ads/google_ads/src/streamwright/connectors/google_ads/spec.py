@@ -49,7 +49,8 @@ def _read(method: str, description: str) -> Operation:
 _APPLY_ARGUMENTS = (
     _CUSTOMER,
     Field("partial_failure", "boolean", default=True,
-          description="a rejected row fails alone (true) or the whole call (false)"),
+          description="a rejected row fails alone (true) or the whole call (false); a method without it (e.g. "
+                      "mutate_campaign_conversion_goals) is all or nothing"),
     Field("validate_only", "boolean", default=False,
           description="Google checks every row and changes nothing (a dry run of the call)"),
 )

@@ -44,8 +44,9 @@ from streamwright.connectors.google_ads.surface import (
 from streamwright.core.sdk import ConnectorError, suggest
 from streamwright.core.sdk.contract import ResolvedConnection
 
-__all__ = ["GoogleAdsConnection", "connect", "customer_id", "error_code", "read_pages", "remember_tokens", "rows",
-           "sdk_version", "supported_versions", "translate_error", "validate_connection"]
+__all__ = ["GoogleAdsConnection", "RejectedCallError", "connect", "customer_id", "error_code", "field_path",
+           "located_message", "operation_index", "read_pages", "remember_tokens", "rows", "sdk_version",
+           "supported_versions", "translate_error", "validate_connection"]
 
 CREDENTIALS: Final = ("developer_token", "client_id", "client_secret", "refresh_token")
 _CUSTOMER_ID: Final = re.compile(r"^[0-9]+$")
@@ -277,6 +278,37 @@ def error_code(error: Any) -> str:
     return getattr(value, "name", str(value))
 
 
+def field_path(elements: Any) -> str:
+    """A GoogleAdsError's field path elements as text: `operations[3].create.name`."""
+    raw = [getattr(element, "_pb", element) for element in elements]       # a slice gives the raw messages
+    return ".".join(element.field_name + ("[%d]" % element.index if element.HasField("index") else "")
+                    for element in raw)
+
+
+def operation_index(error: Any) -> int | None:
+    """The index of the operation (or upload record) a GoogleAdsError is located on; None when it is not located."""
+    elements = error.location.field_path_elements
+    first = getattr(elements[0], "_pb", elements[0]) if elements else None
+    return int(first.index) if first is not None and first.HasField("index") else None
+
+
+def located_message(error: Any) -> str:
+    """Google's message and the field it is about within its operation (`create.manual_cpc`, `gclid`)."""
+    path = field_path(error.location.field_path_elements[1:])
+    return "%s (field: %s)" % (error.message, path) if path else error.message
+
+
+class RejectedCallError(ConnectorError):
+    """
+    A call Google rejected whole (nothing applied) with errors located on its operations: `located` is {operation
+    index: [(error code, message)]}.
+    """
+
+    def __init__(self, message: str, *, located: dict[int, list[tuple[str, str]]], **kwargs: Any):
+        super().__init__(message, **kwargs)
+        self.located = located
+
+
 def _call_details(call: Any) -> tuple[Any, str | None]:
     """(GoogleAdsFailure or None, request ID or None) from a failed gRPC call's trailing metadata."""
     failure = request_id = None
@@ -297,19 +329,26 @@ def _call_details(call: Any) -> tuple[Any, str | None]:
 def _connector_error(status: str | None, failure: Any, request_id: str | None, message: str | None) -> ConnectorError:
     """A ConnectorError from a gRPC status and the Google Ads failure that came with it."""
     codes, details, retry_after = [], [], None
+    located: dict[int, list[tuple[str, str]]] = {}
     for error in (failure.errors if failure is not None else ()):
         code = error_code(error)
         codes.append(code)
-        details.append("%s: %s" % (code, error.message))
+        path = field_path(error.location.field_path_elements)
+        details.append("%s: %s%s" % (code, error.message, " (%s)" % path if path else ""))
+        index = operation_index(error)
+        if index is not None:
+            located.setdefault(index, []).append((code, located_message(error)))
         delay = error.details.quota_error_details.retry_delay
         seconds = delay.total_seconds() if hasattr(delay, "total_seconds") else getattr(delay, "seconds", 0)
         if seconds:
             retry_after = max(retry_after or 0, seconds)
     # whether it is retried is configuration: the spec's `retry_codes`, or a stream's `retry.codes`, matched against
     # every Google Ads error name and the gRPC status
-    text = "; ".join(details) or message or status or "unknown error"
-    return ConnectorError("google_ads: %s%s" % (text, " (request id %s)" % request_id if request_id else ""),
-                          codes=(*codes, status), retry_after=retry_after)
+    text = "google_ads: %s%s" % ("; ".join(details) or message or status or "unknown error",
+                                 " (request id %s)" % request_id if request_id else "")
+    if located:
+        return RejectedCallError(text, located=located, codes=(*codes, status), retry_after=retry_after)
+    return ConnectorError(text, codes=(*codes, status), retry_after=retry_after)
 
 
 def translate_error(exc: Exception) -> ConnectorError | None:

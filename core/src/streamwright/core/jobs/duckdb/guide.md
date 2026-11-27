@@ -2,7 +2,10 @@
 
 `kind: DuckDBJob` runs a job in an in-process DuckDB: steps build temp views and tables, outputs write them. It
 uses the engine-neutral jobs framework of `streamwright.core.jobs` (the one SparkJob uses): the same manifest
-loading, typed inputs, checker, JSON schema, state store, batch runner and write rules.
+loading, typed inputs, checker, JSON schema, state store, batch runner and write rules. A job's `name` (its name in
+the state store and in its batch ids) is lowercase letters, digits and `_`, in dotted parts if you like:
+`google_ads.upload_conversions` (at most 128 characters). Step, output and connection names have no dots: they name
+tables.
 
 ## Commands
 `streamwright validate|plan|run JOB` route `kind: DuckDBJob` files to this engine (`streamwright duckdb ...` is the
@@ -18,18 +21,18 @@ policy skipped too), 1 invalid job, failed run or lock held, 2 usage or input er
   run: see Delivery);
   `--summary` reports `status` `ok`, `skipped` or `failed`; `--job-key` overrides `runtime.state.job_key`. `--set`
   takes lists as `a,b,c`. The batch modes and `--max-messages` are for jobs that consume a broker (see Brokers). A
-  run only checks the state tables: create them once with `streamwright duckdb state migrate JOB`, or let the run do
+  run only checks the state tables: create them once with `streamwright state migrate --url URL`, or let the run do
   it with `--apply-state-migrations` (see State, scopes and locks: Migrations).
-- `streamwright duckdb state ACTION JOB [--overlay F] [--config F] [--set ...] [--secrets F]`: `list [--limit N] [--scope TEXT] [--json]`, `status`,
-  `show JOB_ID` (with its outbox: events and apply rows, their outcomes), `retry JOB_ID [--no-run]`, `abandon
-  JOB_ID`, `resend|skip JOB_ID [--output NAME]` (apply rows with an unknown outcome: see Apply outputs), `leases
-  [--json]`, `purge [--older-than 30d] [--scope TEXT]`, `migrate [--dry-run]`, `check` (see State, scopes and locks);
-  `streamwright state migrate|show|check --url URL`: the state tables of a database URL.
-- Options belong to their command: a source's `--stream` or `--output` given to a job, `--strict` or `--log-level`
-  to a state action other than `retry` (which runs the job and takes its `--allow-connector` and logging options) is
-  a usage error (exit 2).
+- `streamwright state ACTION --url URL` (or `$STREAMWRIGHT_STATE_URL`) looks after the batches of every job, from
+  its state database alone - no job manifest, no config (see State, scopes and locks: Operating): `list [--job NAME]
+  [--scope TEXT] [--status S] [--request-id ID] [--limit N] [--json]`, `show (JOB_ID | --request-id ID)` (with its
+  outbox: events and apply rows, their outcomes; `--request-id`: the run's `req=sw_...` of its log lines), `retry |
+  abandon JOB_ID`, `resend | skip JOB_ID [--output NAME]` (apply rows with an unknown outcome: see Apply outputs),
+  `leases --job NAME`, `purge --job NAME [--older-than 30d] [--scope TEXT]`, `migrations`, `migrate [--dry-run]`,
+  `check`.
+- Options belong to their command: a source's `--stream` or `--output` given to a job is a usage error (exit 2).
 - The live help of every command and option: `streamwright <command> --help` (MCP: `get_cli_reference`, e.g.
-  `duckdb run`, `duckdb state`, `state migrate`).
+  `duckdb run`, `state`, `state list`).
 
 ## Manifest
 - `spec.config` / `spec.secrets`: typed input definitions (`type`, `items`, `required`, `default`), as in a source,
@@ -92,8 +95,8 @@ and scopes, locks and `--state-lock-*` do not apply.
 
 **Migrations.** A run, and every state action, only checks the state tables: while a migration is pending (or the
 tables do not exist yet) it fails (exit 1, `the state tables need migrations: ...`), so the schema changes only when
-you apply it: `streamwright duckdb state migrate JOB` (or `streamwright state migrate --url URL`) as a deployment
-step, and `state check` (exit 1 while one is pending) as its gate. For development, `run --apply-state-migrations` or
+you apply it: `streamwright state migrate --url URL` as a deployment step, and `streamwright state check --url URL`
+(exit 1 while one is pending) as its gate. For development, `run --apply-state-migrations` or
 `runtime.state.apply_migrations: true` (e.g. in a local overlay) let the run create or upgrade them itself. An
 in-memory state (no `runtime.state`, or `sqlite: ":memory:"`) is always created.
 
@@ -151,21 +154,26 @@ length of the state tables' key columns: it keeps MySQL's composite utf8mb4 prim
 bytes; the scope gets 185 because its token is `scope:<scope>`.
 
 **Operating**
-Every `streamwright duckdb state ACTION JOB` takes the job's required config values (`--set`, `--config`), as a run
-does; they select the scope for `status` and `retry`. Only the secrets of the state connection are needed (`retry`,
-which then runs the job, needs them all).
-- `list [--scope client:acme] [--limit N] [--json]`: id, status (`received`, `processing`, `committed`, `acked`,
-  `completed`, `failed`, `abandoned`, `skipped`), sequence, scope, update time, rows and error, newest first, of all
-  scopes unless `--scope`; `status`: the newest batch of the job's scope.
-- `show JOB_ID`: the batch with that job id, as JSON (`job_id`, `sequence`, `scope`, ...): its pinned manifest (`inputs`), lock tokens, rows, duration and output receipts.
-- `retry JOB_ID --set client=acme ...`: give the config values of the batch's scope (another scope is refused); it
-  resumes from the status it failed in, then the job runs its unfinished batches (`--no-run`: only mark it).
-- `abandon JOB_ID`: the batch is given up; its scope runs new batches again.
-- `leases`: every token (`scope:<scope>`, lock tokens) with owner, epoch, expiry and whether it is held.
-- `purge --older-than 30d [--scope TEXT]`: deletes terminal batches and their receipts; sequences are kept.
-- `migrate [--dry-run]` / `check`: create or upgrade the job's state tables, or exit 1 while one is pending.
-- retry and abandon take the batch's tokens, so they fail while a run of its scope holds them. A batch's job id
-  is `<job>-<sequence>` (`<job>-<scope hash>-<sequence>` with a scope).
+`streamwright state ACTION --url URL` works on the state database alone (the URL of `runtime.state`: a sqlite file
+is `sqlite:///path` relative to where you run it, a connection is its `postgresql://` or `mysql://` URL, or set
+`$STREAMWRIGHT_STATE_URL`): no job manifest, no config, for DuckDBJob and SparkJob alike.
+- `list [--job NAME] [--scope client:acme] [--status failed] [--request-id ID] [--limit N] [--json]`: job, job id,
+  status (`received`, `processing`, `committed`, `acked`, `completed`, `failed`, `abandoned`, `skipped`), attempts,
+  scope, the run's request id, update time, rows written (WRITTEN), outbox rows by status (OUTBOX) and error, newest
+  first; `--job NAME --scope S --limit 1` is a scope's newest batch.
+- `show JOB_ID`: the batch with that job id, as JSON (`job`, `job_id`, `sequence`, `scope`, ...): its pinned manifest
+  (`inputs`), lock tokens, rows, duration, output receipts and outbox; `show --request-id sw_...`: the batches of
+  that run, as a JSON list.
+- `retry JOB_ID`: it resumes from the status it failed in at the job's next run, with the values it pinned (run the
+  job to resume it); `abandon JOB_ID`: the batch is given up; its scope runs new batches again.
+- `leases --job NAME`: every token (`scope:<scope>`, lock tokens) with owner, epoch, expiry and whether it is held.
+- `purge --job NAME --older-than 30d [--scope TEXT]`: deletes terminal batches, their receipts and outbox rows;
+  sequences are kept.
+- `migrations` / `migrate [--dry-run]` / `check`: the tables' migrations, applied or pending; apply them; exit 1
+  while one is pending.
+- retry, abandon, resend and skip take the batch's tokens, so they fail while a run of its scope holds them. A
+  batch's job id is `<job>-<sequence>` (`<job>-<scope hash>-<sequence>` with a scope); `--job NAME` picks one when
+  two jobs share a job id.
 
 ## Call steps
 A call step runs a connector call on the driver, once per partition, and loads the records into a temp table in
@@ -335,8 +343,8 @@ outputs:
   `max_wait`.
 - A batch: poll, then run the steps, write the outputs (each with its receipt), compute the publish outputs into the
   batch's outbox, commit, then acknowledge the messages (Kafka commits the offsets, SQS deletes them) and relay the
-  outbox. A batch that fails is not acknowledged: its pinned messages are processed again by `state retry` or the
-  next run, and Kafka redelivers them to the group. Delivery is at least once; an event's dedupe key is
+  outbox. A batch that fails is not acknowledged: its pinned messages are processed again by `streamwright state retry`
+  or the next run, and Kafka redelivers them to the group. Delivery is at least once; an event's dedupe key is
   `job:batch:output` (Kafka: each event's `dedupe-key` header, `job:batch:output:N`).
 - A publish output takes `sql` or `step`, and `operation.arguments` (`destination`; Kafka `key`: the column that keys each
   event; SQS `group_id`); no `mode`, `table` or `path`. Each row is one event (a JSON object), at most
@@ -393,18 +401,20 @@ outputs:
 - **Unknown outcomes.** A call cut short (the run stopped mid-call, or a transient error outlasted the retries)
   leaves its rows in flight. An idempotent operation (one the vendor deduplicates, e.g. conversion uploads) sends
   them again at the next run. Otherwise `on_unknown: hold` stops the run (exit 1) until you check the vendor and run
-  `state resend JOB JOB_ID` (send them again: they may be applied twice) or `state skip JOB JOB_ID` (mark them
-  failed, `UNKNOWN_OUTCOME`); `reconcile` asks the connector what exists, where it can. A non-idempotent
+  `streamwright state resend --url URL JOB_ID` (send them again: they may be applied twice) or
+  `streamwright state skip --url URL JOB_ID` (mark them failed, `UNKNOWN_OUTCOME`); `reconcile` asks the connector what exists, where it can. A non-idempotent
   operation's call is sent once (`policy.retry` does not apply to it): a call that timed out may have been applied,
   so it is never resent within the run.
 - **Failed rows.** Under `on_row_error: fail`, a rejected row fails its batch (exit 1); the next run deals with it
   as `runtime.state.failed_job_policy` says. `abandon` (default) sends nothing again. `retry` sends again only the
   batch's `failed` rows of its `on_row_error: fail` outputs (never an applied row; in-flight rows keep the rules
   above; rows skipped as `UNKNOWN_OUTCOME` stay failed); a row keeps its attempts and last error until then.
-  Rejected again, the batch fails again, retried while `max_job_attempts` allows. `block` waits for `state retry`
-  (which sends every failed row of the batch again, skipped rows excepted) or `state abandon`.
+  Rejected again, the batch fails again, retried while `max_job_attempts` allows. `block` waits for
+  `streamwright state retry` (which sends every failed row of the batch again, skipped rows excepted) or
+  `streamwright state abandon`.
 - **Caps.** `runtime.limits.apply_rows` (100000) caps the rows of one output and batch: a runaway join fails the
-  batch before any call. `state show JOB JOB_ID` lists every row's status, attempts, result and error.
+  batch before any call. `streamwright state show --url URL JOB_ID` lists every row's status, attempts, result and
+  error.
 - **`log:` (apply outputs only).** Once a run has sent a batch's rows of the output, `output NAME: MESSAGE` per row
   of `sql` (one SELECT; default: every row) on `streamwright.output`, up to `max_rows`. `sql` reads a table named
   after the output: its columns, and `outcome` (`status` applied|failed, `error_code`, `error_message`, `result`
@@ -422,7 +432,11 @@ outputs:
   in flight. The output's `policy` defaults to the connection's.
 - **Dry runs** are the vendor's, as an argument of its operation where it has one (google_ads: `validate_only:
   true` checks every row and changes nothing): a job that wants one declares a config input and passes it on.
-- The summary's `outputs` counts the applied rows; a log line per batch says `applied: ... rows=N, failed=M`.
+- The run's recap line says `NAME 3 applied, 2 rejected` for an apply output (`NAME N rows` for a table or file);
+  the `--summary` and serve's run result give it `applied` and `rejected` (and `rows`, the applied rows, as
+  before); a log line per batch says `applied: ... rows=N, failed=M`. `streamwright state list`
+  shows a batch's rows by status in `OUTBOX` (`3 applied, 2 failed`); `WRITTEN` counts only table and file
+  rows.
 
 ## Input payloads
 A job may take its rows from the caller instead of reading them: `spec.input` declares them, `--input FILE` (or `-`
@@ -567,7 +581,8 @@ step, output or lookup at work, and the run's request id (`req=`). JSON lines ca
 ```
 
 Every run gets a new request id (`sw_` and 22 URL-safe characters), the same on all its lines, passes and threads,
-and kept in its batches' metadata (`state show`): grep one id for one run.
+and kept in its batches' metadata: grep one id for one run, and `streamwright state show --url URL --request-id ID`
+shows the batches it made.
 
 ```yaml
 runtime:
@@ -600,9 +615,9 @@ says (`--failed-job-policy` overrides it for one run):
   N`; only with `retry`), each retry a WARNING (`retry: job_id=..., attempt=2 of 3, resumes_from=processing,
   error=...`); then the run stops as with `block`. Right for incremental and broker jobs, where every batch must land.
 - `block`: the run stops (exit 1, `batch ... failed earlier and is not retried (failed job policy block): ...`) until
-  `state retry JOB JOB_ID` (allowed whatever the attempts) or `state abandon JOB JOB_ID`. Right where a person must
-  look at every failure.
-- Other scopes keep running either way. `state list` shows each batch's ATTEMPTS.
+  `streamwright state retry --url URL JOB_ID` (allowed whatever the attempts) or `streamwright state abandon --url URL
+  JOB_ID`. Right where a person must look at every failure.
+- Other scopes keep running either way. `streamwright state list` shows each batch's ATTEMPTS.
 
 ## Execution policy
 Every step and output takes the one execution-policy vocabulary in its `policy:` group (connector contract v1.2 §6a),

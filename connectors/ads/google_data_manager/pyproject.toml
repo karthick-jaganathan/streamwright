@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "streamwright-google-data-manager"
+version = "0.0.1"
+description = "StreamWright - Google Data Manager API connector (conversions and audience ingestion, user lists)"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    {name = "Karthick Jaganathan", email = "kjaganathan.sde@gmail.com"},
+]
+keywords = ["data", "pipeline", "etl", "connector", "google", "data-manager", "conversions", "audiences"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+requires-python = ">=3.11"
+dependencies = [
+    "streamwright~=0.2.0",
+    "google-ads-datamanager>=0.9.5",
+]
+
+[project.urls]
+Homepage = "https://streamwright.net"
+Documentation = "https://docs.streamwright.net/"
+Repository = "https://github.com/karthick-jaganathan/streamwright"
+"Issue Tracker" = "https://github.com/karthick-jaganathan/streamwright/issues"
+
+[project.entry-points."streamwright.connectors"]
+google_data_manager = "streamwright.connectors.google_data_manager:CONNECTOR"
+
+[tool.setuptools]
+# src layout: streamwright and streamwright.connectors are namespace packages shared with the other StreamWright distributions
+package-dir = {"" = "src"}
+packages = ["streamwright.connectors.google_data_manager", "streamwright.connectors.google_data_manager.engines"]
+
+[tool.setuptools.package-data]
+"streamwright.connectors.google_data_manager" = ["guide.md"]

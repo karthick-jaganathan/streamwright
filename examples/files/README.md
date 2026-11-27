@@ -20,7 +20,7 @@ streamwright plan examples/files/jobs/orders/sync.yaml
 streamwright run examples/files/jobs/orders/sync.yaml
 streamwright run examples/files/jobs/orders/sync.yaml \
   --overlay examples/files/jobs/orders/sync.local.yaml --set min_amount_usd=200
-streamwright duckdb state list examples/files/jobs/orders/sync.yaml  # needs runtime.state (see the DuckDBJob guide)
+streamwright state list --url sqlite:///state.db   # the batches, with a runtime.state sqlite (see the DuckDBJob guide)
 ```
 
 The warehouse (`/tmp/orders_analytics.duckdb`) and the export folder (`/tmp/orders_lake`) are set in `jobs/orders/sync.yaml`;

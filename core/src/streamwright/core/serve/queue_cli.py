@@ -23,9 +23,8 @@ can run it anywhere the database is reachable.
 import datetime
 import sys
 
-from streamwright.core.cli.commands.state import migrate
+from streamwright.core.cli.commands.state import migrate, purge_age
 from streamwright.core.cli.help_format import DescriptionFormatter
-from streamwright.core.cli.job_state import purge_age
 from streamwright.core.jobs.state import StateError
 from streamwright.core.serve.config import ServiceError, load_state
 from streamwright.core.serve.queue_store import open_queue

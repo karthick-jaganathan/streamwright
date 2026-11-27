@@ -22,12 +22,12 @@ classifiers = [
 ]
 requires-python = ">=3.11"
 dependencies = [
-    "streamwright~=0.1.17",
+    "streamwright~=0.2.0",
     "confluent-kafka>=2.4",
 ]
 
 [project.optional-dependencies]
-spark = ["streamwright-spark[spark]~=0.1.0"]
+spark = ["streamwright-spark[spark]~=0.2.0"]
 msk-iam = ["aws-msk-iam-sasl-signer-python>=1.0"]
 
 [project.urls]

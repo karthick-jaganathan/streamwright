@@ -243,6 +243,24 @@ class SqlStateStore(EventOperations, LeaseOperations, RequestOperations):
                                                                           [job_name, scope])
         return self._batches(where, (*args, int(limit)), " ORDER BY created_at DESC, sequence DESC LIMIT ?")
 
+    def find_batches(self, *, job_name: str | None = None, batch_id: str | None = None, scope: str | None = None,
+                     status: str | None = None, request_id: str | None = None,
+                     limit: int = 20) -> list[dict[str, Any]]:
+        """
+        The newest batches of any job (read-only, for `streamwright state list|show --url`): by job name, job id, scope,
+        status or the request id of the run that made them; each with its `job_name`.
+        """
+        where, args = ["1 = 1"], []
+        for column, value in (("job_name", job_name), ("job_id", batch_id), ("scope", scope), ("status", status),
+                              (self._dialect.json_text("metadata", "request_id"), request_id)):
+            if value is not None:
+                where.append("%s = ?" % column)
+                args.append(value)
+        rows = self._run(lambda conn: self._x(
+            conn, "SELECT job_name, " + _BATCH_COLUMNS + " FROM {sw_jobs} WHERE " + " AND ".join(where) +
+            " ORDER BY created_at DESC, sequence DESC LIMIT ?", (*args, int(limit))).fetchall())
+        return [dict(self._batch(row[1:]), job_name=row[0]) for row in rows]
+
     def purge_batches(self, job_name: str, older_than: Any, scope: str | None = None, *, chunk: int = 1000) -> int:
         """
         Deletes the completed, abandoned and skipped batches last updated before `older_than` (an aware datetime),
@@ -319,18 +337,20 @@ class SqlStateStore(EventOperations, LeaseOperations, RequestOperations):
             if row is None:
                 raise StateError("batch %s does not exist" % batch_id)
             self._move(conn, lease.job_name, batch_id, row[0], "committed", manifest=manifest)
-            for output, (destination, rows) in sorted(events.items()):
-                for number, payload in enumerate(rows):
-                    self._x(conn, "INSERT INTO {sw_events} (job_name, job_id, target, sequence, destination, payload, "
-                                  "status, sent_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, {json}, 'pending', "
-                                  "NULL, {now}, {now}) "
-                            + self._dialect.conflict_ignore(("job_name", "job_id", "target", "sequence")),
-                            (lease.job_name, batch_id, output, number, destination, _json_text(payload)))
-            for path, header_hash, signature in schema_signatures:
-                self._x(conn, "INSERT INTO {sw_signatures} (job_name, path, hash, signature, created_at, updated_at) "
-                              "VALUES (?, ?, ?, ?, {now}, {now}) "
-                        + self._dialect.conflict_update(("job_name", "path"), ("hash", "signature", "updated_at")),
-                        (lease.job_name, path, header_hash, signature))
+            # a batch's outbox can be large (an apply output's rows): multi-row INSERTs, not a statement per row
+            self._insert_rows(
+                conn, "INSERT INTO {sw_events} (job_name, job_id, target, sequence, destination, payload, status, "
+                      "sent_at, created_at, updated_at)", "(?, ?, ?, ?, ?, {json}, 'pending', NULL, {now}, {now})",
+                [(lease.job_name, batch_id, output, number, destination, _json_text(payload))
+                 for output, (destination, rows) in sorted(events.items()) for number, payload in enumerate(rows)],
+                self._dialect.conflict_ignore(("job_name", "job_id", "target", "sequence")))
+            # the last signature of a path wins, as it would a statement at a time (an upsert takes a key once)
+            latest = {path: (header_hash, signature) for path, header_hash, signature in schema_signatures}
+            self._insert_rows(
+                conn, "INSERT INTO {sw_signatures} (job_name, path, hash, signature, created_at, updated_at)",
+                "(?, ?, ?, ?, {now}, {now})",
+                [(lease.job_name, path, header_hash, signature) for path, (header_hash, signature) in latest.items()],
+                self._dialect.conflict_update(("job_name", "path"), ("hash", "signature", "updated_at")))
 
         self._run(work)
 

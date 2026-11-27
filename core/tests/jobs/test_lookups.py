@@ -28,6 +28,7 @@ import duckdb
 import pytest
 import yaml
 
+from streamwright.core.cli import main as cli_main
 from streamwright.core.jobs.duckdb.cli import main
 from streamwright.core.jobs.lookups import (
     LookupExecNotAllowedError,
@@ -154,8 +155,8 @@ def test_fan_out_runs_each_account_in_its_own_scope_by_client_or_by_id(tmp_path,
     assert "s3cr3t" not in summary.read_text() and "tok-a1" not in capsys.readouterr().err
     assert main(["run", path, "--set", "account_ids=a3", "--allow-lookup-exec"]) == 0       # one account
     assert _rows(tmp_path) == [("a1", "one@x"), ("a2", "two@x"), ("a3", "three@x")]
-    assert main(["state", "list", path]) == 0
-    assert {line.split()[4] for line in capsys.readouterr().out.splitlines()[1:]} == {
+    assert cli_main(["state", "list", "--url", "sqlite:///%s" % (tmp_path / "state.db"), "--json"]) == 0
+    assert {json.loads(line)["scope"] for line in capsys.readouterr().out.splitlines()} == {
         "account:a1", "account:a2", "account:a3"}
     assert main(["run", path, "--set", "client_id=c1"]) == 2                               # no opt-in
     assert "--allow-lookup-exec" in capsys.readouterr().err

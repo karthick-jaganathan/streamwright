@@ -60,7 +60,7 @@ def add_apply_migrations_argument(parser):
     parser.add_argument("--apply-state-migrations", action="store_true",
                         help="create or upgrade the state tables before the run (as runtime.state.apply_migrations: "
                              "true does); without it a pending migration fails the run (exit 1): apply them with "
-                             "`state migrate JOB`")
+                             "`streamwright state migrate --url URL`")
 
 
 def add_job_key_argument(parser, extra=""):
@@ -138,7 +138,7 @@ def add_failed_job_arguments(parser):
                              "runtime.state.failed_job_policy): abandon (default) gives it up, its error kept, and "
                              "runs on; retry resumes it, from where it failed and with its pinned inputs, while it has "
                              "been started fewer than --max-job-attempts times, then stops; block stops the run until "
-                             "`state retry` or `state abandon`")
+                             "`streamwright state retry` or `abandon`")
     parser.add_argument("--max-job-attempts", type=_attempts, metavar="N",
                         help="with policy retry: how many times a failed job may be started in all, the first run "
                              "included (overrides runtime.state.max_job_attempts; default %d)"

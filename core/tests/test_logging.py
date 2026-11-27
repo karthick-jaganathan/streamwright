@@ -43,6 +43,7 @@ from streamwright.core.net.http import Redactor, error_excerpt
 from streamwright.core.runtime import components, logs, plugins
 from streamwright.core.runtime.components import ConnectorContext
 from streamwright.core.runtime.logs import LogSetup, RunMetrics, redaction
+from streamwright.core.runtime.logs import sql as sql_lines
 from streamwright.core.runtime.logs.handlers import ScrubFilter
 from streamwright.core.sdk.contract import ConnectorDefinition, Field, Operation
 from streamwright.core.sdk.testing import FakeClock, MemoryOutput, page_stream
@@ -273,14 +274,18 @@ def test_text_lines_and_the_default_levels(api, tmp_path, monkeypatch, capsys):
 def test_the_levels_of_the_streamwright_loggers():
     streamwright = logging.getLogger("streamwright")
     with logging_to():
-        assert (streamwright.level, logs.NETWORK.level) == (logging.INFO, logging.WARNING)
-    with logging_to(level="DEBUG"):
-        assert (streamwright.level, logs.NETWORK.level) == (logging.DEBUG, logging.WARNING)  # the network stays quiet
+        assert (streamwright.level, logs.NETWORK.level, logs.SQL.level) == (logging.INFO, logging.WARNING,
+                                                                            logging.WARNING)
+    with logging_to(level="DEBUG"):     # the network and SQL loggers stay quiet
+        assert (streamwright.level, logs.NETWORK.level, logs.SQL.level) == (logging.DEBUG, logging.WARNING,
+                                                                            logging.WARNING)
     with logging_to(level="ERROR", loggers=[("some.sdk", logging.DEBUG)]):
-        assert (streamwright.level, logs.NETWORK.level) == (logging.ERROR, logging.ERROR)  # quieter: the network too
+        assert (streamwright.level, logs.NETWORK.level, logs.SQL.level) == (logging.ERROR,) * 3   # quieter: them too
         assert logging.getLogger("some.sdk").level == logging.DEBUG
     with logging_to(loggers=[("streamwright.network", logging.DEBUG), ("root", logging.INFO)]):
         assert (logs.NETWORK.level, logging.getLogger().level) == (logging.DEBUG, logging.INFO)
+    with logging_to(loggers=[("streamwright.sql", logging.INFO)]):
+        assert logs.SQL.level == logging.INFO
     assert (streamwright.level, logs.NETWORK.level, logging.getLogger("some.sdk").level) == (logging.NOTSET,) * 3
     assert logs.level_number("warning") == logging.WARNING and logs.level_number(None) is None
     with pytest.raises(ValueError, match="unknown level 'LOUD'"):
@@ -1121,3 +1126,89 @@ def test_error_bodies_and_job_statuses_are_redacted_before_they_are_cut():
     assert error_excerpt("x" * 290 + "?token=" + KEY, Redactor()) == "x" * 290 + "?token=***"
     assert error_excerpt("y" * 400, redact) == "y" * 300
     assert_no_part_of(KEY, job_summary({"message": "x" * 280 + KEY}, redact))
+
+
+@pytest.mark.parametrize(("sql", "head"), [
+    ('CREATE OR REPLACE TEMP TABLE "orders" AS SELECT 1', "CREATE OR REPLACE TEMP TABLE orders"),
+    ('UPDATE "s"."sw_events" AS t SET status = v.status FROM (VALUES (1)) AS v(x)', "UPDATE s.sw_events"),
+    ('SELECT * FROM (SELECT * FROM "new_campaigns") LIMIT 11', "SELECT FROM new_campaigns"),
+    ("COPY (SELECT * FROM x) TO '/tmp/a.parquet' (FORMAT PARQUET)", "COPY TO '/tmp/a.parquet'"),
+    ("SET threads = 4", "SET threads"),
+    ("SET GLOBAL s3_secret_access_key='v'", "SET s3_secret_access_key"),
+    ("  select\n 1", "SELECT"),
+])
+def test_a_sql_line_says_what_its_statement_does(sql, head):
+    assert sql_lines.statement_head(sql) == head
+
+
+def test_a_quiet_sql_logger_leaves_connections_as_they_are():
+    con = duckdb.connect()
+    with logging_to():
+        assert sql_lines.logged(con, "job") is con
+    with logging_to(loggers=[("streamwright.sql", logging.INFO)]) as (stream, _):
+        wrapped = sql_lines.logged(con, "job")
+        assert wrapped.execute("SELECT ? + 1", [1]).fetchone() == (2,)
+        assert wrapped.cursor().execute("CREATE TABLE t AS SELECT 1 AS a").execute("SELECT a FROM t").fetchall() \
+            == [(1,)]
+        with pytest.raises(duckdb.Error):
+            wrapped.execute("SELECT * FROM missing")
+    lines = [line.split("streamwright.sql: ", 1)[1] for line in stream.getvalue().splitlines()]
+    assert [re.sub(r"\d+(\.\d)? ms", "N ms", line) for line in lines] == [
+        "job: SELECT, N ms, 1 parameter", "job: CREATE TABLE t, N ms", "job: SELECT FROM t, N ms",
+        "job: SELECT FROM missing, failed after N ms (CatalogException)"]
+
+
+@pytest.mark.parametrize(("sql", "parameters", "shown"), [
+    ("SELECT * FROM t WHERE a = ? AND b = '?' AND c = ? -- ?", ["x'y", None],
+     "SELECT * FROM t WHERE a = 'x''y' AND b = '?' AND c = NULL -- ?"),
+    ("SELECT $start::DATE, j->>'$.a' FROM json_each($records::JSON)", {"start": datetime.date(2026, 1, 1),
+                                                                        "records": "[]"},
+     "SELECT '2026-01-01'::DATE, j->>'$.a' FROM json_each('[]'::JSON)"),
+    ("VALUES (?, ?, ?, ?)", [True, 1.5, [1, "a"], 7], "VALUES (TRUE, 1.5, [1, 'a'], 7)"),
+    ("SELECT ?, ?", [1], "SELECT 1, ?"),                                  # a marker without a value stays
+])
+def test_a_sql_line_writes_its_parameters_in(sql, parameters, shown):
+    assert sql_lines.inline(sql, parameters) == shown
+
+
+def test_spark_sql_takes_colon_parameters():
+    assert sql_lines.inline("SELECT :n, a::INT, ':n' FROM t", {"n": 5}, named=":") == "SELECT 5, a::INT, ':n' FROM t"
+
+
+@pytest.mark.parametrize("log_format", ["text", "json"])
+def test_sql_lines_never_show_the_credentials_a_statement_sets(log_format):
+    password = "pa'ss-w0rd-SECRET"
+    con = duckdb.connect()
+    with logging_to(log_format=log_format, loggers=[("streamwright.sql", logging.DEBUG)]) as (stream, _):
+        wrapped = sql_lines.logged(con, "source")
+        with contextlib.suppress(duckdb.Error):
+            wrapped.execute("CREATE TEMPORARY SECRET s (TYPE postgres, PASSWORD ?)", [password])
+        with contextlib.suppress(duckdb.Error):
+            wrapped.execute("CREATE OR REPLACE TEMPORARY SECRET \"x\" (TYPE s3, SECRET 'lit-SECRET-1')")
+        with contextlib.suppress(duckdb.Error):
+            wrapped.execute("SET s3_secret_access_key='set-SECRET-2'")
+        with contextlib.suppress(duckdb.Error):
+            wrapped.execute("ATTACH 'host=h password=attach-SECRET-3' AS pg (TYPE postgres)")
+        wrapped.execute("SELECT 'https://u:url-SECRET-4@h/x' AS a, 1 AS id WHERE id=1")
+    text = stream.getvalue()
+    assert_no_secrets(text, [password, password.replace("'", "''"), "lit-SECRET-1", "set-SECRET-2",
+                             "attach-SECRET-3", "url-SECRET-4"])
+    assert text.count("not shown: it holds credentials") == 3
+    assert "SET s3_secret_access_key" in text and "password=***" in text and "id=1" in text
+
+
+def test_a_redactor_masks_a_secret_inside_a_quoted_sql_literal():
+    assert Redactor(["pa'ss-w0rd"])("PASSWORD 'pa''ss-w0rd'") == "PASSWORD '***'"
+
+
+def test_serve_sql_lines_keep_their_placeholders():
+    con = duckdb.connect()
+    with logging_to(loggers=[("streamwright.sql", logging.DEBUG)]) as (stream, _):
+        wrapped = sql_lines.logged(con, "job")
+        wrapped.execute("SELECT ? AS email", ["someone@example.com"])
+        with sql_lines.sql_values(False):
+            wrapped.execute("SELECT ? AS email", ["other@example.com"])
+        wrapped.executemany("SELECT ?", [["a"], ["b"]])
+    lines = [line.split(": ", 3)[-1] for line in stream.getvalue().splitlines()]
+    assert lines == ["SELECT 'someone@example.com' AS email", "SELECT ? AS email", "SELECT 'a'; SELECT 'b'"]
+    assert "other@example.com" not in stream.getvalue() and ", 2 rows, 2 parameters:" in stream.getvalue()

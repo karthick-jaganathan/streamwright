@@ -312,10 +312,12 @@ def test_a_key_queued_at_once_by_two_requests_is_one_run(queue, monkeypatch):
 
 
 def test_a_run_summary_tells_the_caller_the_rows_a_vendor_rejected():
-    result = RunResult(0, "push", "", ["b1"], {"upload": 3, "files": 10}, rejected={"upload": 2})
-    assert run_summary(result)["outputs"] == [
+    result = RunResult(0, "push", "", ["b1"], {"upload": 3, "files": 10, "sync": 4}, rejected={"upload": 2},
+                       apply_outputs={"upload", "sync"})
+    assert run_summary(result)["outputs"] == [                        # an apply output's rows: applied, rejected
         {"name": "files", "rows": 10, "already_committed": False},
-        {"name": "upload", "rows": 3, "already_committed": False, "rejected": 2}]
+        {"name": "sync", "rows": 4, "applied": 4, "rejected": 0, "already_committed": False},
+        {"name": "upload", "rows": 3, "applied": 3, "rejected": 2, "already_committed": False}]
 
 
 def test_a_busy_scope_never_hides_the_runs_queued_behind_it(queue):

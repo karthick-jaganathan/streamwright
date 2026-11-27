@@ -16,11 +16,13 @@
 # **************************************************************************/
 
 import os
+import urllib.parse
 import uuid
 
 import pytest
 
 PG_DSN = os.environ.get("STREAMWRIGHT_TEST_PG_DSN")
+MYSQL_URL = os.environ.get("STREAMWRIGHT_TEST_MYSQL_URL")      # mysql://user:pass@host:3306/db
 
 
 @pytest.fixture
@@ -33,3 +35,20 @@ def pg_schema():
     yield name
     with psycopg.connect(PG_DSN, autocommit=True) as conn:
         conn.execute('DROP SCHEMA IF EXISTS "%s" CASCADE' % name)
+
+
+@pytest.fixture
+def mysql_database():
+    """A throw-away MySQL database name (dropped afterwards); skips without STREAMWRIGHT_TEST_MYSQL_URL."""
+    if not MYSQL_URL:
+        pytest.skip("set STREAMWRIGHT_TEST_MYSQL_URL to run MySQL tests")
+    pymysql = pytest.importorskip("pymysql")
+    name = "ws_j_%s" % uuid.uuid4().hex[:12]
+    yield name
+    parsed = urllib.parse.urlparse(MYSQL_URL)
+    conn = pymysql.connect(host=parsed.hostname, port=parsed.port or 3306, user=urllib.parse.unquote(parsed.username),
+                           password=urllib.parse.unquote(parsed.password or ""), autocommit=True)
+    try:
+        conn.cursor().execute("DROP DATABASE IF EXISTS `%s`" % name)
+    finally:
+        conn.close()

@@ -23,12 +23,22 @@ held rows and sending rejected rows again when their batch is retried.
 from collections.abc import Sequence
 from typing import Any
 
+from streamwright.core.jobs.state.dialects import RowUpdate
 from streamwright.core.jobs.state.sql import SqlBase
 from streamwright.core.jobs.state.sql import json_text as _json_text
 from streamwright.core.jobs.state.sql import json_value as _json_value
 from streamwright.core.jobs.types import Lease
 
 __all__ = ["EventOperations"]
+
+# apply rows' outcomes, a statement per chunk of rows (record_event_outcomes): (sequence, status, result, code, message)
+_OUTCOMES = RowUpdate(
+    table="{sw_events}", key="sequence",
+    columns=(("sequence", "{bigint}"), ("status", "?"), ("result", "{json}"), ("error_code", "?"),
+             ("error_message", "?")),
+    assignments=(("status", "v.status"), ("result", "v.result"), ("error_code", "v.error_code"),
+                 ("error_message", "v.error_message"), ("sent_at", "{now}"), ("updated_at", "{now}")),
+    where="t.job_name = ? AND t.job_id = ? AND t.target = ?")
 
 
 class EventOperations(SqlBase):
@@ -61,12 +71,24 @@ class EventOperations(SqlBase):
                  "payload": _json_value(row[4]), "status": row[5], "attempts": int(row[6] or 0)} for row in rows]
 
     def list_events(self, job_name: str, batch_id: str) -> list[dict[str, Any]]:
-        """A batch's outbox rows with their status and outcome (state show)."""
+        """A batch's outbox rows with their status and outcome (`streamwright state show`)."""
         rows = self._run(lambda conn: self._x(
             conn, "SELECT target, sequence, status, attempts, result, error_code, error_message FROM {sw_events} "
                   "WHERE job_name = ? AND job_id = ? ORDER BY target, sequence", (job_name, batch_id)).fetchall())
         return [{"output_name": row[0], "event_sequence": int(row[1]), "status": row[2], "attempts": int(row[3] or 0),
                  "result": _json_value(row[4]), "error_code": row[5], "error_message": row[6]} for row in rows]
+
+    def count_events(self, job_name: str, batch_ids: Sequence[str]) -> dict[str, dict[str, int]]:
+        """{job id: {status: rows}} of batches' outbox rows (apply rows and events), for `streamwright state list`."""
+        if not batch_ids:
+            return {}
+        rows = self._run(lambda conn: self._x(
+            conn, "SELECT job_id, status, COUNT(*) FROM {sw_events} WHERE job_name = ? AND job_id IN (%s) "
+                  "GROUP BY job_id, status" % self._marks(batch_ids), (job_name, *batch_ids)).fetchall())
+        found: dict[str, dict[str, int]] = {}
+        for batch_id, status, count in rows:
+            found.setdefault(batch_id, {})[status] = int(count)
+        return found
 
     def mark_events_in_flight(self, lease: Lease, batch_id: str, output_name: str,
                               event_sequences: Sequence[int]) -> None:
@@ -79,7 +101,11 @@ class EventOperations(SqlBase):
         """Stores apply rows' outcomes: (sequence, status applied|failed, result, error code, error message)."""
         def work(conn):
             self._check(conn, lease)
-            for number, status, result, code, message in outcomes:
+            rows = [(int(number), status, None if result is None else _json_text(result), code, message)
+                    for number, status, result, code, message in outcomes]
+            if self._update_rows(conn, _OUTCOMES, (lease.job_name, batch_id, output_name), rows):
+                return
+            for number, status, result, code, message in outcomes:     # a database without UPDATE ... FROM
                 self._x(conn, "UPDATE {sw_events} SET status = ?, result = {json}, error_code = ?, error_message = ?, "
                               "sent_at = {now}, updated_at = {now} "
                               "WHERE job_name = ? AND job_id = ? AND target = ? AND sequence = ?",
@@ -112,19 +138,12 @@ class EventOperations(SqlBase):
     def _update_events(self, lease, batch_id, output_name, event_sequences, *, assignments, args=()):
         def work(conn):
             self._check(conn, lease)
-            for number in event_sequences:
-                self._x(conn, "UPDATE {sw_events} SET %s WHERE job_name = ? AND job_id = ? AND target = ? "
-                              "AND sequence = ?" % assignments,
-                        (*args, lease.job_name, batch_id, output_name, int(number)))
+            self._update_in(conn, "UPDATE {sw_events} SET %s WHERE job_name = ? AND job_id = ? AND target = ?"
+                            % assignments, (*args, lease.job_name, batch_id, output_name), "sequence",
+                            [int(number) for number in event_sequences])
 
         self._run(work)
 
     def mark_events_sent(self, lease: Lease, batch_id: str, output_name: str, event_sequences: Sequence[int]) -> None:
-        def work(conn):
-            self._check(conn, lease)
-            for number in event_sequences:
-                self._x(conn, "UPDATE {sw_events} SET status = 'sent', sent_at = {now}, updated_at = {now} "
-                              "WHERE job_name = ? AND job_id = ? AND target = ? AND sequence = ?",
-                        (lease.job_name, batch_id, output_name, int(number)))
-
-        self._run(work)
+        self._update_events(lease, batch_id, output_name, event_sequences,
+                            assignments="status = 'sent', sent_at = {now}, updated_at = {now}")

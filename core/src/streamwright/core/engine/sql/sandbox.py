@@ -17,6 +17,7 @@
 
 """Sandbox: the locked-down embedded DuckDB a stream's SQL steps run in."""
 
+import contextlib
 import json
 import re
 import shutil
@@ -35,7 +36,6 @@ from streamwright.core.engine.sql.tables import (
     TIMEOUT,
     TRANSFORM_TIMEOUT,
     SqlError,
-    _checked,
     _identifier,
     _json_text,
     _message,
@@ -43,6 +43,7 @@ from streamwright.core.engine.sql.tables import (
     _quoted,
 )
 from streamwright.core.engine.sql.types import _decode, _plain
+from streamwright.core.runtime.logs.sql import logged
 from streamwright.core.runtime.templates import to_json
 from streamwright.core.sql.analysis import query_references
 
@@ -76,20 +77,22 @@ class Sandbox:
             config = dict(LIMITS, enable_external_access=False, autoinstall_known_extensions=False,
                           autoload_known_extensions=False, python_enable_replacements=False,
                           temp_directory=self.folder)
-            self.connection = duckdb.connect(":memory:", config=config)
+            # its setup, parse checks and DESCRIBEs run unlogged (_quiet): streamwright.sql shows the work on data
+            self._quiet = duckdb.connect(":memory:", config=config)
+            self.connection = logged(self._quiet, "transform")
         except Exception:
             shutil.rmtree(self.folder, ignore_errors=True)
             raise
-        self.denied = set(DENIED_FUNCTIONS) | {row[0] for row in self.connection.execute(
+        self.denied = set(DENIED_FUNCTIONS) | {row[0] for row in self._quiet.execute(
             "SELECT DISTINCT function_name FROM duckdb_functions() WHERE function_type = 'macro' "
             "AND regexp_matches(macro_definition, '\\b(select|from)\\b', 'i')").fetchall()}
         # the built-in views a query reaches without a schema (pg_settings, duckdb_tables, ...): no WITH query,
         # request or step can take their names, so a name the query may read is never one of them instead
-        self.relations = {row[0].lower() for row in self.connection.execute(
+        self.relations = {row[0].lower() for row in self._quiet.execute(
             "SELECT view_name FROM duckdb_views() WHERE schema_name IN ('main', 'pg_catalog') "
             "UNION SELECT table_name FROM duckdb_tables() WHERE schema_name IN ('main', 'pg_catalog')").fetchall()}
-        self.connection.execute("SET TimeZone = 'UTC'")  # timestamps with time zones are written in UTC
-        self.connection.execute("SET lock_configuration = true")
+        self._quiet.execute("SET TimeZone = 'UTC'")  # timestamps with time zones are written in UTC
+        self._quiet.execute("SET lock_configuration = true")
 
     def close(self):
         try:
@@ -126,7 +129,8 @@ class Sandbox:
             thread.join()  # no interrupt can reach the next query
 
     def _execute(self, sql, parameters=None):
-        return self.connection.execute(sql, parameters) if parameters else self.connection.execute(sql)
+        """A planning query (describe): unlogged, as the sandbox's other introspection."""
+        return self._quiet.execute(sql, parameters) if parameters else self._quiet.execute(sql)
 
     def parse(self, sql, tables):
         """
@@ -179,7 +183,7 @@ class Sandbox:
 
     def tree(self, query):
         """The parse tree of a query, as DuckDB serializes it (json_serialize_sql)."""
-        tree = json.loads(self.connection.execute("SELECT json_serialize_sql($query)", {"query": query}).fetchone()[0])
+        tree = json.loads(self._quiet.execute("SELECT json_serialize_sql($query)", {"query": query}).fetchone()[0])
         if tree.get("error"):
             raise SqlError("%s (write the query as a SELECT)" % tree.get("error_message", "the query cannot be read"))
         return tree
@@ -228,11 +232,10 @@ class Sandbox:
         Gives the table `name` these (name, type) columns if DuckDB typed it otherwise: a step whose parameters are
         plain casts gets an INTEGER column where a null value folded an expression into an untyped NULL.
         """
-        if [(row[0], row[1]) for row in self.connection.execute("DESCRIBE %s" % _quoted(name)).fetchall()] == list(
+        if [(row[0], row[1]) for row in self._quiet.execute("DESCRIBE %s" % _quoted(name)).fetchall()] == list(
                 columns):
             return
-        self.connection.execute('DROP TABLE IF EXISTS "streamwright conform"')
-        self.connection.execute('CREATE TABLE "streamwright conform" AS SELECT %s FROM %s' % (", ".join(
+        self.connection.execute('CREATE OR REPLACE TABLE "streamwright conform" AS SELECT %s FROM %s' % (", ".join(
             "CAST(%s AS %s) AS %s" % (_identifier(column), kind, _identifier(column)) for column, kind in columns),
             _quoted(name)))
         self.connection.execute("DROP TABLE %s" % _quoted(name))
@@ -241,8 +244,7 @@ class Sandbox:
     def materialize(self, name, query, parameters=None, columns=None, timeout=TRANSFORM_TIMEOUT):
         """Runs a step's query once, into the table `name` (replaced); with `columns`, of these types (_conform)."""
         def work():
-            self.connection.execute("DROP TABLE IF EXISTS %s" % _quoted(name))
-            self.connection.sql(query, params=parameters or None).create(_checked(name))
+            self._replace(name, query, parameters)
             if columns is not None:
                 self._conform(name, columns)
         self._timed(work, timeout)
@@ -260,8 +262,7 @@ class Sandbox:
             self._insert(request, records, scope)
             for name, query, parameters, columns in steps:
                 running[:] = [name]
-                self.connection.execute("DROP TABLE IF EXISTS %s" % _quoted(name))
-                self.connection.sql(query, params=parameters or None).create(_checked(name))
+                self._replace(name, query, parameters)
                 if columns is not None:
                     self._conform(name, columns)
                 if self.connection.execute("SELECT count(*) FROM %s" % _quoted(name)).fetchone()[0] > self.max_rows:
@@ -275,11 +276,11 @@ class Sandbox:
 
     def create_empty(self, name, columns):
         """Creates an empty table with known columns (replacing a table of that name)."""
-        self.drop_table(name)
         try:
-            self.connection.execute("CREATE TABLE %s (%s)" % (
+            self.connection.execute("CREATE OR REPLACE TABLE %s (%s)" % (
                 _quoted(name), ", ".join("%s %s" % (_identifier(column), kind) for column, kind in columns)))
         except self.duckdb.Error as exc:
+            self._forget(name)
             raise SqlError(_message(exc)) from exc
 
     def create_raw(self, name):
@@ -299,6 +300,22 @@ class Sandbox:
     def add_raw(self, name, records, scope):
         """Adds one page of records to the request table `name` (see create_raw)."""
         self._timed(lambda: self._insert(name, records, scope))
+
+    def _replace(self, name, query, parameters=None):
+        """
+        The table `name` (re)made from a step's query in one statement. Should the query fail, the table is gone (not
+        left holding an earlier page's rows), as when it was dropped before being made.
+        """
+        try:
+            self.connection.execute("CREATE OR REPLACE TABLE %s AS %s" % (_quoted(name), query), parameters or None)
+        except BaseException:
+            self._forget(name)
+            raise
+
+    def _forget(self, name):
+        """drop_table, on a failure's way out: its own error must not hide the failure."""
+        with contextlib.suppress(Exception):
+            self.connection.execute("DROP TABLE IF EXISTS %s" % _quoted(name))
 
     def drop_table(self, name):
         """Drops a table of the stream if it exists."""
@@ -344,7 +361,7 @@ class Sandbox:
     def table_columns(self, name):
         """The (name, type) columns of table `name`."""
         try:
-            return [(row[0], row[1]) for row in self.connection.execute("DESCRIBE %s" % _quoted(name)).fetchall()]
+            return [(row[0], row[1]) for row in self._quiet.execute("DESCRIBE %s" % _quoted(name)).fetchall()]
         except self.duckdb.Error as exc:
             raise SqlError(_message(exc)) from exc
 

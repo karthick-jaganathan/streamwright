@@ -23,7 +23,7 @@ from urllib.parse import quote, quote_plus
 
 
 class Redactor:
-    """Replaces secret values and their encoded forms in diagnostic text."""
+    """Replaces secret values and their encoded forms (URL, repr, JSON, inside a quoted SQL literal) in text."""
 
     def __init__(self, values=()):
         self.values = []
@@ -36,7 +36,8 @@ class Redactor:
             return
         text = str(value)
         forms = {form for form in (text, text.strip(), quote(text, safe=""), quote_plus(text),
-                                      repr(text)[1:-1], json.dumps(text)[1:-1]) if len(form) >= 4}
+                                      repr(text)[1:-1], json.dumps(text)[1:-1], text.replace("'", "''"))
+                 if len(form) >= 4}
         with self._lock:
             if forms - set(self.values):
                 self.values = sorted(set(self.values) | forms, key=lambda form: (-len(form), form))

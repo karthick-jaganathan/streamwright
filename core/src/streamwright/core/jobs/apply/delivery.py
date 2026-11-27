@@ -21,8 +21,8 @@ Delivering apply outputs' rows (honest at-least-once, plan §2.5). The executor'
   1. rows whose action, destructive action or NULLs the output does not allow fail without a call;
   2. each chunk is marked `in_flight` (write-ahead) before its call, and its rows' outcomes are stored after it;
   3. a chunk left `in_flight` (the run stopped mid-call) has an unknown outcome: an idempotent operation sends it
-     again; otherwise `on_unknown: hold` stops for the operator (`state resend` / `state skip`), `reconcile` asks the
-     connector what exists;
+     again; otherwise `on_unknown: hold` stops for the operator (`streamwright state resend` / `skip`), `reconcile`
+     asks the connector what exists;
   4. a call the vendor rejects as a whole fails its rows; a transient failure that outlasts the retries leaves them in
      flight (unknown). A non-idempotent operation's call is sent once, never retried in the run (a call that timed out
      may have been applied): its transient failure leaves the rows in flight for step 3 to decide.
@@ -30,7 +30,7 @@ Delivering apply outputs' rows (honest at-least-once, plan §2.5). The executor'
 The connector context (its retry policy and the output's rate limit) is made once per output and run, so the rate
 limit holds across the batches a run relays.
 
-Rows are never logged; outcomes are kept in the outbox (`state show`).
+Rows are never logged; outcomes are kept in the outbox (`streamwright state show`).
 """
 
 import json
@@ -266,8 +266,9 @@ class Applier:
             log_outcomes(call.log, [(sent.get(outcome[0]), outcome) for outcome in sorted(results, key=_sequence_of)],
                          row_values=self.log_row_values, redact=self.redact, constants={"batch.id": batch_id})
         if counts[FAILED] and call.on_row_error == "fail":
-            raise RowsRejectedError("output %s of batch %s: %d row(s) were rejected (on_row_error: fail); `state show "
-                                    "JOB %s` lists them" % (output, batch_id, counts[FAILED], batch_id), batch_id)
+            raise RowsRejectedError("output %s of batch %s: %d row(s) were rejected (on_row_error: fail); "
+                                    "`streamwright state show --url URL %s` lists them" % (
+                                        output, batch_id, counts[FAILED], batch_id), batch_id)
 
     def _arguments(self, call, pinned):
         """The pinned, rendered arguments as their declared types, checked like a read's (a text "false" fails)."""
@@ -331,8 +332,9 @@ class Applier:
         state, lease, batch_id = target
         if call.on_unknown != "reconcile":
             raise ApplyError("output %s of batch %s: %d row(s) were being applied when a run stopped and %s is not "
-                             "idempotent, so their outcome is unknown: check them in the vendor, then `state resend "
-                             "%s` (send them again) or `state skip %s` (mark them failed)" % (
+                             "idempotent, so their outcome is unknown: check them in the vendor, then `streamwright "
+                             "state resend --url URL %s` (send them again) or `streamwright state skip --url URL %s` "
+                             "(mark them failed)" % (
                                  call.output, batch_id, len(rows), call.operation.name, batch_id, batch_id))
         session, context = self._session(call)
         if not isinstance(session, ReconcilingSession):

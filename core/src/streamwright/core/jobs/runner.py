@@ -35,11 +35,11 @@ A crash anywhere is repaired by the next start: unfinished batches resume from t
 receipt are not rerun; a committed batch is never re-executed), then the outbox is relayed, then new work starts. A
 failed batch is dealt with by the scope's next run, before new work, as runtime.state.failed_job_policy says: abandon
 (the default) gives it up; retry resumes it from the status it failed from while it has been started fewer than
-max_job_attempts times; block (and retry after the last attempt) stops the job until it is retried (`state retry`) or
-abandoned (`state abandon`). A relay failure is reported on its own and never marks a batch failed, except rows an
-apply output rejected under on_row_error: fail (their batch fails); retrying that batch sends again only its failed
-rows of such outputs (never an applied row; in-flight rows keep their recovery rules). The lease is renewed by a
-heartbeat while a batch runs; a worker that lost it stops at its next fenced write (StaleLeaseError).
+max_job_attempts times; block (and retry after the last attempt) stops the job until `streamwright state retry` or
+`abandon`. A relay failure is reported on its own and never marks a batch failed, except rows an apply output rejected
+under on_row_error: fail (their batch fails); retrying that batch sends again only its failed rows of such outputs
+(never an applied row; in-flight rows keep their recovery rules). The lease is renewed by a heartbeat while a batch
+runs; a worker that lost it stops at its next fenced write (StaleLeaseError).
 """
 
 import datetime
@@ -300,8 +300,8 @@ class Runner:
             return None
         reason = policy.refusal(batch)
         if reason:
-            raise RunnerError("batch %s failed earlier and is not retried (%s): retry or abandon it (`state retry` or "
-                              "`state abandon` with its job id); its error: %s" % (name, reason, error))
+            raise RunnerError("batch %s failed earlier and is not retried (%s): `streamwright state retry|abandon "
+                              "--url URL %s` retries or abandons it; its error: %s" % (name, reason, name, error))
         resend = [output for output, call in (self.applier.calls if self.applier else {}).items()
                   if call.on_row_error == "fail"]
         status = self.state.retry_batch(self.lease, name, resend=resend)

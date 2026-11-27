@@ -115,3 +115,36 @@ jobs:
 
       - name: Lint and run tests (the ad connectors too)
         run: make test-all
+
+  state-databases:
+    name: State store on PostgreSQL and MySQL
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env: {POSTGRES_USER: sw, POSTGRES_PASSWORD: sw, POSTGRES_DB: sw}
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U sw" --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8
+        env: {MYSQL_ROOT_PASSWORD: sw, MYSQL_DATABASE: sw}
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd "mysqladmin ping -psw --silent" --health-interval 5s --health-timeout 5s --health-retries 30
+    env:
+      STREAMWRIGHT_TEST_PG_DSN: postgresql://sw:sw@127.0.0.1:5432/sw
+      STREAMWRIGHT_TEST_PG_URL: postgresql://sw:sw@127.0.0.1:5432/sw
+      STREAMWRIGHT_TEST_MYSQL_URL: mysql://root:sw@127.0.0.1:3306/sw
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.11"
+
+      # the state store's SQL per dialect (bulk outbox writes, leases, migrations), which SQLite and DuckDB do not cover
+      - name: Install StreamWright and the database drivers
+        run: python -m pip install ./core pytest "psycopg[binary]" pymysql
+
+      - name: Run the state store tests on every dialect
+        run: python -m pytest core/tests/jobs/state -q

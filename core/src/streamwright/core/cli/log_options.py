@@ -62,13 +62,14 @@ def add_log_options(parser):
     """The logging options of streamwright run and streamwright validate."""
     parser.add_argument("--log-level", type=str.upper, choices=logs.LEVELS, metavar="LEVEL",
                         help="the level of streamwright's loggers (streamwright.source, streamwright.output, ...): "
-                             "%s; default INFO. streamwright.network stays at WARNING (or this level, when higher) "
-                             "unless --log names it"
+                             "%s; default INFO. streamwright.network and streamwright.sql stay at WARNING (or this "
+                             "level, when higher) unless --log names them"
                              % ", ".join(logs.LEVELS))
     parser.add_argument("--log", action="append", default=[], type=_logger_level, metavar="NAME=LEVEL",
                         help="the level of any logger by its name (repeatable; root: the root logger, so every "
                              "logger without a level of its own), e.g. streamwright.network=INFO (a line per API "
-                             "call), streamwright.network=DEBUG (also headers and bodies), "
+                             "call), streamwright.network=DEBUG (also headers and bodies), streamwright.sql=INFO (a "
+                             "line per SQL statement: what ran and how long), streamwright.sql=DEBUG (also the SQL), "
                              "google.ads.googleads.client=DEBUG (an SDK's own logs)")
     parser.add_argument("--log-format", choices=logs.FORMATS,
                         help="text (default): [time] LEVEL logger: message; json: one JSON object per line with time "

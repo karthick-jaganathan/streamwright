@@ -23,11 +23,11 @@ classifiers = [
 requires-python = ">=3.11"
 # DuckDB installs its httpfs extension on the first connect (or ahead of time: INSTALL httpfs)
 dependencies = [
-    "streamwright~=0.1.17",
+    "streamwright~=0.2.0",
 ]
 
 [project.optional-dependencies]
-spark = ["streamwright-spark[spark]~=0.1.0"]
+spark = ["streamwright-spark[spark]~=0.2.0"]
 
 [project.urls]
 Homepage = "https://streamwright.net"

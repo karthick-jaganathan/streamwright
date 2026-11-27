@@ -33,7 +33,7 @@ from streamwright.core.runtime.logs.handlers import (
     logger_settings,
     restored_items,
 )
-from streamwright.core.runtime.logs.lines import DEFAULT_MAX_CHARS, NETWORK, level_number
+from streamwright.core.runtime.logs.lines import DEFAULT_MAX_CHARS, NETWORK, SQL, level_number
 from streamwright.core.runtime.logs.record_factory import CONTEXT_SETUPS, RecordFactory, installed_factory
 from streamwright.core.runtime.logs.redaction import mask_text
 
@@ -51,7 +51,8 @@ class LogSetup:
       config says `disable_existing_loggers: true` - except the `streamwright` loggers and the ones `loggers` names,
       which always log.
     - levels: `level` for the `streamwright` loggers (--log-level; default INFO, or the config's);
-      `streamwright.network` WARNING (quiet) unless the config sets it, or `level` when that is higher; then `loggers`,
+      `streamwright.network` and `streamwright.sql` WARNING (quiet) unless the config sets them, or `level` when that is
+      higher; then `loggers`,
       (name, level) pairs (--log NAME=LEVEL, in order; `root` is the root logger). The root logger is at WARNING when
       streamwright's handler is its first, as with logging.basicConfig.
     - redaction and truncation: every line of every logger, for every handler, is redacted - with `redact`, the run's
@@ -101,10 +102,11 @@ class LogSetup:
         streamwright = logging.getLogger("streamwright")
         if level is not None or config is None or streamwright.level == logging.NOTSET:
             streamwright.setLevel(logging.INFO if level is None else level)
-        if config is None or NETWORK.level == logging.NOTSET:
-            NETWORK.setLevel(logging.WARNING)
-        if level is not None and level > NETWORK.level:  # quieter than the network logger: that too
-            NETWORK.setLevel(level)
+        for quiet in (NETWORK, SQL):                      # WARNING (quiet) unless --log or the config names them
+            if config is None or quiet.level == logging.NOTSET:
+                quiet.setLevel(logging.WARNING)
+            if level is not None and level > quiet.level:  # quieter than --log-level: that too
+                quiet.setLevel(level)
         for name, value in loggers:
             (root if name == "root" else logging.getLogger(name)).setLevel(level_number(value))
         if config is not None:  # (`disable_existing_loggers: true` disables the loggers made before the config)

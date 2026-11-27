@@ -123,7 +123,8 @@ outputs:
     log:
       sql: |
         SELECT "campaign.name" AS name, outcome.status AS status,
-               coalesce(outcome.result->>'$.resource_name', outcome.error_message, '') AS detail
+               coalesce(outcome.result->>'$.resource_name', outcome.error_code || ': ' || outcome.error_message, '')
+                 AS detail
         FROM create_campaigns
       message: "campaign {name}: {status} {detail}"
 

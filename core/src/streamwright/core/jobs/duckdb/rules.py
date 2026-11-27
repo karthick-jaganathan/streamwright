@@ -25,7 +25,14 @@ from streamwright.core.jobs.apply.log import OUTPUT_LOG_FIELD
 from streamwright.core.jobs.apply.rules import check_apply, is_apply_output
 from streamwright.core.jobs.calls import call_problems, connection_problems, partition_dependencies, partition_problems
 from streamwright.core.jobs.check.findings import connections_of
-from streamwright.core.jobs.check.rules import NAME_PATTERN, RESERVED_NAMES, JobRules, input_field, install_hint
+from streamwright.core.jobs.check.rules import (
+    JOB_NAME_PATTERN,
+    NAME_PATTERN,
+    RESERVED_NAMES,
+    JobRules,
+    input_field,
+    install_hint,
+)
 from streamwright.core.jobs.duckdb.steps import (
     CALL,
     CONSUME,
@@ -178,7 +185,7 @@ class DuckDBRules(JobRules):
         return Field("object", fields={
             "kind": Field("string", required=True, enum=(KIND,)),
             "version": Field(("integer", "string")),
-            "name": Field("string", required=True, pattern=NAME_PATTERN),
+            "name": Field("string", required=True, pattern=JOB_NAME_PATTERN),
             "description": _TEXT,
             "spec": _named(config=inputs, secrets=inputs, lookups=LOOKUPS_FIELD, input=INPUT_FIELD),
             "connections": Field("object", required=True, min_items=1, values=connection),

@@ -40,10 +40,12 @@ import time
 
 from streamwright.core.config.inputs import InputError
 from streamwright.core.jobs.duckdb.engine import JobInvalidError, run_job
+from streamwright.core.jobs.duckdb.results import output_counts
 from streamwright.core.jobs.locking import MAX_KEY_LENGTH
 from streamwright.core.jobs.runner import owner_id
 from streamwright.core.runtime.logs import LogSetup, log_context
 from streamwright.core.runtime.logs.lines import fields, milliseconds
+from streamwright.core.runtime.logs.sql import sql_values
 
 __all__ = ["CLAIM_LOST", "CLAIM_SECONDS", "Worker", "default_worker_id", "execute_run", "job_key", "run_summary"]
 
@@ -61,8 +63,8 @@ def run_summary(result):
     """What a caller is told about a finished run: its status, batches and the rows each output wrote."""
     summary = {"status": "failed" if result.exit_code else ("skipped" if result.lock_skipped else "ok"),
                "job": result.job_name, "job_ids": list(result.batches),
-               "outputs": [{"name": name, "rows": rows, "already_committed": name in result.skipped,
-                            **({"rejected": result.rejected[name]} if result.rejected.get(name) else {})}
+               "outputs": [{"name": name, **output_counts(name, rows, result.rejected, result.apply_outputs),
+                            "already_committed": name in result.skipped}
                            for name, rows in sorted(result.outputs.items())]}
     if result.fan_out:
         summary.update(fan_out=result.fan_out, passes=result.passes)
@@ -268,12 +270,13 @@ class Worker:
     def run(self, stop):
         """Runs queued runs until `stop` (a threading.Event) is set; a run under way is finished first."""
         LOG.info("worker %s: waiting for runs of %s", self.worker_id, ", ".join(sorted(self.jobs)) or "no job")
-        while not stop.is_set():
-            try:
-                ran = self.run_one()
-            except Exception as exc:              # the state store is unreachable: wait and try again
-                LOG.warning("worker %s: %s", self.worker_id, exc)
-                ran = None
-            if ran is None:
-                stop.wait(self.poll_seconds)
+        with sql_values(False):                   # serve logs no row values: SQL lines keep their placeholders
+            while not stop.is_set():
+                try:
+                    ran = self.run_one()
+                except Exception as exc:          # the state store is unreachable: wait and try again
+                    LOG.warning("worker %s: %s", self.worker_id, exc)
+                    ran = None
+                if ran is None:
+                    stop.wait(self.poll_seconds)
         LOG.info("worker %s: stopped", self.worker_id)
