@@ -39,8 +39,9 @@ policy skipped too), 1 invalid job, failed run or lock held, 2 usage or input er
   with optional constraints `enum`, `pattern` (matched in full), `minimum`, `maximum`, `max_length` (a list input:
   each item), checked on every value given (`--set`, files, lookups).
 - `spec.input`: the rows a run is given (`--input`), as the table `input` (see Input payloads).
-  Secrets come from `--secrets FILE` or `STREAMWRIGHT_SECRET_<NAME>` and may appear **only in a connection's
-  credential keys** (the keys its adapter or connector declares as secret).
+  Secrets come from `--secrets FILE`, `STREAMWRIGHT_SECRET_<NAME>` or a lookup (`spec.lookups`, such as an
+  `aws_secretsmanager` lookup; see Lookups and accounts), and may appear **only in a connection's credential keys**
+  (the keys its adapter or connector declares as secret).
 - `connections`: `provider` plus that provider's keys. `duckdb` (a database file, attached under the connection's
   name) and `files` (local `roots`) are built in; other providers need their connector's DuckDB adapter
   (`pip install streamwright-s3`, `-gcs`, `-azure-blob`, `-postgres`, `-mysql`, `-deltalake`). A connection only a
@@ -87,7 +88,8 @@ policy skipped too), 1 invalid job, failed run or lock held, 2 usage or input er
 
 ## State, scopes and locks
 `runtime.state` (`sqlite: PATH`, or `connection: NAME` of a `duckdb`, `postgres` or `mysql` connection, with
-`schema`, default `streamwright`) keeps every run as a batch in the `sw_*` tables: `sw_jobs` (status, pinned manifest,
+`schema`, default `streamwright`; the connection's credentials are secrets like any connection's, so a lookup can
+supply them) keeps every run as a batch in the `sw_*` tables: `sw_jobs` (status, pinned manifest,
 lock tokens, rows written, duration, attempts), `sw_sequences`, `sw_leases`, `sw_receipts`, `sw_events`, `sw_signatures`
 (created and upgraded by migrations, below); tables of an earlier release are imported with their batches and store
 identity. Without `runtime.state` a run keeps nothing (an in-memory store),
@@ -566,8 +568,8 @@ runtime:
   failure does not stop the others (`on_failure: stop` starts no new pass). Exit 0 when every pass succeeds, else 1;
   a WARNING line per failed pass, and `--summary` lists `passes` (item, status, job ids, outputs, error).
 - `validate` checks what a binding names, that `over` is a `rows: many` lookup or a list input, and that the scope
-  names the item. A connection only lookups use needs no engine adapter. State actions run only the lookups the
-  state connection needs.
+  names the item. A connection only lookups use needs no engine adapter. `streamwright state` runs no lookups: it
+  takes the state database's URL.
 
 ## Log context and labels
 Inside a job run every line says whom it is about, so runs and `runtime.fan_out` passes that run side by side can be
