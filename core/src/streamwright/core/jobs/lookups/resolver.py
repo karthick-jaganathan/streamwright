@@ -36,10 +36,10 @@ from types import MappingProxyType
 from streamwright.core.config.inputs import resolve_inputs
 from streamwright.core.jobs.lookups.extract import LookupValueError, extract, text_value
 from streamwright.core.jobs.lookups.providers import LookupFailedError, fetch, transform_row
-from streamwright.core.jobs.refs import MOUSTACHE, input_references
+from streamwright.core.jobs.refs import MOUSTACHE
 from streamwright.core.runtime.logs.context import log_context
 
-__all__ = ["FAN_OUT_DEFAULTS", "Lookups", "has_lookups", "lookup_optional", "state_inputs"]
+__all__ = ["FAN_OUT_DEFAULTS", "Lookups", "has_lookups", "lookup_optional"]
 
 FAN_OUT_DEFAULTS = MappingProxyType({"as": "account", "concurrency": 1, "on_failure": "continue", "on_empty": "fail"})
 _PATH = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\.([A-Za-z0-9_.\[\]]+)\s*$")
@@ -59,20 +59,6 @@ def lookup_optional(job):
             if isinstance(definition, dict) and definition.get("lookup"):
                 definition["required"] = False
     return copied
-
-
-def state_inputs(job, config, secrets, *, allow_exec=False, base_dir=None):
-    """
-    For a state action: (secrets with those the state connection needs looked up, the `config.NAME` of every
-    lookup-bound config input, whose missing value is no problem there). `secrets`: the explicit values.
-    """
-    spec = job.get("spec") or {}
-    bound = {"config.%s" % name for name, d in (spec.get("config") or {}).items() if (d or {}).get("lookup")}
-    if not has_lookups(job):
-        return secrets, bound
-    state = (job.get("runtime") or {}).get("state") or {}
-    needed = input_references([state, (job.get("connections") or {}).get(state.get("connection") or "")], "secrets")
-    return Lookups(job, config, secrets, allow_exec=allow_exec, base_dir=base_dir).needs(needed)[1], bound
 
 
 @dataclass
@@ -128,15 +114,6 @@ class Lookups:
             for name, definition in self.definitions[section].items():
                 if found[section].get(name) is None and isinstance(definition, dict) and definition.get("lookup"):
                     found[section][name] = pass_.input_value(section, name)
-        return found["config"], found["secrets"]
-
-    def needs(self, names, section="secrets"):
-        """(config, secrets) with only `names` of `section` resolved through lookups (state actions)."""
-        pass_ = _Pass(self, None)
-        found = {s: dict(self.explicit[s]) for s in _SECTIONS}
-        for name in names:
-            if found[section].get(name) is None and (self.definitions[section].get(name) or {}).get("lookup"):
-                found[section][name] = pass_.input_value(section, name)
         return found["config"], found["secrets"]
 
 

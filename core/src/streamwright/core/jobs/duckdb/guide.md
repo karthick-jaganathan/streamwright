@@ -566,8 +566,8 @@ runtime:
   failure does not stop the others (`on_failure: stop` starts no new pass). Exit 0 when every pass succeeds, else 1;
   a WARNING line per failed pass, and `--summary` lists `passes` (item, status, job ids, outputs, error).
 - `validate` checks what a binding names, that `over` is a `rows: many` lookup or a list input, and that the scope
-  names the item. A connection only lookups use needs no engine adapter. State actions run only the lookups the
-  state connection needs.
+  names the item. A connection only lookups use needs no engine adapter. `streamwright state` runs no lookups: it
+  takes the state database's URL.
 
 ## Log context and labels
 Inside a job run every line says whom it is about, so runs and `runtime.fan_out` passes that run side by side can be

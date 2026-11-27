@@ -19,15 +19,9 @@
 
 from streamwright.core.jobs.lookups.extract import FORMATS, LookupValueError, extract, parse_output
 from streamwright.core.jobs.lookups.providers import LookupExecNotAllowedError, LookupFailedError
-from streamwright.core.jobs.lookups.resolver import (
-           FAN_OUT_DEFAULTS,
-           Lookups,
-           has_lookups,
-           lookup_optional,
-           state_inputs,
-)
+from streamwright.core.jobs.lookups.resolver import FAN_OUT_DEFAULTS, Lookups, has_lookups, lookup_optional
 from streamwright.core.jobs.lookups.rules import FAN_OUT_FIELD, INPUT_LOOKUP_FIELD, LOOKUPS_FIELD, check_lookups
 
 __all__ = ["FAN_OUT_DEFAULTS", "FAN_OUT_FIELD", "FORMATS", "INPUT_LOOKUP_FIELD", "LOOKUPS_FIELD",
            "LookupExecNotAllowedError", "LookupFailedError", "LookupValueError", "Lookups", "check_lookups", "extract",
-           "has_lookups", "lookup_optional", "parse_output", "state_inputs"]
+           "has_lookups", "lookup_optional", "parse_output"]
