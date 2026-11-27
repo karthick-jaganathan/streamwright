@@ -1,0 +1,131 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# Adds Customer Match audience members (a row per person, given with --input) to a user list through the Data
+# Manager API (IngestionService.ingest_audience_members).
+#
+#   streamwright duckdb run examples/google_data_manager/jobs/audiences/ingest.yaml \
+#     --input examples/google_data_manager/payloads/audiences/members.json \
+#     --set operating_account=CUSTOMER_ID --set login_account=MANAGER_ID --set user_list_id=USER_LIST_ID \
+#     --set ad_user_data_consent=CONSENT_GRANTED --set ad_personalization_consent=CONSENT_GRANTED \
+#     --set validate_only=true \
+#     --secrets ~/.streamwright/google-data-manager-secrets.yaml --apply-state-migrations
+#
+# Shown here:
+#   - the identifiers normalized and SHA-256 hashed in SQL; a person's identifiers as a LIST of STRUCTs (user_data);
+#   - up to 10000 members a request (the operation's max_chunk); adding a member again is harmless (idempotent);
+#   - the Customer Match terms of service accepted in the request, and its consent.
+kind: DuckDBJob
+version: 1
+name: google_data_manager_audiences_ingest
+description: Customer Match members added to a Google Ads user list through the Data Manager API
+
+spec:
+  config:
+    operating_account: {type: string, required: true, pattern: "^[0-9]{10}$", description: "the Google Ads account"}
+    login_account: {type: string, required: true, pattern: "^[0-9]{10}$", description: "the account the user is in"}
+    user_list_id: {type: string, required: true, pattern: "^[0-9]+$", description: "the Customer Match user list"}
+    validate_only: {type: boolean, default: false, description: "true: Google checks the members, adds none"}
+    ad_user_data_consent: {type: string, required: true, enum: [CONSENT_GRANTED, CONSENT_DENIED],
+                           description: "the consent collected to send user data (rows without their own)"}
+    ad_personalization_consent: {type: string, required: true, enum: [CONSENT_GRANTED, CONSENT_DENIED],
+                                 description: "the consent collected for personalization (rows without their own)"}
+  secrets:
+    client_id: {type: string, required: true}
+    client_secret: {type: string, required: true}
+    refresh_token: {type: string, required: true}
+  input:
+    columns:
+      email: {type: string, max_length: 320}
+      phone: {type: string, max_length: 32}
+    max_rows: 1000000
+
+connections:
+  dm:
+    provider: google_data_manager
+    client_id: "{{ secrets.client_id }}"
+    client_secret: "{{ secrets.client_secret }}"
+    refresh_token: "{{ secrets.refresh_token }}"
+
+steps:
+  # the identifiers normalized as Google asks (google-ads-datamanager-util's Formatter gives the same values)
+  - name: normalized
+    sql: |
+      SELECT CASE WHEN split_part(lower(trim(email)), '@', 2) IN ('gmail.com', 'googlemail.com')
+                  THEN replace(split_part(split_part(lower(trim(email)), '@', 1), '+', 1), '.', '') || '@' ||
+                       split_part(lower(trim(email)), '@', 2)
+                  ELSE lower(trim(email)) END                           AS normalized_email,
+             '+' || nullif(regexp_replace(phone, '[^0-9]', '', 'g'), '')  AS normalized_phone
+      FROM input
+
+  # the members, a complete AudienceMember a row (a UserIdentifier is an email, a phone or an address)
+  - name: members
+    sql: |
+      SELECT {'user_identifiers': list_filter([
+               {'email_address': sha256(normalized_email), 'phone_number': NULL::VARCHAR},
+               {'email_address': NULL::VARCHAR, 'phone_number': sha256(normalized_phone)}
+             ], lambda identifier: coalesce(identifier.email_address, identifier.phone_number) IS NOT NULL)}
+               AS user_data
+      FROM normalized
+      WHERE normalized_email IS NOT NULL OR normalized_phone IS NOT NULL
+
+outputs:
+  - name: add
+    connection: dm
+    step: members
+    operation:
+      service: IngestionService
+      method: ingest_audience_members
+      arguments:
+        destinations:
+          - operating_account: {account_type: GOOGLE_ADS, account_id: "{{ config.operating_account }}"}
+            login_account: {account_type: GOOGLE_ADS, account_id: "{{ config.login_account }}"}
+            product_destination_id: "{{ config.user_list_id }}"
+        # the consent you actually collected (required config, no default): never assume it was granted
+        consent: {ad_user_data: "{{ config.ad_user_data_consent }}",
+                  ad_personalization: "{{ config.ad_personalization_consent }}"}
+        terms_of_service: {customer_match_terms_of_service_status: ACCEPTED}
+        encoding: HEX
+        validate_only: "{{ config.validate_only }}"
+    apply:
+      on_row_error: continue
+    policy:
+      retry: {max_attempts: 5, backoff: exponential}
+    # once sent, what Google returned: a line per request (its id: requests/status.yaml reads it back), per rejected
+    # member (Google's reason as the code) and per member accepted with field warnings (optional fields dropped)
+    log:
+      sql: |
+        SELECT 'request ' || coalesce(outcome.result->>'$.request_id', '-')  AS subject,
+               outcome.status                                                AS outcome,
+               count(*) || ' member(s)'                                      AS detail
+        FROM add
+        GROUP BY ALL
+        UNION ALL
+        SELECT 'row ' || outcome.row, outcome.error_code, outcome.error_message
+        FROM add
+        WHERE outcome.status = 'failed'
+        UNION ALL
+        SELECT 'row ' || outcome.row, 'warnings', CAST(outcome.result->'$.warnings' AS VARCHAR)
+        FROM add
+        WHERE (outcome.result->'$.warnings') IS NOT NULL
+        ORDER BY subject
+      message: "{subject}: {outcome}: {detail}"
+      max_rows: 100
+
+runtime:
+  state:
+    sqlite: ../../.streamwright/google_data_manager_audiences_ingest.state.db
+    scope: "user_list:{{ config.user_list_id }}"

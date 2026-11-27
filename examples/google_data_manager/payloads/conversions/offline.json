@@ -1,0 +1,5 @@
+[
+  {"transaction_id": "EXAMPLE-ORDER-0001", "gclid": "EXAMPLE_GCLID_0001", "converted_at": "2026-01-31 09:07:00-05:00", "value": 30.03, "currency": "USD", "email": " John.Smith+promo@Gmail.com ", "phone": "+1 (800) 555-0199"},
+  {"transaction_id": "EXAMPLE-ORDER-0002", "gclid": "EXAMPLE_GCLID_0002", "converted_at": "2026-01-31 09:14:00-05:00", "value": 16.5, "currency": "USD", "ad_user_data_consent": "CONSENT_GRANTED", "ad_personalization_consent": "CONSENT_DENIED"},
+  {"transaction_id": "EXAMPLE-ORDER-0003", "converted_at": "2026-01-31 10:02:00-05:00", "email": "lead@example.com"}
+]

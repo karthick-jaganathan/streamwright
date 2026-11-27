@@ -252,7 +252,7 @@ def _execute(command, args, run_inputs, *, state, output, metrics, errors):
     source, config, secrets, today, redact, selected, plan = run_inputs
     closing = False
     try:
-        if args.state is None:  # e.g. dlt keeps the state in the destination
+        if args.state is None:  # duckdb and ducklake keep the state in the warehouse (SCHEMA._streamwright_state)
             state = output.initial_state()
         command.execute(source, config, secrets, state=state, output=output, today=today, redact=redact,
                         metrics=metrics, selected=selected, plan=plan)

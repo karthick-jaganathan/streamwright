@@ -18,13 +18,12 @@
 """
 DECIMAL and HUGEINT values stay exact from SQL steps to every output: records keep decimal.Decimal values (and
 Python's ints), JSON (Singer messages, jsonl files) writes them as exact numbers in plain notation, csv and tsv files
-as the same text, and DuckDB, DuckLake, Parquet and dlt store them in DECIMAL columns.
+as the same text, and DuckDB, DuckLake and Parquet store them in DECIMAL columns.
 """
 
 import csv
 import datetime
 import decimal
-import importlib.util
 import json
 import os
 from decimal import Decimal
@@ -40,8 +39,6 @@ from streamwright.core.outputs.output import open_output
 from streamwright.core.runtime.templates import decimal_text, render, to_json, to_text
 from streamwright.core.sdk.testing import MemoryOutput, page_stream
 
-needs_dlt = pytest.mark.skipif(importlib.util.find_spec("dlt") is None,
-                               reason="needs dlt (pip install 'streamwright[dlt]' 'dlt[duckdb]')")
 TODAY = datetime.date(2026, 10, 3)
 
 
@@ -180,9 +177,8 @@ def write_source(tmp_path, source):
 
 
 def read_table(connection, name):
-    """(columns as (name, type), rows ordered by the first column) of a table, without dlt's own columns."""
-    columns = [(row[0], row[1]) for row in connection.execute("DESCRIBE SELECT * FROM %s" % name).fetchall()
-               if not row[0].startswith("_dlt_")]
+    """(columns as (name, type), rows ordered by the first column) of a table."""
+    columns = [(row[0], row[1]) for row in connection.execute("DESCRIBE SELECT * FROM %s" % name).fetchall()]
     rows = connection.execute("SELECT %s FROM %s ORDER BY 1" % (
         ", ".join('"%s"' % column for column, _ in columns), name)).fetchall()
     return columns, rows
@@ -292,43 +288,6 @@ def test_duckdb_and_ducklake_tables_hold_exact_decimals(api, tmp_path, monkeypat
                 connection.close()
         assert columns == COLUMNS[name]
         assert rows == expected_rows(name, columns)
-
-
-@needs_dlt
-def test_dlt_loads_exact_decimals(api, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)  # dlt reads .dlt/ from the working directory
-    monkeypatch.setenv("DLT_DATA_DIR", str(tmp_path / "dlt"))
-    monkeypatch.setenv("DESTINATION__DUCKDB__CREDENTIALS", str(tmp_path / "warehouse.duckdb"))
-    source = exact_source(api, huge=False)  # (dlt's integer columns are BIGINT)
-    output = open_output("dlt:duckdb", source)
-    SourceRunner(source, {}, {}, output=output, today=TODAY, sleep=lambda seconds: None).run()
-    output.close()
-    for name in ("items", "totals"):
-        columns, rows = duckdb_table(tmp_path / "warehouse.duckdb", "shop.%s" % name)
-        assert columns == [(column, "BIGINT" if kind == "HUGEINT" else kind) for column, kind in COLUMNS[name]
-                           if column != "huge"]
-        assert rows == expected_rows(name, columns)
-
-
-@needs_dlt
-def test_dlt_tables_keep_the_type_of_a_column_they_have(tmp_path, monkeypatch, dlt_output):
-    """A DECIMAL column that an earlier load made a double (as loads did before decimals were exact) stays one."""
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("DLT_DATA_DIR", str(tmp_path / "dlt"))
-    monkeypatch.setenv("DESTINATION__DUCKDB__CREDENTIALS", str(tmp_path / "warehouse.duckdb"))
-    schema = {"type": "object", "properties": {"id": {"type": ["null", "integer"]},
-                                               "price": {"type": ["null", "number"]}}}
-    for columns, record in ((None, {"id": 1, "price": 2.6}),
-                            ([("id", "BIGINT"), ("price", "DECIMAL(9,2)")], {"id": 2, "price": Decimal("3.10")})):
-        output = dlt_output.DltOutput("duckdb", None, {"name": "shop", "streams": []})
-        output.initial_state()
-        if columns is not None:
-            output.write_columns("prices", columns)
-        output.write_schema("prices", schema, ["id"])
-        output.write_record("prices", record)
-        output.close()
-    assert duckdb_table(tmp_path / "warehouse.duckdb", "shop.prices") == (
-        [("id", "BIGINT"), ("price", "DOUBLE")], [(1, 2.6), (2, 3.1)])
 
 
 # * ----------------------------------------------------------------------------------------------

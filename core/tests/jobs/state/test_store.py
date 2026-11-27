@@ -15,7 +15,7 @@
 # * limitations under the License.
 # **************************************************************************/
 
-"""State store contract suite: the same tests against SQLite, DuckDB and PostgreSQL 16 (TST-02)."""
+"""State store contract suite: the same tests against SQLite, DuckDB, PostgreSQL 16 and MySQL 8 (TST-02)."""
 
 import datetime
 import logging
@@ -39,12 +39,14 @@ from streamwright.core.jobs.state import (
     open_store,
 )
 from streamwright.core.jobs.state.target import describe_connection, describe_url
+from streamwright.core.jobs.state.url import open_url
 from streamwright.core.jobs.types import WriteReceipt
 
 PG_DSN = os.environ.get("STREAMWRIGHT_TEST_PG_DSN")
+MYSQL_URL = os.environ.get("STREAMWRIGHT_TEST_MYSQL_URL")
 
 
-@pytest.fixture(params=["sqlite", "duckdb", "postgres"])
+@pytest.fixture(params=["sqlite", "duckdb", "postgres", "mysql"])
 def store(request, tmp_path):
     if request.param == "sqlite":
         found = open_sqlite(str(tmp_path / "state.db"))
@@ -52,10 +54,12 @@ def store(request, tmp_path):
         con = duckdb.connect(str(tmp_path / "state.duckdb"))
         request.addfinalizer(con.close)
         found = open_store(con.cursor, "duckdb", catalog="state")
-    else:
+    elif request.param == "postgres":
         schema = request.getfixturevalue("pg_schema")
         psycopg = pytest.importorskip("psycopg")
         found = open_store(lambda: psycopg.connect(PG_DSN), "postgres", schema=schema)
+    else:
+        found = open_url(MYSQL_URL, schema=request.getfixturevalue("mysql_database"))
     found.initialize()
     return found
 
@@ -86,6 +90,8 @@ def test_lease_is_exclusive_until_released_or_expired(store):
 
 
 def test_an_expired_lease_is_taken_over_and_the_old_worker_is_fenced(store):
+    if store._dialect.name == "mysql":
+        pytest.xfail("MySQL timestamps are DATETIME (whole seconds, rounded): a lease may outlive its expiry by 0.5 s")
     old = store.acquire_lease("job", "worker-a", 0)          # expires at once (database clock)
     with pytest.raises(StaleLeaseError):
         store.check_lease(old)
@@ -210,6 +216,77 @@ def test_job_key_is_unique_per_job(store):
     with pytest.raises(Exception, match=r"(?i)unique|duplicate"):  # the database's own constraint error
         _batch(store, lease, "b2", job_key="2026-11-01")
     assert [b["batch_id"] for b in store.list_incomplete_batches("job")] == ["b1"]
+
+
+def _counted(store, monkeypatch):
+    """The SQL texts the store runs from now on."""
+    statements, run = [], store._x
+    monkeypatch.setattr(store, "_x", lambda conn, text, args=(): statements.append(text) or run(conn, text, args))
+    return statements
+
+
+def test_many_outbox_rows_take_a_statement_per_chunk_of_rows(store, monkeypatch):
+    monkeypatch.setattr(store._dialect, "max_parameters", 40)     # 6 rows an INSERT, 7 outcomes an UPDATE
+    lease = store.acquire_lease("job", "w", 300)
+    _batch(store, lease, "b1", status="processing")
+    statements = _counted(store, monkeypatch)
+    store.commit_batch(lease, "b1", {}, {"push": ("dest", [{"n": n, "note": "it's 100% \u2713"} for n in range(50)])})
+    assert sum(text.startswith("INSERT INTO {sw_events}") for text in statements) == 9
+    del statements[:]
+    store.mark_events_in_flight(lease, "b1", "push", range(50))
+    assert sum(text.startswith("UPDATE {sw_events}") for text in statements) == 2    # 37 sequences a statement
+    outcomes = [(n, "failed", None, "INVALID_X", "bad 'value' 100% \u2713") if n % 3 == 0 else
+                (n, "applied", {"id": n, "note": "it's 100% \u2713", "nested": {"a": [1, None]}}, None, None)
+                for n in range(50)]
+    del statements[:]
+    store.record_event_outcomes(lease, "b1", "push", outcomes)
+    per_row = isinstance(store._dialect, SqliteDialect)       # SQLite updates outcomes a row at a time (in-process)
+    assert sum(text.startswith("UPDATE") for text in statements) == (50 if per_row else 8)
+    assert [(row["event_sequence"], row["status"], row["attempts"], row["result"], row["error_code"],
+             row["error_message"]) for row in store.list_events("job", "b1")] == [
+        (n, status, 1, result, code, message) for n, status, result, code, message in outcomes]
+
+
+def test_large_outbox_rows_take_a_statement_per_chunk_of_bytes(store, monkeypatch):
+    monkeypatch.setattr(store._dialect, "max_statement_bytes", 5000)       # about 2 payloads of 2 KB a statement
+    lease = store.acquire_lease("job", "w", 300)
+    _batch(store, lease, "b1", status="processing")
+    statements = _counted(store, monkeypatch)
+    payloads = [{"n": n, "blob": "x" * 2000} for n in range(7)] + [{"n": 7, "blob": "y" * 9000}]   # one past it
+    store.commit_batch(lease, "b1", {}, {"push": ("dest", payloads)})
+    assert sum(text.startswith("INSERT INTO {sw_events}") for text in statements) == 5
+    assert [event["payload"] for event in store.list_pending_events("job")] == payloads
+
+
+@pytest.mark.parametrize("status", ["applied", "failed"])
+def test_a_chunk_of_outcomes_may_leave_a_column_all_null(store, status):
+    lease = store.acquire_lease("job", "w", 300)
+    _batch(store, lease, "b1", status="processing")
+    store.commit_batch(lease, "b1", {}, {"push": ("dest", [{"n": n} for n in range(3)])})
+    store.mark_events_in_flight(lease, "b1", "push", range(3))
+    outcomes = [(n, "applied", {"id": n}, None, None) if status == "applied" else
+                (n, "failed", None, "INVALID_X", "bad") for n in range(3)]
+    store.record_event_outcomes(lease, "b1", "push", outcomes)
+    assert [(row["status"], row["result"], row["error_code"], row["error_message"])
+            for row in store.list_events("job", "b1")] == [outcome[1:] for outcome in outcomes]
+
+
+def test_committing_a_batch_again_keeps_its_outbox_rows(store):
+    lease = store.acquire_lease("job", "w", 300)
+    _batch(store, lease, "b1", status="processing")
+    store.commit_batch(lease, "b1", {}, {"push": ("dest", [{"a": 1}, {"a": 2}])})
+    store.record_event_outcomes(lease, "b1", "push", [(0, "applied", {"id": 1}, None, None)])
+    store.commit_batch(lease, "b1", {}, {"push": ("dest", [{"a": 9}, {"a": 9}, {"a": 9}])})    # a replay
+    assert [(row["event_sequence"], row["status"], row["result"]) for row in store.list_events("job", "b1")] == [
+        (0, "applied", {"id": 1}), (1, "pending", None), (2, "pending", None)]
+    assert [event["payload"] for event in store.list_pending_events("job")] == [{"a": 2}, {"a": 9}]
+
+
+def test_the_last_signature_of_a_prefix_in_one_commit_wins(store):
+    lease = store.acquire_lease("job", "w", 300)
+    _batch(store, lease, "b1", "processing")
+    store.commit_batch(lease, "b1", {}, {}, [("s3://a/", "h1", "a"), ("s3://a/", "h2", "a,b")])
+    assert store.get_schema_signatures("job") == {"s3://a/": "h2"}
 
 
 def test_schema_signatures_are_replaced_per_prefix(store):
@@ -433,6 +510,24 @@ def test_history_is_kept_per_scope(store):
     assert {x["batch_id"]: x["scope"] for x in store.list_batches("job")} == {"a1": "a", "b1": "b"}
     assert [x["batch_id"] for x in store.list_batches("job", scope="a")] == ["a1"]
 
+
+def test_batches_are_found_across_jobs_by_job_id_status_or_run_request_id(store):
+    """find_batches (`streamwright state jobs|job --url`): no job name needed; the request id is read from JSON."""
+    a = store.acquire_lease("orders", "w1", 300, tokens=["scope:a"])
+    b = store.acquire_lease("refunds", "w2", 300, tokens=["scope:b"])
+    _batch(store, a, "orders-1", "processing", scope="a", engine_metadata={"request_id": "sw_run1"})
+    _batch(store, b, "refunds-1", scope="b", engine_metadata={"request_id": "sw_run1"})   # one run, two jobs
+    _batch(store, a, "orders-2", scope="a", engine_metadata={"request_id": "sw_run2"})
+    store.record_batch(a, "orders-2", "failed", {}, error="boom")
+    found = store.find_batches(request_id="sw_run1")
+    assert sorted((x["job_name"], x["batch_id"]) for x in found) == [("orders", "orders-1"), ("refunds", "refunds-1")]
+    assert [x["batch_id"] for x in store.find_batches(batch_id="orders-2")] == ["orders-2"]
+    assert [x["batch_id"] for x in store.find_batches(status="failed")] == ["orders-2"]
+    assert [x["batch_id"] for x in store.find_batches(job_name="orders", limit=1)] == ["orders-2"]   # newest first
+    assert store.find_batches(request_id="sw_none") == []
+    store.commit_batch(a, "orders-1", {}, {"out": ("topic", [{"n": 1}, {"n": 2}])})
+    assert store.count_events("orders", ["orders-1", "orders-2"]) == {"orders-1": {"pending": 2}}
+    assert store.count_events("orders", []) == {}
 
 def test_the_outbox_is_relayed_per_scope(store):
     a = store.acquire_lease("job", "w1", 300, tokens=["scope:a"])

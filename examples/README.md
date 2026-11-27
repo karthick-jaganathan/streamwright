@@ -34,6 +34,9 @@ account: give yours with `--set customer_id=... --set login_customer_id=...`.
 | `microsoft_ads/jobs/conversions/upload.yaml` | an apply output on a SOAP API (`ApplyOfflineConversions`) from `--input` rows: unknown goals skipped, calls of `chunk_size` rows, rejected rows logged from the results |
 | `meta_ads/jobs/campaigns/create.yaml`, `custom_conversions/create.yaml` | Graph API `create_*` edges: a request per row, a rejected row fails alone, JSON text sent as an object |
 | `linkedin_ads/jobs/conversions/send_events.yaml` | an apply output of a REST API connector: the operation is a request, `json: {elements: "{{ rows }}"}` sends a chunk per request, emails hashed in SQL |
+| `google_data_manager/jobs/conversions/ingest.yaml`, `audiences/ingest.yaml` | Data Manager ingestion: identifiers normalized and hashed in SQL as Google asks, nested fields as STRUCT, LIST or JSON, a request per chunk whose `request_id` each row keeps |
+| `google_data_manager/jobs/conversions/ingest_by_action_name.yaml` | two connectors in one job: actions looked up by name with google_ads, each Data Manager event's own `destination` becomes the request's destinations and the event's `destination_references` |
+| `google_data_manager/jobs/requests/status.yaml` | an asynchronous outcome read back: a call step for the request status, failed records logged by index, merged into a table |
 | `serve/serve.yaml` | the Google Ads jobs over HTTP: API keys, claims, Swagger UI, metrics, workers |
 
 The manifest reference, commands and delivery guarantees are in the packaged DuckDBJob guide:

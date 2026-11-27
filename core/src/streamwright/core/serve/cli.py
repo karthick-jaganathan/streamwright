@@ -29,6 +29,7 @@ import threading
 from streamwright.core.cli.help_format import DescriptionFormatter
 from streamwright.core.cli.log_options import add_log_options, log_setup, read_log_config
 from streamwright.core.jobs.state import MigrationsPendingError, StateError
+from streamwright.core.runtime.logs.sql import sql_values
 from streamwright.core.serve.config import ServiceError, load_service
 from streamwright.core.serve.queue_store import open_queue
 from streamwright.core.serve.service import Service
@@ -127,8 +128,9 @@ def _serve(args):
         LOG.error("%s", _EXTRA)
         return INVALID_INPUT
     LOG.info("serving %d job(s) on http://%s:%d", len(service.jobs), service.config.host, service.config.port)
-    uvicorn.run(app, host=service.config.host, port=service.config.port, log_config=None, access_log=False,
-                server_header=False, date_header=False)
+    with sql_values(False):                       # serve logs no row values: SQL lines keep their placeholders
+        uvicorn.run(app, host=service.config.host, port=service.config.port, log_config=None, access_log=False,
+                    server_header=False, date_header=False)
     return SUCCESS
 
 

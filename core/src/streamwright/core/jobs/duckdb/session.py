@@ -30,6 +30,7 @@ import time
 
 import duckdb
 
+from streamwright.core.runtime.logs.sql import logged
 from streamwright.core.sql.quote import quote_ident, quote_literal
 
 __all__ = ["Session", "SessionError"]
@@ -50,7 +51,8 @@ class Session:
         self.runtime = runtime or {}
         self.base_dir = base_dir
         self.writable = set(writable)
-        self.con = duckdb.connect(":memory:")
+        self._raw = duckdb.connect(":memory:")
+        self.con = logged(self._raw, "job")           # streamwright.sql: a line per statement, when it logs
         self._state_con = None
         self._attached = {}
         self._deadline = None
@@ -133,7 +135,7 @@ class Session:
     def connection_factory(self):
         """A callable returning a new cursor (its own transaction) on this session's database instance."""
         if self._state_con is None:
-            self._state_con = self.con.cursor()
+            self._state_con = self._raw.cursor()      # the state store logs its own statements
         return self._state_con.cursor
 
     # --- run limits -----------------------------------------------------------------------------------------

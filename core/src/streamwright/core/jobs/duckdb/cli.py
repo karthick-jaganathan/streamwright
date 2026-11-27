@@ -21,31 +21,28 @@ The DuckDBJob command line (registered for `kind: DuckDBJob` in the `streamwrigh
   validate JOB [--graph]
   plan JOB
   run JOB [--secrets FILE] [--dry-run] [--summary FILE]
-  state list|retry|abandon JOB [--batch ID] [--secrets FILE]
   (every command: --config FILE, --set NAME=VALUE, --overlay FILE, --allow-connector NAME, --strict, and the logging
   options of `streamwright run`: --log-level, --log NAME=LEVEL, --log-format, --log-config, --log-max-chars)
 
 The job options, exit codes and logging are the shared ones of `streamwright.core.cli.jobs`: 0 success, 1 invalid
-job or failed run, 2 usage or input error. Validation and planning never need secret values.
+job or failed run, 2 usage or input error. Validation and planning never need secret values. A job's batches are
+looked after with `streamwright state ACTION --url URL` (list, show, retry, abandon, resend, skip, leases, purge,
+migrate, check), from its state database alone.
 """
 
 import argparse
-import contextlib
 import logging
 import sys
 from types import MappingProxyType
 
 from streamwright.core.cli.help_format import DescriptionFormatter
-from streamwright.core.cli.job_state import add_state_commands, job_id_from_job, run_state_command
 from streamwright.core.cli.jobs import (
     FAILURE,
     INVALID_INPUT,
     JOB_HELP,
-    JOB_OPTION,
     SUCCESS,
     add_apply_migrations_argument,
     add_batch_arguments,
-    add_connector_allowlist,
     add_failed_job_arguments,
     add_fan_out_arguments,
     add_input_argument,
@@ -56,9 +53,10 @@ from streamwright.core.cli.jobs import (
     batch_problems,
     resolve_job,
 )
-from streamwright.core.cli.log_options import add_log_options, log_setup
+from streamwright.core.cli.log_options import log_setup
 from streamwright.core.config.inputs import InputError, parse_duration, read_values_file
-from streamwright.core.jobs.duckdb.engine import JobInvalidError, job_state, redactor, run_job, validate_job
+from streamwright.core.jobs.duckdb.engine import JobInvalidError, redactor, run_job, validate_job
+from streamwright.core.jobs.duckdb.results import describe_output, output_counts
 from streamwright.core.jobs.inputs import read_config_values
 from streamwright.core.jobs.manifest import JobError
 from streamwright.core.jobs.payload import PayloadError, read_payload
@@ -134,10 +132,9 @@ def _cmd_plan(args):
 def _run_summary(args, result, started_at, failure):
     """The --summary of a job run: status, times, job, batches, each output's rows and files, and the error."""
     finished_at = utc_now()
-    outputs = [{"name": name, "rows": rows, "files": [location for location in result.locations.get(name, ())
-                                                       if location],
-                "already_committed": name in result.skipped,
-                **({"rejected": result.rejected[name]} if result.rejected.get(name) else {})}
+    outputs = [{"name": name, **output_counts(name, rows, result.rejected, result.apply_outputs),
+                "files": [location for location in result.locations.get(name, ()) if location],
+                "already_committed": name in result.skipped}
                for name, rows in sorted(result.outputs.items())] if result is not None else []
     summary = {"status": "ok" if failure is None and result is not None and not result.exit_code else "failed",
                "started_at": iso_time(started_at), "finished_at": iso_time(finished_at),
@@ -203,7 +200,7 @@ def _log_outcome(result):
         LOG.log(logging.INFO if entry["status"] in ("ok", "skipped") else logging.WARNING, "%s %s %s: %s",
                 result.fan_out["as"], entry["item"], entry["status"].replace("_", " "),
                 entry.get("error") or "%d batch(es); %s" % (len(entry.get("job_ids") or ()), ", ".join(
-                    "%s %s rows" % (name, "?" if rows is None else rows)
+                    describe_output(name, rows, entry.get("rejected") or {}, result.apply_outputs)
                     for name, rows in sorted((entry.get("outputs") or {}).items())) or "nothing to write"),
                 extra=fields(event="pass_end", status=entry["status"]))
     if result.lock_skipped:
@@ -216,7 +213,7 @@ def _log_outcome(result):
             parts.append("%s already committed in an earlier attempt" % name)
             continue
         locations = [location for location in result.locations.get(name, ()) if location]
-        written = "%s %s rows" % (name, "?" if rows is None else rows)
+        written = describe_output(name, rows, result.rejected, result.apply_outputs)
         if len(locations) == 1:
             written += " -> %s" % locations[0]
         elif locations:
@@ -226,44 +223,8 @@ def _log_outcome(result):
              len(result.batches), " (%s)" % ", ".join(result.batches) if result.batches else "",
              "; " + "; ".join(parts) if parts else ("" if result.exit_code else "; nothing to write"),
              extra=fields(event="run_end", status="failed" if result.exit_code else "ok",
-                          outputs=dict(result.outputs)))
-
-
-@contextlib.contextmanager
-def _open_state(args, initialize):
-    with job_state(args.job, config=_config(args), secrets=_secrets(args), overlays=args.overlay,
-                   allowed_connectors=_allowed(args), initialize=initialize,
-                   allow_lookup_exec=args.allow_lookup_exec) as opened:
-        yield opened
-
-
-def _resume(args):
-    result = run_job(args.job, config=_config(args), secrets=_secrets(args), overlays=args.overlay,
-                     allowed_connectors=_allowed(args), resume_only=True, allow_lookup_exec=args.allow_lookup_exec)
-    if result.exit_code:
-        _log_error("run failed: %s", result.error or "see the log", event="run_failed")
-    return result.exit_code
-
-
-def _cmd_state(args):
-    return run_state_command(args, _open_state, after_retry=_resume)
-
-
-_STATE_DESCRIPTION = """\
-A job's batches, leases and state tables, in its runtime.state (sqlite, or a connection), per runtime.state.scope.
-Every action takes the job and its config values: --config/--set select the scope (status, retry) and render the
-state connection; give the job's required values as a run does. Only the secrets of the state connection are needed
-(--secrets or STREAMWRIGHT_SECRET_<NAME>); retry, which runs the job afterwards, needs them all, and takes that run's
---allow-connector and logging options (--no-run: only mark the batch). A batch's job id is
-<job>-<sequence>, or <job>-<scope hash>-<sequence> with a scope. retry and abandon take the batch's lock tokens: they
-fail while a run of its scope holds them. `streamwright state migrate|show|check --url URL` works on a database URL
-instead."""
-
-
-def _retry_run_options(parser):
-    """The options of the run a retry starts: which connectors it may use, and its logging."""
-    add_connector_allowlist(parser)
-    add_log_options(parser)
+                          outputs=dict(result.outputs),
+                          **({"rejected": dict(result.rejected)} if result.rejected else {})))
 
 
 def _inputs(parser, secrets=False, strict=True):
@@ -336,23 +297,15 @@ def build_parser(prog="streamwright duckdb"):
     add_fan_out_arguments(run)
     add_batch_arguments(run)
     run.set_defaults(func=_cmd_run, parser=run)
-    state = sub.add_parser("state", allow_abbrev=False,
-                           help="list, show, retry, abandon or purge a job's batches; its leases; migrate or check "
-                                "its state tables")
-    add_state_commands(state, description=_STATE_DESCRIPTION, add_run_options=_retry_run_options)
-    state.set_defaults(func=_cmd_state)
     return parser
 
 
 def main(argv=None, prog="streamwright"):
     parser = build_parser(prog)
-    args = parser.parse_args(argv)
+    args = parser.parse_args(sys.argv[1:] if argv is None else list(argv))
     if not getattr(args, "func", None):
         parser.print_help()
         return INVALID_INPUT
-    problem = job_id_from_job(args, getattr(args, JOB_OPTION, None))
-    if problem:
-        args.parser.error(problem)
     resolve_job(args.parser, args)
     args.log_setup = log_setup(args)
     if args.log_setup is None:
@@ -366,10 +319,9 @@ def main(argv=None, prog="streamwright"):
         _log_error("%s", exc, event="state_error" if isinstance(exc, StateError) else "job_invalid")
         return FAILURE
     except Exception as exc:
-        if args.subcommand not in ("run", "state"):
+        if args.subcommand != "run":
             raise
-        failed = "run" if args.subcommand == "run" else "state %s" % args.state_command
-        _log_error("%s failed: %s: %s", failed, type(exc).__name__, exc, event="%s_failed" % args.subcommand)
+        _log_error("run failed: %s: %s", type(exc).__name__, exc, event="run_failed")
         return FAILURE
     finally:
         args.log_setup.close()

@@ -1,0 +1,6 @@
+[
+  {"conversion_action": "Offline purchase", "transaction_id": "EXAMPLE-ORDER-0101", "gclid": "EXAMPLE_GCLID_0101", "converted_at": "2026-01-31 09:07:00-05:00", "value": 30.03, "currency": "USD"},
+  {"conversion_action": "Offline qualified lead", "transaction_id": "EXAMPLE-LEAD-0102", "converted_at": "2026-01-31 09:14:00-05:00", "email": "lead@example.com"},
+  {"conversion_action": "Offline purchase", "transaction_id": "EXAMPLE-ORDER-0103", "gclid": "EXAMPLE_GCLID_0103", "converted_at": "2026-01-31 10:02:00-05:00", "value": 16.5, "currency": "USD"},
+  {"conversion_action": "No such action", "transaction_id": "EXAMPLE-ORDER-0104", "gclid": "EXAMPLE_GCLID_0104", "converted_at": "2026-01-31 10:30:00-05:00"}
+]

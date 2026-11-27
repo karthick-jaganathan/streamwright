@@ -9,6 +9,7 @@ vendor SDK: `files` (local files), `s3` and `gcs` (object storage) and `postgres
 | Folder | Package | Connector | Libraries | Loggers (for `--log`) |
 |---|---|---|---|---|
 | [google_ads](ads/google_ads/README.md) | `streamwright-google-ads` | `google_ads` | google-ads | `google.ads.googleads.client` |
+| [google_data_manager](ads/google_data_manager/README.md) | `streamwright-google-data-manager` | `google_data_manager` | google-ads-datamanager | `google.ads.datamanager_v1`, `google.auth` |
 | [microsoft_ads](ads/microsoft_ads/README.md) | `streamwright-microsoft-ads` | `microsoft_ads` | bingads | `suds.client`, `suds.transport` |
 | [meta_ads](ads/meta_ads/README.md) | `streamwright-meta-ads` | `meta_ads` | facebook_business | `urllib3` |
 | [openai_ads](ads/openai_ads/README.md) | `streamwright-openai-ads` | `openai_ads` | requests | `streamwright.network`, `urllib3` |

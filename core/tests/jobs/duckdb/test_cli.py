@@ -21,11 +21,17 @@ import os
 import pytest
 import yaml
 
+from streamwright.core.cli import main as cli_main
 from streamwright.core.jobs.duckdb.cli import main
 from streamwright.core.jobs.state import open_sqlite
 
 EXAMPLE = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "examples", "files", "jobs", "orders",
                        "sync.yaml")
+
+
+def _state(tmp_path, action, *args):
+    """`streamwright state ACTION --url ... ARGS` on the job's state database (tmp_path/state.db)."""
+    return cli_main(["state", action, "--url", "sqlite:///%s" % (tmp_path / "state.db"), *args])
 
 
 def _job(tmp_path, **extra):
@@ -88,14 +94,11 @@ def test_run_then_list_state(tmp_path, capsys, monkeypatch):
     config.write_text("config: {limit: 3}\n")
     assert main(["run", _job(tmp_path), "--config", str(config), "--set", "limit=4"]) == 0
     assert "job cli_job finished: 1 batch(es) (cli_job-00000001); o 1 rows" in capsys.readouterr().err
-    assert main(["state", "list", _job(tmp_path)]) == 0
+    assert _state(tmp_path, "list") == 0
     out = capsys.readouterr().out
     assert "cli_job-00000001" in out and "completed" in out
-    assert main(["state", "retry", _job(tmp_path), "cli_job-00000001", "--log-level", "DEBUG"]) == 1
+    assert _state(tmp_path, "retry", "cli_job-00000001") == 1
     assert "is not failed" in capsys.readouterr().err
-    with pytest.raises(SystemExit) as usage:                       # only retry, which runs the job, takes logging
-        main(["state", "list", _job(tmp_path), "--log-level", "DEBUG"])
-    assert usage.value.code == 2
 
 
 def test_a_missing_required_secret_fails_the_run_without_running(tmp_path, capsys, monkeypatch):
@@ -203,9 +206,9 @@ def test_a_run_applies_state_migrations_only_when_asked(tmp_path, capsys, monkey
     assert (line["level"], line["logger"], line["event"], line["status"]) == ("ERROR", "streamwright.duckdb",
                                                                                "state_error", "failed")
     assert line["message"].startswith("the state tables in sqlite file")
-    assert main(["state", "list", job]) == 1                       # state actions do not migrate either
+    assert _state(tmp_path, "list") == 1                           # state actions do not migrate either
     assert not open_sqlite(str(tmp_path / "state.db")).check_schema()
-    assert main(["state", "migrate", job]) == 0
+    assert _state(tmp_path, "migrate") == 0
     assert main(["run", job]) == 0
     other = tmp_path / "other"
     other.mkdir()
@@ -219,9 +222,9 @@ def test_a_failed_batch_lists_on_one_line_with_the_first_line_of_its_error(tmp_p
     job = _job(tmp_path, spec={}, steps=[{"name": "s", "sql": "SELECT error('first line' || chr(10) || 'second')"}])
     assert main(["run", job]) == 1
     capsys.readouterr()
-    assert main(["state", "list", job]) == 0
+    assert _state(tmp_path, "list") == 0
     header, row = capsys.readouterr().out.splitlines()
-    assert header.startswith("JOB_ID") and "failed" in row and "first line" in row and "second" not in row
+    assert header.split()[:2] == ["JOB", "JOB_ID"] and "failed" in row and "first line" in row and "second" not in row
 
 
 def test_the_failed_job_policy_abandons_by_default_and_can_retry_or_block(tmp_path, capsys):
@@ -234,13 +237,13 @@ def test_the_failed_job_policy_abandons_by_default_and_can_retry_or_block(tmp_pa
     assert "retry: job_id=cli_job-00000001, attempt=2 of 2" in capsys.readouterr().err
     assert main(["run", job, *retry]) == 1
     assert "is not retried (started 2 time(s), max job attempts 2)" in capsys.readouterr().err
-    assert main(["state", "list", job]) == 0
+    assert _state(tmp_path, "list") == 0
     header, row = capsys.readouterr().out.splitlines()
-    assert header.split()[:4] == ["JOB_ID", "STATUS", "SEQUENCE", "ATTEMPTS"] and row.split()[:4] == [
-        "cli_job-00000001", "failed", "1", "2"]
+    assert header.split()[:4] == ["JOB", "JOB_ID", "STATUS", "ATTEMPTS"] and row.split()[:4] == [
+        "cli_job", "cli_job-00000001", "failed", "2"]
     assert main(["run", job]) == 1                       # the default abandons it; the new batch fails in turn
     assert "abandoned: job_id=cli_job-00000001, reason=failed job policy abandon" in capsys.readouterr().err
-    assert [line.split()[1] for line in _listed(job, capsys)] == ["failed", "abandoned"]
+    assert [line.split()[2] for line in _listed(tmp_path, capsys)] == ["failed", "abandoned"]
     assert main(["run", job, "--max-job-attempts", "2"]) == 2
     assert "--max-job-attempts needs failed job policy retry (got abandon)" in capsys.readouterr().err
     with pytest.raises(SystemExit):
@@ -253,8 +256,8 @@ def test_the_failed_job_policy_abandons_by_default_and_can_retry_or_block(tmp_pa
     assert "max_job_attempts needs failed_job_policy: retry (the policy is abandon)" in capsys.readouterr().err
 
 
-def _listed(job, capsys):
-    assert main(["state", "list", job]) == 0
+def _listed(tmp_path, capsys):
+    assert _state(tmp_path, "list") == 0
     return capsys.readouterr().out.splitlines()[1:]
 
 
@@ -265,33 +268,31 @@ def _scoped(tmp_path):
                                    "apply_migrations": True}})
 
 
-def test_state_actions_take_only_their_options(tmp_path, capsys):
+def test_state_actions_need_only_the_state_database(tmp_path, capsys):
     job = _scoped(tmp_path)
-    assert main(["state", "check", job, "--set", "client=a"]) == 1          # check never creates the tables
-    assert not os.path.exists(tmp_path / "state.db") or open_sqlite(str(tmp_path / "state.db")).schema_version() is None
-    assert main(["state", "migrate", job, "--set", "client=a"]) == 0
-    assert main(["state", "check", job, "--set", "client=a"]) == 0
+    assert _state(tmp_path, "check") == 2                                  # no database there: check never makes one
+    assert not os.path.exists(tmp_path / "state.db")
+    assert _state(tmp_path, "migrate") == 0 and _state(tmp_path, "check") == 0
     for client in ("a", "b"):
         assert main(["run", job, "--set", "client=%s" % client]) == 0
     capsys.readouterr()
-    assert main(["state", "list", job, "--set", "client=a", "--scope", "client:b", "--json"]) == 0
+    assert _state(tmp_path, "list", "--scope", "client:b", "--json") == 0
     listed = [line for line in capsys.readouterr().out.splitlines() if line]
     assert len(listed) == 1 and '"scope": "client:b"' in listed[0]
-    assert main(["state", "status", job, "--set", "client=a"]) == 0
-    job_id = capsys.readouterr().out.splitlines()[-1].split()[0]
-    assert main(["state", "show", "--job", job, job_id, "--set", "client=a"]) == 0    # --job JOB JOB_ID
+    assert _state(tmp_path, "list", "--job", "cli_job", "--scope", "client:a", "--limit", "1", "--json") == 0
+    job_id = json.loads(capsys.readouterr().out)["job_id"]                 # the newest batch of a scope
+    assert _state(tmp_path, "show", job_id) == 0
     shown = json.loads(capsys.readouterr().out)
     assert (shown["scope"], shown["job_id"], shown["sequence"]) == ("client:a", job_id, 1) and "batch_id" not in shown
-    assert main(["state", "purge", job, "--older-than", "0s", "--scope", "client:b", "--set", "client=a"]) == 0
+    assert _state(tmp_path, "purge", "--job", "cli_job", "--older-than", "0s", "--scope", "client:b") == 0
     assert "purged 1" in capsys.readouterr().out
-    for wrong in (["state", "list", job, "--strict"], ["state", "list", job, "--job-id", job_id],
-                  ["state", "migrate", job, "--limit", "3"]):
+    assert _state(tmp_path, "leases", "--job", "cli_job") == 0
+    assert "scope:client:a" in capsys.readouterr().out
+    for wrong in (["list", "--strict"], ["list", "--set", "client=a"], ["migrate", "--limit", "3"], ["retry"],
+                  ["purge"]):                                               # retry: a job id; purge: --job
         with pytest.raises(SystemExit) as usage:
-            main(wrong)
+            _state(tmp_path, *wrong)
         assert usage.value.code == 2
-    with pytest.raises(SystemExit):
-        main(["state", "retry", job, "--set", "client=a"])                     # no job id
-    assert "acts on one batch: give its job id" in capsys.readouterr().err
 
 
 def test_a_job_key_from_the_command_line_runs_once_per_scope(tmp_path, capsys):
@@ -317,3 +318,46 @@ def test_a_connector_that_is_not_installed_is_named_once_with_how_to_install_it(
     assert "is not one of" not in err and "does not use `path`" not in err
     assert main(["validate", job]) == 0                    # offline it is a warning: the connector may come later
     assert "warning [connector-not-installed]" in capsys.readouterr().err
+
+
+def test_the_state_database_alone_lists_and_shows_batches_by_job_id_or_request_id(tmp_path, capsys, monkeypatch):
+    """`streamwright state list|show --url`: no job manifest, no config (the job's required config is not given)."""
+    monkeypatch.setenv("STREAMWRIGHT_SECRET_PASSWORD", "x")
+    job = _job(tmp_path, spec={"config": {"limit": {"type": "integer", "default": 1},
+                                          "tenant": {"type": "string", "required": True}},
+                               "secrets": {"password": {"type": "string"}}},
+               runtime={"state": {"sqlite": str(tmp_path / "state.db"), "apply_migrations": True,
+                                  "scope": "tenant:{{ config.tenant }}"}})
+    for tenant in ("a", "b"):
+        assert main(["run", job, "--set", "tenant=%s" % tenant]) == 0
+    capsys.readouterr()
+    url = "sqlite:///%s" % (tmp_path / "state.db")
+    assert cli_main(["state", "list", "--url", url, "--json"]) == 0
+    listed = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [(item["job"], item["scope"], item["status"]) for item in listed] == [
+        ("cli_job", "tenant:b", "completed"), ("cli_job", "tenant:a", "completed")]
+    assert all(item["request_id"].startswith("sw_") for item in listed)
+    # a table output's rows are WRITTEN (its receipts); an apply output's rows are in the OUTBOX, by status
+    assert [(item["rows_written"], item["outbox"]) for item in listed] == [(1, {}), (1, {})]
+
+    assert cli_main(["state", "list", "--url", url, "--scope", "tenant:a"]) == 0
+    table = capsys.readouterr().out
+    assert "REQUEST_ID" in table and "OUTBOX" in table and listed[1]["job_id"] in table
+    assert listed[0]["job_id"] not in table
+
+    assert cli_main(["state", "show", "--url", url, "--request-id", listed[1]["request_id"]]) == 0
+    (shown,) = json.loads(capsys.readouterr().out)                    # a run's batches: a list
+    assert (shown["job"], shown["job_id"], shown["scope"]) == ("cli_job", listed[1]["job_id"], "tenant:a")
+    assert shown["outbox"] == [] and "o" in shown["receipts"] and shown["manifest"]
+    assert cli_main(["state", "show", "--url", url, listed[0]["job_id"]]) == 0
+    assert json.loads(capsys.readouterr().out)["scope"] == "tenant:b"   # a job id: one object
+
+    assert cli_main(["state", "show", "--url", url, "cli_job-nope"]) == 1
+    assert "no batch cli_job-nope" in capsys.readouterr().err
+    assert cli_main(["state", "show", "--url", url]) == 2              # a job id or a request id
+    missing = tmp_path / "missing.db"
+    assert cli_main(["state", "list", "--url", "sqlite:///%s" % missing]) == 2
+    assert not missing.exists()                                        # a read never creates a database
+    (tmp_path / "empty.db").write_bytes(b"")
+    assert cli_main(["state", "list", "--url", "sqlite:///%s" % (tmp_path / "empty.db")]) == 1
+    assert "cannot read the state tables" in capsys.readouterr().err

@@ -806,7 +806,7 @@ def test_file_name_problems_stop_the_run_before_any_request(api, tmp_path, monke
     assert problem in caplog.text and api.requests == [] and not out.exists()
 
 
-@pytest.mark.parametrize("output", ["singer", "duckdb:warehouse.duckdb", "dlt:duckdb"])
+@pytest.mark.parametrize("output", ["singer", "duckdb:warehouse.duckdb"])
 def test_file_name_needs_file_output(api, tmp_path, monkeypatch, caplog, output):
     path = write_source(tmp_path, monkeypatch, make_source(api))
     assert cli.main(["run", str(path), "--output", output, "--file-name", "{{ export }}.jsonl"]) == 2

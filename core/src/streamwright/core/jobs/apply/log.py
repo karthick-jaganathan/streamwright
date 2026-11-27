@@ -39,6 +39,7 @@ import duckdb
 
 from streamwright.core.jobs.fields import Field
 from streamwright.core.jobs.step_log import STEP_LOG_FIELD, StepLog, StepLogError, log_step_rows
+from streamwright.core.runtime.logs.sql import logged
 from streamwright.core.sql.quote import quote_ident
 
 __all__ = ["OUTPUT_LOG", "OUTPUT_LOG_FIELD", "OutputLog", "check_output_log", "log_outcomes"]
@@ -122,14 +123,15 @@ def log_outcomes(log, rows, *, row_values=True, redact=None, constants=None):
     if not rows:
         return
     try:
-        connection = duckdb.connect()
+        quiet = duckdb.connect()                        # its limits and lock: unlogged; its queries: logged
+        connection = logged(quiet, "output log")
         try:
             for statement in _LIMITS:
-                connection.execute(statement)
+                quiet.execute(statement)
             with tempfile.TemporaryDirectory(prefix="sw-output-log-") as folder:
                 _results(connection, log.step, rows, folder)
             for statement in _LOCK:
-                connection.execute(statement)
+                quiet.execute(statement)
             if log.sql is not None:
                 _one_select(log.sql)
             cursor = connection.execute(log.sql or "SELECT * FROM %s" % quote_ident(log.step))

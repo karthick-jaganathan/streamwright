@@ -19,7 +19,6 @@
 
 import csv
 import datetime
-import importlib.util
 import json
 import logging
 import os
@@ -36,8 +35,6 @@ from streamwright.core.outputs.ducklake import load_ducklake
 from streamwright.core.outputs.output import ParquetOutput, log_summary, open_output, parquet_type
 from streamwright.core.sdk.testing import page_stream
 
-needs_dlt = pytest.mark.skipif(importlib.util.find_spec("dlt") is None,
-                               reason="needs dlt (pip install 'streamwright[dlt]' 'dlt[duckdb]')")
 TODAY = datetime.date(2026, 10, 3)
 
 
@@ -415,29 +412,6 @@ def test_duckdb_summary_marks_tables_kept_from_the_last_complete_run(api, tmp_pa
     assert closing_lines(caplog) == [
         ("did not load shop.orders: 1 row (its stream skipped partitions: the table keeps the rows of the last "
          "complete run)", {"export": "orders", "records": 1, "table": "shop.orders"})]
-
-
-@needs_dlt
-def test_dlt_output_summarizes_its_tables_as_dlt_names_them(api, tmp_path, stage, monkeypatch, caplog):
-    monkeypatch.chdir(tmp_path)  # dlt reads .dlt/ from the working directory
-    monkeypatch.setenv("DLT_DATA_DIR", str(tmp_path / "dlt"))
-    monkeypatch.setenv("DESTINATION__DUCKDB__CREDENTIALS", str(tmp_path / "warehouse.duckdb"))
-    source = shop(api)
-    with caplog.at_level(logging.INFO, logger="streamwright.output"):
-        entries = run(source, open_output("dlt:duckdb:analytics", source))
-    state = "analytics._dlt_pipeline_state"
-    assert entries == [
-        {"export": "orders", "records": 3, "table": "analytics.orders", "disposition": "merge",
-         "primary_key": ["id"], "state": state},
-        {"export": "eventLog", "records": 1, "table": "analytics.event_log", "disposition": "replace",
-         "primary_key": [], "state": state}]
-    assert closing_lines(caplog) == [
-        ("loaded analytics.orders: 3 rows (merge on id)", {"export": "orders", "records": 3,
-                                                           "table": "analytics.orders"}),
-        ("loaded analytics.event_log: 1 row (replace)", {"export": "eventLog", "records": 1,
-                                                         "table": "analytics.event_log"})]
-    assert [rows_in(tmp_path / "warehouse.duckdb", entry["table"]) for entry in entries] == [3, 1]
-    assert os.listdir(str(stage)) == []
 
 
 @pytest.mark.parametrize("spec", ["singer", "jsonl:{tmp}/out", "parquet:{tmp}/out", "duckdb:{tmp}/w.duckdb"])

@@ -16,7 +16,7 @@
 # **************************************************************************/
 
 """
-Writers for a run's SCHEMA / RECORD / STATE output: Singer messages, files or warehouse loaders.
+Writers for a run's SCHEMA / RECORD / STATE output: Singer messages, files, DuckDB or DuckLake.
 
 Every output has summary(): what it wrote, one entry (a dict) per export, in the order the exports were first
 written. Call it after close(). Keys:
@@ -24,11 +24,11 @@ written. Call it after close(). Keys:
 - export: the export's name; records: the number of records the run wrote to it.
 - path and bytes (jsonl, csv, tsv and parquet files): the export's file (the output directory joined with its name)
   and its size in bytes, once it is written.
-- table, disposition and primary_key (duckdb, ducklake and dlt): the table, as SCHEMA.TABLE (dlt: DATASET.TABLE, as
-  dlt names it), how it was loaded - merge (on primary_key), replace, append, or skipped (an unkeyed export of a
-  full-refresh stream that skipped partitions: its table keeps the rows of the last complete run) - and its key.
-- state: where the run's state went, when it was saved: DIR/state.json, SCHEMA._streamwright_state,
-  DATASET._dlt_pipeline_state, or stdout for Singer STATE messages.
+- table, disposition and primary_key (duckdb and ducklake): the table, as SCHEMA.TABLE, how it was loaded - merge
+  (on primary_key), replace, append, or skipped (an unkeyed export of a full-refresh stream that skipped partitions:
+  its table keeps the rows of the last complete run) - and its key.
+- state: where the run's state went, when it was saved: DIR/state.json, SCHEMA._streamwright_state, or stdout for
+  Singer STATE messages.
 
 After close(failed=True), or a close() that failed, the outputs that write when a run ends have no entries: nothing
 was written. Singer messages go out while the run goes, so SingerOutput describes them in any case.
@@ -38,11 +38,10 @@ their warnings, and staging details at DEBUG.
 
 Records keep the exact values of DECIMAL columns (decimal.Decimal): JSON (Singer messages, jsonl files) writes them
 as exact numbers, csv and tsv files as the same text (templates.decimal_text: 2.6, 100, 12345678901234567890.123456),
-and DuckDB, DuckLake and Parquet store them in DECIMAL columns (dlt too, in the columns it makes).
+and DuckDB, DuckLake and Parquet store them in DECIMAL columns.
 """
 
 import datetime
-import importlib
 import logging
 import sys
 from types import MappingProxyType
@@ -74,7 +73,6 @@ LOG = logging.getLogger("streamwright.output")
 # --output FORMAT:DIR: one file per export, plus state.json
 FILE_FORMATS = ("jsonl", "csv", "tsv", "parquet")
 FILE_NAME_OUTPUTS = "--file-name works only with --output jsonl:DIR, csv:DIR, tsv:DIR or parquet:DIR"
-DLT_OUTPUT_MODULE = "streamwright.core.outputs.dlt_output"
 
 
 def _now():
@@ -138,23 +136,6 @@ def _open_file(kind):
     return factory
 
 
-def _open_dlt(detail, source, file_names):
-    destination, _, dataset = detail.partition(":")
-    if not destination:
-        raise ValueError("--output dlt needs a destination, e.g. dlt:duckdb or dlt:bigquery:DATASET")
-    return _dlt_output_class()(destination, dataset or None, source)
-
-
-def _dlt_output_class():
-    """DltOutput, from the module that imports the optional dlt library (loaded for `--output dlt` only)."""
-    try:
-        module = importlib.import_module(DLT_OUTPUT_MODULE)
-    except ImportError as exc:
-        raise ValueError('--output dlt:... needs dlt: pip install "streamwright[dlt]" and the destination\'s extra, '
-                         'e.g. "dlt[duckdb]"') from exc
-    return module.DltOutput
-
-
 def _open_warehouse(kind):
     def factory(detail, source, file_names):
         path, _, schema = detail.partition(":")
@@ -173,15 +154,15 @@ def _open_warehouse(kind):
 
 
 OUTPUT_FACTORIES = MappingProxyType({
-    "singer": _open_singer, "dlt": _open_dlt,
+    "singer": _open_singer,
     "duckdb": _open_warehouse("duckdb"), "ducklake": _open_warehouse("ducklake"),
     **{kind: _open_file(kind) for kind in FILE_FORMATS},
 })
 
 
 def open_output(spec, source=None, file_names=None, *, factories=OUTPUT_FACTORIES):
-    """'singer' (default), 'jsonl:DIR', 'csv:DIR', 'tsv:DIR', 'parquet:DIR', 'dlt:DESTINATION[:DATASET]',
-    'duckdb:PATH[:SCHEMA]' or 'ducklake:CATALOG[:SCHEMA]' (the dataset / schema defaults to the source name; a
+    """'singer' (default), 'jsonl:DIR', 'csv:DIR', 'tsv:DIR', 'parquet:DIR', 'duckdb:PATH[:SCHEMA]' or
+    'ducklake:CATALOG[:SCHEMA]' (the schema defaults to the source name; a
     DuckLake CATALOG can be 'postgres:DSN', a libpq connection string: ducklake:postgres:DSN[:SCHEMA]).
     file_names (--file-name, see export_files): each export's file, for the file outputs (FILE_FORMATS) only.
     factories: the output kinds and their factories; pass OUTPUT_FACTORIES with others to add kinds."""
@@ -189,6 +170,6 @@ def open_output(spec, source=None, file_names=None, *, factories=OUTPUT_FACTORIE
     if file_names is not None and kind not in FILE_FORMATS:
         raise ValueError(FILE_NAME_OUTPUTS)
     if kind not in factories:
-        raise ValueError("--output must be singer, jsonl:DIR, csv:DIR, tsv:DIR, parquet:DIR, "
-                         "dlt:DESTINATION[:DATASET], duckdb:PATH[:SCHEMA] or ducklake:CATALOG[:SCHEMA], got %r" % spec)
+        raise ValueError("--output must be singer, jsonl:DIR, csv:DIR, tsv:DIR, parquet:DIR, duckdb:PATH[:SCHEMA] or "
+                         "ducklake:CATALOG[:SCHEMA], got %r" % spec)
     return factories[kind](directory, source or {"name": "source", "streams": []}, file_names)

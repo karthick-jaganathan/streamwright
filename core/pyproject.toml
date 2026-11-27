@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "streamwright"
-version = "0.1.17"
+version = "0.2.0"
 description = "Declarative data connectors — pull from APIs, files and databases with YAML, shape with SQL, write anywhere."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -26,14 +26,12 @@ dependencies = [
     "requests>=2.25,<3",
     # `select`: the SQL that shapes each stream's records runs in an embedded DuckDB (which needs pytz for
     # timestamps with time zones)
-    "duckdb>=2.0,<2.1",
+    "duckdb>=2.0.1,<2.1",
     "SQLAlchemy>=2.0,<3",
     "pytz",
 ]
 
 [project.optional-dependencies]
-# --output dlt:DESTINATION; also install the destination's extra, e.g. "dlt[duckdb]" or "dlt[bigquery]"
-dlt = ["dlt>=1.0"]
 # `streamwright serve` (the job CLI over HTTP) and `streamwright worker`
 serve = ["starlette>=0.40,<2", "uvicorn>=0.30,<1", "pyjwt[crypto]>=2.8,<3"]
 

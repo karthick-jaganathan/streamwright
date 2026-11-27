@@ -87,7 +87,7 @@ outputs:
       on_row_error: fail
     log:
       sql: |
-        SELECT resource_name, outcome.status AS status, coalesce(outcome.error_message, '') AS detail
+        SELECT resource_name, outcome.status AS status, coalesce(outcome.error_code || ': ' || outcome.error_message, '') AS detail
         FROM update_campaigns
       message: "campaign {resource_name}: {status} {detail}"
 

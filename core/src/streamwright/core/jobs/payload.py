@@ -255,7 +255,7 @@ def load_input(con, table, declared, manifest, payload):
         rows = payload.rows
     else:
         raise PayloadError("the batch's payload was not kept (spec.input.retain: none, or it completed): it cannot "
-                           "be resumed; abandon it (`state abandon`)")
+                           "be resumed; abandon it (`streamwright state abandon --url URL JOB_ID`)")
     names = list(declared["columns"])
     con.execute("CREATE OR REPLACE TEMP TABLE %s (%s)" % (quote_ident(table), ", ".join(
         "%s %s" % (quote_ident(name), _column_type(declared["columns"][name])) for name in names)))

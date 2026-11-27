@@ -123,7 +123,7 @@ def test_a_failure_keeps_the_receipts_and_retry_writes_only_the_rest(state):
     assert (state.get_batch("job", batch_id)["status"], state.get_batch("job", batch_id)["failed_from"]) == (
         "failed", "processing")
     blocked, code = _run(state, FakeExecutor(), failed_jobs=FailedJobPolicy("block"))
-    assert code == 1 and "not retried (failed job policy block): retry or abandon it" in blocked.error
+    assert code == 1 and "not retried (failed job policy block): `streamwright state retry|abandon" in blocked.error
     lease = state.acquire_lease("job", "operator", 60)
     state.retry_batch(lease, batch_id)
     state.release_lease(lease)

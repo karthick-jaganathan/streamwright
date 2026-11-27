@@ -63,12 +63,12 @@ STATE_FIELDS = MappingProxyType({
                                            "abandon (default) gives it up (status abandoned, its error kept) and "
                                            "runs on; retry resumes it, from the status it failed in and with its "
                                            "pinned inputs, while it has been started fewer than max_job_attempts "
-                                           "times, then blocks; block stops the run until `state retry` or `state "
-                                           "abandon` (--failed-job-policy overrides it)"),
+                                           "times, then blocks; block stops the run until `streamwright "
+                                           "state retry` or `abandon` (--failed-job-policy overrides it)"),
     "max_job_attempts": Field("integer", minimum=1, default=DEFAULT_MAX_JOB_ATTEMPTS,
                               description="failed_job_policy retry only: how many times a failed job may be started "
-                                          "in all (default %d, the first run included); then runs stop until `state "
-                                          "retry` or `state abandon` (--max-job-attempts overrides it)"
+                                          "in all (default %d, the first run included); then runs stop until "
+                                          "`streamwright state retry` or `abandon` (--max-job-attempts overrides it)"
                                           % DEFAULT_MAX_JOB_ATTEMPTS),
     "scope": Field("string", description="the state scope: batches, recovery, job keys, carried values, sequences "
                                          "and the outbox are kept per scope, and one run per scope is active; e.g. "

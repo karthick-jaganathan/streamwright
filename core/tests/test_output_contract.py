@@ -22,15 +22,12 @@ import pytest
 from streamwright.core.outputs.output import OUTPUT_FACTORIES, Output, SingerOutput, open_output
 
 
-@pytest.mark.parametrize("kind", ["singer", "jsonl", "csv", "tsv", "parquet", "duckdb", "ducklake", "dlt"])
+@pytest.mark.parametrize("kind", ["singer", "jsonl", "csv", "tsv", "parquet", "duckdb", "ducklake"])
 def test_builtin_outputs_implement_contract(kind, tmp_path):
     source = {"name": "contract", "streams": []}
     schema = {"type": "object", "properties": {"id": {"type": "integer"}}}
     if kind == "singer":
         output = SingerOutput(io.StringIO())
-    elif kind == "dlt":
-        pytest.importorskip("dlt")
-        output = open_output("dlt:duckdb:contract", source=source)
     else:
         output = open_output("%s:%s" % (kind, tmp_path / "output"), source=source)
     try:

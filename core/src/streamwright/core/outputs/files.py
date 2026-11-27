@@ -32,6 +32,7 @@ import duckdb
 from streamwright.core.outputs.base import BaseOutput, log_summary
 from streamwright.core.outputs.file_names import STATE_FILE, is_inside
 from streamwright.core.outputs.staging import Staging, quote, sql_string, staged_table, storage_type, typed_columns
+from streamwright.core.runtime.logs.sql import logged
 from streamwright.core.runtime.templates import to_json, to_text
 
 LOG = logging.getLogger("streamwright.output")
@@ -236,8 +237,9 @@ class ParquetOutput(FileOutput):
         if not self.files:
             return
         # it reads the staged files and writes the Parquet ones in the records' order, spilling to the staging folder
-        connection = duckdb.connect(":memory:", config={
-            "temp_directory": os.path.join(self.staging.directory, "duckdb"), "preserve_insertion_order": True})
+        connection = logged(duckdb.connect(":memory:", config={
+            "temp_directory": os.path.join(self.staging.directory, "duckdb"), "preserve_insertion_order": True}),
+            "output")
         try:
             connection.execute("SET TimeZone = 'UTC'")
             for name, item in self.files.items():

@@ -17,6 +17,7 @@
 
 """DuckDBJob runs through the shared Runner: state in the job's own catalog, replay, job keys, limits, redaction."""
 
+import io
 import logging
 import os
 import sqlite3
@@ -31,6 +32,7 @@ from streamwright.core.jobs.duckdb.adapter import BUILT_IN_ADAPTERS, ProviderAda
 from streamwright.core.jobs.duckdb.engine import JobInvalidError, run_job
 from streamwright.core.jobs.fields import Field
 from streamwright.core.jobs.state import open_sqlite
+from streamwright.core.runtime.logs import LogSetup
 from streamwright.core.sql.quote import sql_string
 
 EXAMPLE = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "examples", "files", "jobs", "orders",
@@ -221,3 +223,33 @@ def test_engine_itemized_multi_resource_disjoint_runs_concurrently(tmp_path):
 
     store.release_lease(lease_1_2)
 
+
+
+@pytest.mark.parametrize("level", [logging.INFO, logging.DEBUG])
+def test_streamwright_sql_logs_each_statement_and_the_sql_only_at_debug(tmp_path, level):
+    stream = io.StringIO()
+    setup = LogSetup(None, "text", [("streamwright.sql", level)], None, stream=stream)
+    try:
+        assert run_job(EXAMPLE, overlays=[_overlay(tmp_path)], config={"min_amount_usd": "20"}).exit_code == 0
+    finally:
+        setup.close()
+    lines = [line for line in stream.getvalue().splitlines() if " streamwright.sql" in line]
+    step = next(line for line in lines if "step=high_value_orders" in line)
+    assert "job: CREATE OR REPLACE TEMP VIEW high_value_orders, " in step
+    assert any(" streamwright.sql.state " in line and "state: INSERT INTO " in line for line in lines)   # the store's
+    rendered = 'AS SELECT * FROM harmonized_orders WHERE amount_usd >= 20'    # {{ config.min_amount_usd }}, rendered
+    assert (rendered in step) == (level == logging.DEBUG)
+    assert all((" DEBUG " in line) == (level == logging.DEBUG) for line in lines)
+
+
+def test_the_state_stores_sql_lines_can_be_hidden_on_their_own(tmp_path):
+    stream = io.StringIO()
+    setup = LogSetup(None, "text", [("streamwright.sql", logging.INFO), ("streamwright.sql.state", logging.WARNING)],
+                     None, stream=stream)
+    try:
+        assert run_job(EXAMPLE, overlays=[_overlay(tmp_path)], config={"min_amount_usd": "20"}).exit_code == 0
+    finally:
+        setup.close()
+    text = stream.getvalue()
+    assert "job: CREATE OR REPLACE TEMP TABLE harmonized_orders" in text
+    assert "streamwright.sql.state" not in text and "state: " not in text

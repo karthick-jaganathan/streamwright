@@ -35,6 +35,7 @@ from urllib.parse import quote, quote_plus
 
 import duckdb
 
+from streamwright.core.runtime.logs.sql import logged
 from streamwright.core.sql.quote import quote_literal
 
 __all__ = ["LIMITS", "ConnectError", "DuckDBSandbox", "QueryError", "StatementTimeoutError", "decode_record",
@@ -119,7 +120,7 @@ class DuckDBSandbox:
         try:
             config = dict(limits or LIMITS, autoinstall_known_extensions=False, autoload_known_extensions=False,
                           python_enable_replacements=False, temp_directory=self.folder)
-            self.connection = duckdb.connect(":memory:", config=config)
+            self.connection = logged(duckdb.connect(":memory:", config=config), "connector %s" % provider)
         except Exception:
             shutil.rmtree(self.folder, ignore_errors=True)
             raise

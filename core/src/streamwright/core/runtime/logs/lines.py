@@ -27,6 +27,7 @@ import logging
 
 LOG = logging.getLogger("streamwright.source")
 NETWORK = logging.getLogger("streamwright.network")
+SQL = logging.getLogger("streamwright.sql")
 LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
 FORMATS = ("text", "json")
 DEFAULT_MAX_CHARS = 20000
@@ -38,7 +39,8 @@ TEXT_FORMAT = "[%(asctime)s] %(levelname)s %(name)s%(context_tag)s: %(message)s"
 FIELDS = ("event", "stream", "partition", "window", "request", "export", "exports", "connector", "call", "method",
           "url", "page", "records", "pages", "requests", "retries", "failed_partitions", "streams", "outputs",
           "duration_ms", "status", "code", "attempt", "bytes", "path", "table", "outcome", "database", "job_id",
-          "run_id", "queue_wait_ms", "job_request", "job_status", "checks", "job_step")   # job_*: an async job's
+          "run_id", "queue_wait_ms", "job_request", "job_status", "checks", "job_step",   # job_*: an async job's
+          "parameters", "sql")
 # the log context's keys (runtime/logs/context.py): JSON lines carry them for every logger, labels as one object
 CONTEXT_KEYS = ("job", "labels", "item", "scope", "job_id", "step", "output", "lookup")
 

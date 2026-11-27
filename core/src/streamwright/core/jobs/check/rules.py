@@ -25,9 +25,12 @@ from streamwright.core.jobs.lookups.rules import INPUT_LOOKUP_FIELD
 from streamwright.core.jobs.plan import item_dependencies
 from streamwright.core.validation import vocabulary as source_spec
 
-__all__ = ["INPUT_NAME_PATTERN", "NAME_PATTERN", "RESERVED_NAMES", "JobRules", "input_field"]
+__all__ = ["INPUT_NAME_PATTERN", "JOB_NAME_PATTERN", "NAME_PATTERN", "RESERVED_NAMES", "JobRules", "input_field"]
 
-NAME_PATTERN = r"^[a-z][a-z0-9_]{0,62}$"
+NAME_PATTERN = r"^[a-z][a-z0-9_]{0,62}$"            # steps, outputs, connections: they name DuckDB/Spark tables
+# a job's own name: NAME_PATTERN parts joined by dots (google_ads.upload_conversions), at most 128 characters; it is
+# text only (state rows, batch ids `<name>-<scope hash>-<sequence>`, Spark's app name), never a table, so no `-`
+JOB_NAME_PATTERN = r"^(?=.{1,128}$)[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$"
 INPUT_NAME_PATTERN = source_spec.NAME_PATTERN
 RESERVED_NAMES = frozenset(["input", "batch", "config", "secrets", "runtime", "driver", "_commits", "_file_errors",
                             "_schema_report", "_streamwright_state"])

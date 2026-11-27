@@ -1,0 +1,89 @@
+# /*************************************************************************
+# * Copyright 2026 Karthick Jaganathan
+# *
+# * Licensed under the Apache License, Version 2.0 (the "License");
+# * you may not use this file except in compliance with the License.
+# * You may obtain a copy of the License at
+# *
+# * https://www.apache.org/licenses/LICENSE-2.0
+# *
+# * Unless required by applicable law or agreed to in writing, software
+# * distributed under the License is distributed on an "AS IS" BASIS,
+# * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# * See the License for the specific language governing permissions and
+# * limitations under the License.
+# **************************************************************************/
+
+# Reads the processing status of an ingestion request (the request_id every applied row's result keeps) and merges it
+# into a DuckDB table, a row per destination; logs a line per error reason with the failed record indices (the rows'
+# record_index in their request).
+#
+#   streamwright duckdb run examples/google_data_manager/jobs/requests/status.yaml --set request_id=REQUEST_ID \
+#     --secrets ~/.streamwright/google-data-manager-secrets.yaml --apply-state-migrations
+#
+# Google processes a request asynchronously: run this some minutes after the ingestion; `status` stays PROCESSING
+# until it is done.
+kind: DuckDBJob
+version: 1
+name: google_data_manager_request_status
+description: The processing status of a Data Manager ingestion request, per destination
+
+spec:
+  config:
+    request_id: {type: string, required: true, pattern: "^[A-Za-z0-9_-]+$",
+                 description: "the request_id of an ingestion (an applied row's result)"}
+  secrets:
+    client_id: {type: string, required: true}
+    client_secret: {type: string, required: true}
+    refresh_token: {type: string, required: true}
+
+connections:
+  dm:
+    provider: google_data_manager
+    client_id: "{{ secrets.client_id }}"
+    client_secret: "{{ secrets.client_secret }}"
+    refresh_token: "{{ secrets.refresh_token }}"
+  warehouse:
+    provider: duckdb
+    path: /tmp/google_data_manager_dw.duckdb
+
+steps:
+  # a row per destination of the request
+  - name: status
+    connection: dm
+    operation:
+      service: IngestionService
+      method: retrieve_request_status
+      arguments:
+        request_id: "{{ config.request_id }}"
+    sql: |
+      SELECT record->>'$.request_id'                         AS request_id,
+             CAST(record->'$.destination' AS VARCHAR)        AS destination,
+             record->>'$.request_status'                     AS status,
+             CAST(record->'$.error_info' AS VARCHAR)         AS errors,
+             CAST(record->'$.warning_info' AS VARCHAR)       AS warnings,
+             CAST(record AS VARCHAR)                         AS detail
+      FROM records
+
+  # a line per error reason: how many records, and which (their record_index in the request)
+  - name: failures
+    sql: |
+      SELECT status.destination,
+             error_count->>'$.reason'                          AS reason,
+             (error_count->>'$.record_count')::BIGINT          AS records,
+             CAST(error_count->'$.record_indices' AS VARCHAR)  AS record_indices
+      FROM status,
+           unnest(from_json(CAST(status.errors AS JSON)->'$.error_counts', '["json"]')) AS error_counts(error_count)
+      WHERE status.errors IS NOT NULL
+    log:
+      message: "{destination}: {records} record(s) failed with {reason}: {record_indices}"
+      level: warning
+      max_rows: 100
+
+outputs:
+  - name: save_status
+    connection: warehouse
+    step: status
+    table: data_manager_request_status
+    mode: merge
+    primary_key: [request_id, destination]

@@ -219,14 +219,32 @@ def resolve_state_url(url: str | None = None, schema: str | None = None) -> Reso
     raise ValueError("unsupported state database URL scheme %r (sqlite, duckdb, postgresql, mysql)" % scheme)
 
 
-def migration_runner_for_url(url: str | None = None, schema: str | None = None) -> MigrationRunner:
-    """A MigrationRunner for a state database URL."""
-    return resolve_state_url(url=url, schema=schema).make_runner()
+def _require_file(resolved: ResolvedStateUrl) -> None:
+    """ValueError when a SQLite or DuckDB URL names a file that is not there (connecting would create it)."""
+    if not isinstance(resolved.dialect, (SqliteDialect, DuckDBDialect)):
+        return
+    path = _file_path(urllib.parse.urlparse(resolved.url))
+    if path != ":memory:" and not os.path.exists(path):
+        raise ValueError("no state database at %s (`streamwright state migrate` creates it)" % path)
 
 
-def open_url(url: str | None = None, schema: str | None = None):
-    """A SqlStateStore for a state database URL (it keeps an in-memory database open)."""
+def migration_runner_for_url(url: str | None = None, schema: str | None = None, *,
+                             existing: bool = False) -> MigrationRunner:
+    """A MigrationRunner for a state database URL. `existing`: a SQLite or DuckDB file must be there already."""
     resolved = resolve_state_url(url=url, schema=schema)
+    if existing:
+        _require_file(resolved)
+    return resolved.make_runner()
+
+
+def open_url(url: str | None = None, schema: str | None = None, *, existing: bool = False):
+    """
+    A SqlStateStore for a state database URL (it keeps an in-memory database open). `existing`: a SQLite or DuckDB
+    file must be there already (a read never leaves an empty database behind).
+    """
+    resolved = resolve_state_url(url=url, schema=schema)
+    if existing:
+        _require_file(resolved)
     store = SqlStateStore(resolved.connect, resolved.dialect, schema=resolved.schema, catalog=resolved.catalog,
                           target=resolved.target)
     store.keepalive = resolved.keepalive

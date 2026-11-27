@@ -35,7 +35,7 @@ with a `source.yaml` and a file per stream) replaces today's authorization + con
 5. Keep the legacy format's strengths (SDK-backed calls to gRPC/SOAP APIs, streaming), and shape records with
    standard SQL instead of a transform library.
 
-**Non-goals:** warehouse loaders of our own (emit a standard protocol, and load through dlt), scheduling and
+**Non-goals:** scheduling and
 orchestration, general-purpose programming in YAML (no loops or arbitrary expressions), and transforms across streams
 or sources (they run in the warehouse after loading).
 
@@ -1428,15 +1428,14 @@ git tag `fields-dsl`):
 
 - Money: multiplying by a decimal (`* 0.000001`) keeps the arithmetic in DECIMAL, which is exact, and `round` rounds
   half away from zero. DOUBLE arithmetic carries binary errors (`round(1.005::DOUBLE, 2)` is 1.0).
-- A JSON column (`record->'x'`) can hold any JSON value, so its schema is open and dlt types it from the values
-  (an object becomes columns and child tables). Cast it to keep an object or a list as one column: a MAP, STRUCT
-  or list column has an `object` or `array` schema and loads as JSON.
+- A JSON column (`record->'x'`) can hold any JSON value, so its schema is open. Cast it to keep an object or a list
+  as a typed column: a MAP, STRUCT or list column has an `object` or `array` schema.
 
 #### Across streams
 
 Steps see only the records their own stream read in this run. Joins across streams (daily performance with each
 campaign's settings), joins across sources and totals over full history belong in the warehouse after loading: SQL
-over the tables that `--output duckdb:`, `ducklake:` or `dlt:` loaded, or dbt models. For example, after
+over the tables that `--output duckdb:` or `ducklake:` loaded, or dbt models. For example, after
 `streamwright run examples/sources/ads/google_ads --output duckdb:warehouse.duckdb`:
 
 ```sql
@@ -1452,7 +1451,7 @@ exports, is the git tag `transform-cross-stream`.
 ### `export`
 
 `export` maps export names to steps of the stream; a stream needs at least one. Each export is one output: a Singer
-stream, a file, or a table in DuckDB, DuckLake or a dlt destination.
+stream, a file, or a table in DuckDB or DuckLake.
 
 | Key | Meaning |
 |---|---|
@@ -1550,13 +1549,10 @@ writer stores them (`INTERVAL` as seconds, `UUID`, `ENUM` and `BLOB` as text), w
 `DECIMAL(38,0)`, which stays exact, and nested values (lists, structs, maps, `JSON`) are JSON text.
 Parquet records are staged on disk while the run goes, and DuckDB writes the zstd-compressed files when it succeeds.
 
-`--output dlt:DESTINATION[:DATASET]` loads the run into any [dlt](https://dlthub.com/docs) destination (DuckDB,
-BigQuery, Snowflake, Postgres, files, ...) when it succeeds: one table per export written by the run, typed by its
-columns and merged on `primary_key` (without one, the exports of full-refresh streams replace their table and those
-of incremental streams are appended), with the run's state saved in, and always read from, the destination.
 `--output duckdb:PATH[:SCHEMA]` or `--output ducklake:CATALOG[:SCHEMA]` loads the run into a DuckDB database file or
-DuckLake catalog with the same table-per-export shape, exact DuckDB column types, and the state committed in the same
-transaction as the data.
+DuckLake catalog when it succeeds: one table per export written by the run, with exact DuckDB column types, merged on
+`primary_key` (without one, the exports of full-refresh streams replace their table and those of incremental streams
+are appended), and the state committed in the same transaction as the data.
 For these outputs, the unkeyed exports of a full-refresh stream that skipped partitions keep their last complete
 table, with a warning.
 
@@ -1646,7 +1642,7 @@ Every stream that runs writes all of its exports, and a stream waits only for it
 without `incremental` save no bookmarks. With `on_partition_error: skip`, a partition that fails is skipped, and the
 next run reads it again from its last saved bookmark; in `run` mode its rows are left out of the steps. A stream that
 skipped partitions is incomplete, and so are its `from_stream` children, which run with the partitions they get.
-For an incomplete full-refresh stream, DuckDB, DuckLake and dlt keep the last complete table of each unkeyed export.
+For an incomplete full-refresh stream, DuckDB and DuckLake keep the last complete table of each unkeyed export.
 
 ## Legacy kinds → source format
 
@@ -1770,5 +1766,6 @@ starts.
 | 20 | Batched request partitions | `batch_size: N` on a request partition (`{name, values}`, `{name, from, field}`, or `{from, fields}` with exactly one field that is not a stream partition): one request per list of up to `N` distinct values, which the name holds, e.g. GAQL `campaign.id IN (...)`; a step's values in a partitioned stream are batched only with `{from, fields}` listing the stream partition fields, so each stream partition lists only its own; not on stream partitions, and windows and state stay per stream partition. `streamwright connectors` lists only the installed connectors and their SDK loggers; query builders such as `gaql` are still used and checked by `streamwright validate` (decided on 2026-10-05) | APIs that filter by a list read a large account in a few calls (1000 campaigns' ad groups in 5 GAQL queries, not 1000), within the query's limits, without a new request type. Stream partitions stay single values, so bookmarks do not change. `streamwright connectors` answers which connectors and SDK loggers are installed |
 | 21 | File and object storage sources | Files and objects are read by reader connectors, not a request kind of the core, one connector per kind of storage: `files` (`streamwright-files`) reads local folders only (`auth: {provider: files, roots: [...]}`; no URLs, no `httpfs`, no credentials, external access always off), and `s3` (`streamwright-s3`) and `gcs` (`streamwright-gcs`) read `s3://` and `gs://` prefixes through DuckDB's `httpfs` (`auth: {provider: s3, roots, key_id, secret, ...}`, or `provider: gcs`; credentials from secrets only). Requests (`method: read`) read csv, tsv, json, jsonl and parquet with DuckDB's readers, each row one record, picked by a path, a glob or a list, or by a `match` regex fully matched below a folder (`recursive` for sub-folders). Every path, and every file or key a glob, a regex or a listing selects, is checked inside a root before anything is read; `s3` and `gcs` refuse any `?` or `%` in a URL and check scheme, bucket and prefix exactly. There is no `https` reader (decided on 2026-10-05, replacing a first version in which `files` also read `s3://`, `gs://` and `https://` roots with credentials blocks) | A connector keeps the core unchanged and each reader optional, allow-listed (`--allow-connector files`) and versioned like the ad APIs, and partitions, windows, `batch_size`, retries and steps work as they are. Split connectors keep local reading free of network access and credentials, and give each object store only its own scheme and settings. DuckDB already shapes records, reads every format and streams large files in bounded memory; refusing `?` and `%` closes httpfs' URL settings (`?s3_endpoint=` would send signed requests to another host), and the roots in `auth` give deployments one place to decide what can be read. A regex picks files a glob cannot (date folders, no `_SUCCESS` markers) |
 | 22 | Database sources | PostgreSQL is read by the `postgres` connector (`streamwright-postgres`), not a request kind of the core: `auth: {provider: postgres, dsn: "{{ secrets.* }}"}` and calls, `method: query` (one SELECT in DuckDB's SQL over the attached database, with `$name` values bound from `params`) or `method: table`. The database is attached `READ_ONLY` through DuckDB's postgres scanner and a temporary DuckDB secret holding the DSN; write keywords, other statements, functions that run text of their own and DuckDB's system and catalog views (`duckdb_*`, `pragma_*`, `system`, `pg_catalog`, `information_schema`, `SHOW`, `DESCRIBE`, `SUMMARIZE`) are refused before a query runs, and an unconstrained `numeric` is read as exact text (decided on 2026-10-05) | The same connector model as files and the ad APIs, with no new driver: DuckDB's scanner pushes filters down, pages large results and binds values, a list included (`= ANY($ids)` for `batch_size`). Read-only is enforced three times (the query check, the attach and a locked connection), so a write fails even when the role could write. Attaching through a secret keeps the DSN out of DuckDB's views, and refusing them keeps queries to the database's own tables; the DSN stays a redacted secret |
-| 23 | Python and DuckDB versions (replaces 12) | Python 3.11+ for streamwright, the connectors, Spark and MCP, with DuckDB 2.0 (`duckdb>=2.0,<2.1`) (decided on 2026-11-02) | The engines are developed and tested on DuckDB 2.0, which needs Python 3.11; a range down to 1.5 let Python 3.10 install an untested DuckDB whose parser and option names differ |
+| 23 | Python and DuckDB versions (replaces 12) | Python 3.11+ for streamwright, the connectors, Spark and MCP, with DuckDB 2.0 (`duckdb>=2.0,<2.1`) (decided on 2026-11-02; the floor raised to `duckdb>=2.0.1` on 2026-11-27 for its security fixes, with table merges checking their keys are unique, as 2.0.1's MERGE no longer refuses repeats) | The engines are developed and tested on DuckDB 2.0, which needs Python 3.11; a range down to 1.5 let Python 3.10 install an untested DuckDB whose parser and option names differ |
+| 24 | No dlt output (replaces 7) | `--output dlt:...` and the `streamwright[dlt]` extra are removed; a source run writes Singer messages, files, DuckDB or DuckLake, and a warehouse such as BigQuery or Snowflake gets a connector of its own when one is needed (decided on 2026-11-27) | dlt duplicated the DuckDB and DuckLake outputs, pinned its own DuckDB range (`dlt[duckdb]` caps DuckDB below 2) and kept a run's state in the destination; connectors keep one model for every write, with jobs' state in `runtime.state` |
 {% endraw %}

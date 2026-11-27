@@ -26,7 +26,6 @@ process what is available now. Secret values never leave in an
 error, a log line of this engine or the state store: they are redacted.
 """
 
-import contextlib
 import logging
 import os
 from collections.abc import Mapping
@@ -41,10 +40,10 @@ from streamwright.core.jobs.duckdb.rules import DuckDBRules
 from streamwright.core.jobs.duckdb.session import Session
 from streamwright.core.jobs.duckdb.steps import message_kind
 from streamwright.core.jobs.grammar import to_internal
-from streamwright.core.jobs.inputs import InputError, declared_inputs, effective_config, secret_values, state_secrets
+from streamwright.core.jobs.inputs import InputError, declared_inputs, effective_config, secret_values
 from streamwright.core.jobs.locking import applies_migrations, lock_plan, resolve_failed_job_policy
 from streamwright.core.jobs.log_labels import job_log_context
-from streamwright.core.jobs.lookups import Lookups, has_lookups, lookup_optional, state_inputs
+from streamwright.core.jobs.lookups import Lookups, has_lookups
 from streamwright.core.jobs.lookups.passes import run_passes
 from streamwright.core.jobs.manifest import load_job, manifest_directory
 from streamwright.core.jobs.payload import run_payload
@@ -56,13 +55,13 @@ from streamwright.core.jobs.state import DEFAULT_SCHEMA, open_sqlite, open_store
 from streamwright.core.jobs.state.target import describe_connection
 from streamwright.core.jobs.types import written_files
 from streamwright.core.runtime.logs.context import log_context, new_request_id
+from streamwright.core.runtime.logs.sql import sql_values
 from streamwright.core.runtime.redact import Redactor
 
 __all__ = [
     "JobInvalidError",
     "RunResult",
     "duckdb_rules",
-    "job_state",
     "json_schema",
     "open_job_state",
     "redactor",
@@ -124,7 +123,6 @@ def _mask(redact, value):
     if value is None or isinstance(value, bool) or value == "":
         return
     redact.add(value)
-    redact.add(str(value).replace("'", "''"))
 
 
 class _RedactFilter(logging.Filter):
@@ -217,7 +215,7 @@ def run_job(job, *, config=None, secrets=None, overlays=(), allowed_connectors=N
                "max_job_attempts": max_job_attempts,
                "input_payload": run_payload(raw, input_source, needed=not resume_only, rows=input_rows)}
     try:
-        with log_context(request_id=request_id or new_request_id()):
+        with log_context(request_id=request_id or new_request_id()), sql_values(log_row_values):
             if not has_lookups(raw):
                 secret_map = secret_values(raw, secrets, environ)
                 for value in secret_map.values():
@@ -379,38 +377,7 @@ def _run(raw, *, config, secret_map, allowed_connectors, dry_run, base_dir, reda
                 if receipt.get("already_committed"):
                     skipped.add(name)
         return RunResult(code, job["name"], plan.describe(), list(runner.processed), outputs, skipped, runner.error,
-                         locations, runner.skipped, lease_held=runner.lease_held, rejected=rejected)
-    finally:
-        session.close()
-
-
-@contextlib.contextmanager
-def job_state(job, *, config=None, secrets=None, overlays=(), allowed_connectors=None, environ=None,
-              initialize=True, allow_lookup_exec=False):
-    """
-    (job name, StateStore, scope) of a job's runtime.state, for listing, retrying or abandoning batches;
-    `initialize`: create or upgrade the tables first (False to look at them as they are).
-    """
-    raw, base_dir = _load(job, list(overlays))
-    if not ((raw.get("runtime") or {}).get("state")):
-        raise JobInvalidError(["the job declares no runtime.state: its batches are not kept between runs"])
-    explicit = {**secrets_from_env(list(declared_inputs(raw, "secrets")), environ), **(secrets or {})}
-    secrets, bound = state_inputs(raw, config, explicit, allow_exec=allow_lookup_exec, base_dir=base_dir)
-    raw = lookup_optional(raw)
-    resolved, missing = resolve(raw, effective_config(raw, config), state_secrets(raw, secrets, environ))
-    missing = [text for text in missing if text.split(" ", 1)[0] not in bound]   # e.g. a scope from a fan_out item
-    if missing:
-        raise JobInvalidError(missing)
-    rules = duckdb_rules(resolved, allowed_connectors)
-    state = resolved["runtime"]["state"]
-    session = Session(writable=[state["connection"]] if state.get("connection") else (), base_dir=base_dir)
-    try:
-        if state.get("connection"):
-            connection = resolved["connections"][state["connection"]]
-            rules.adapters[connection["provider"]].configure(session, state["connection"], connection)
-        store = open_job_state(resolved, session, rules.adapters, base_dir)
-        if initialize:
-            store.prepare(migrate=applies_migrations(resolved))
-        yield resolved["name"], store, state.get("scope") or ""
+                         locations, runner.skipped, lease_held=runner.lease_held, rejected=rejected,
+                         apply_outputs=set(applier.calls))
     finally:
         session.close()

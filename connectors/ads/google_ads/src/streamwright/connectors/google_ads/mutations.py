@@ -22,8 +22,18 @@ such as ClickConversion).
 
 A row's columns are the element's field paths: `name`, `network_settings.target_google_search`, or with the resource
 prefix GAQL uses (`campaign.name`). For an operation, `op` is create (the default), update (its update_mask is the row's
-field columns but `resource_name`; a None value clears the field) or remove (only `resource_name` is read). Partial
-failures are per-row results; `validate_only: true` checks every row and changes nothing.
+field columns but `resource_name`; a None value clears the field) or remove (only `resource_name` is read), among the
+actions the operation has (some are update only, e.g. CampaignConversionGoalOperation). `validate_only: true` checks
+every row and changes nothing.
+
+Partial failure (`partial_failure`, on by default, where the request has it): Google applies the valid rows and
+returns a google.rpc.Status packing one GoogleAdsFailure, each GoogleAdsError locating its operation at
+`field_path_elements[0].index`; a failed operation's result is an empty message. A row fails with every error Google
+located on it (the first's code); a row whose result is empty while Google reports a partial failure fails too, with
+the errors it could not locate (none located: the status's message), never applied with an empty result. A method
+without partial failure (e.g. mutate_campaign_conversion_goals), or `partial_failure: false`, applies all its rows or
+none: a rejection fails the rows Google located its errors on with them, and the call's other rows as not applied;
+rows that failed before the call (INVALID_ROW) keep their own error.
 """
 
 import re
@@ -31,8 +41,10 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final
 
 from google.protobuf import json_format
+from google.rpc import code_pb2
 
 from streamwright.connectors.google_ads import client
+from streamwright.connectors.google_ads.spec import CONNECTOR
 from streamwright.core.sdk import ConnectorError
 from streamwright.core.sdk.apply import ACTION_COLUMN, RowResult
 
@@ -93,11 +105,14 @@ def _element(connection: client.GoogleAdsConnection, type_name: str, row: Mappin
     element = connection.client.get_type(type_name, **({"version": connection.version} if connection.version
                                                        else {}))
     fields = element._pb.DESCRIPTOR.fields_by_name
-    if "create" not in fields:                                # an upload record: the row is the record
+    actions = [action for action in OPERATION_ACTIONS if action in fields]
+    if not ({"create", "update"} & set(actions)):             # an upload record: the row is the record
         json_format.ParseDict(_nested(row, "")[0], element._pb)
         return element
-    action = row.get(ACTION_COLUMN, "create")
-    resource = fields["create"].message_type.name
+    action = row.get(ACTION_COLUMN) or actions[0]
+    if action not in actions:
+        raise ValueError("%s has no %s: its actions are %s" % (type_name, action, ", ".join(actions)))
+    resource = fields["create" if "create" in fields else "update"].message_type.name
     message, paths = _nested(row, _snake(resource) + ".")
     if action == "remove":
         if not message.get(_IDENTIFIER):
@@ -112,29 +127,60 @@ def _element(connection: client.GoogleAdsConnection, type_name: str, row: Mappin
     return element
 
 
-def _failures(connection: client.GoogleAdsConnection, response: Any) -> dict[int, tuple[str, str]]:
-    """{element index: (error code, message)} of a partial failure."""
+Problem = tuple[str, str]                                   # (error code, message)
+
+
+def _failures(connection: client.GoogleAdsConnection,
+              response: Any) -> tuple[dict[int, list[Problem]], list[Problem]] | None:
+    """
+    None when the response reports no partial failure; else ({element index: its problems}, the problems Google did not
+    locate on an operation - the status itself when its details hold no GoogleAdsFailure).
+    """
     status = getattr(response, "partial_failure_error", None)
-    if status is None or not getattr(status, "details", None):
-        return {}
+    if status is None or not (status.code or status.details):
+        return None
     failure_type = type(connection.client.get_type("GoogleAdsFailure", **(
         {"version": connection.version} if connection.version else {})))
-    found = {}
+    located: dict[int, list[Problem]] = {}
+    loose: list[Problem] = []
     for detail in status.details:
+        if detail.type_url and not detail.type_url.endswith(".GoogleAdsFailure"):
+            continue                                        # another standard detail (e.g. RequestInfo)
         for error in failure_type.deserialize(detail.value).errors:
-            elements = error.location.field_path_elements
-            if elements and elements[0]._pb.HasField("index"):
-                found.setdefault(int(elements[0].index), (client.error_code(error), _with_field(error.message,
-                                                                                                elements[1:])))
-    return found
+            index = client.operation_index(error)
+            if index is not None:
+                located.setdefault(index, []).append((client.error_code(error), client.located_message(error)))
+            else:
+                loose.append((client.error_code(error), error.message))
+    if not located and not loose:
+        loose.append((code_pb2.Code.Name(status.code) if status.code in code_pb2.Code.values() else "PARTIAL_FAILURE",
+                      status.message or "partial failure"))
+    return located, loose
 
 
-def _with_field(message: str, elements: Sequence[Any]) -> str:
-    """Google's message and the field it is about, within the row's element (`create.manual_cpc`, `gclid`)."""
-    raw = [getattr(element, "_pb", element) for element in elements]       # a slice gives the raw messages
-    path = ".".join(element.field_name + ("[%d]" % element.index if element.HasField("index") else "")
-                    for element in raw)
-    return "%s (field: %s)" % (message, path) if path else message
+def _failed(problems: Sequence[Problem], *, unlocated: bool = False) -> RowResult:
+    """A row's failure: the first problem's code, every problem's message."""
+    prefix = "Google rejected it without locating the operation: " if unlocated else ""
+    return RowResult.failed(problems[0][0], prefix + "; ".join(message for _, message in problems))
+
+
+def _empty(item: Any) -> bool:
+    return item is None or getattr(item, "_pb", item).ByteSize() == 0
+
+
+def _rejected(exc: client.RejectedCallError, positions: Sequence[int], results: list[RowResult | None]) -> None:
+    """
+    A call Google rejected whole (all or nothing): the rows of the operations its errors are located on fail with
+    them; the call's other rows fail as not applied, naming those operations.
+    """
+    named = ", ".join("operations[%d]" % index for index in sorted(exc.located)[:5]) + (
+        ", ..." if len(exc.located) > 5 else "")
+    for index, position in enumerate(positions):
+        if index in exc.located:
+            results[position] = _failed(exc.located[index])
+        else:
+            results[position] = RowResult.failed(exc.code, "not applied: Google rejects the whole call for the "
+                                                 "errors of %s: %s" % (named, exc))
 
 
 def _result(item: Any) -> dict[str, Any]:
@@ -162,20 +208,34 @@ def apply_rows(connection: client.GoogleAdsConnection, service: str, method: str
     if elements:
         validate_only = bool(arguments.get("validate_only", False))
         payload = dict(vendor or {}, customer_id=client.customer_id(arguments["customer_id"], "customer_id"),
-                       partial_failure=bool(arguments.get("partial_failure", True)), validate_only=validate_only)
+                       validate_only=validate_only)
+        if "partial_failure" in request._pb.DESCRIPTOR.fields_by_name:  # some methods apply all their rows or none
+            payload["partial_failure"] = bool(arguments.get("partial_failure", True))
         payload[field] = elements
         bound = getattr(connection.service(service), method, None)
         if not callable(bound):
             raise ConnectorError("google_ads: %s has no %s method in %s" % (service, method, client.sdk_version()),
                                  retryable=False)
-        response = call(lambda: bound(request=payload))
+        try:
+            response = call(lambda: bound(request=payload))
+        except client.RejectedCallError as exc:
+            if exc.retryable or set(exc.codes) & set(CONNECTOR.retry_codes):
+                raise                                          # transient: the engine retries the chunk or holds it
+            _rejected(exc, positions, results)
+            return [item for item in results if item is not None]
         failures = _failures(connection, response)
+        located, loose = failures if failures is not None else ({}, [])
         returned = list(getattr(response, "results", None) or ())
         for index, position in enumerate(positions):
-            if index in failures:
-                results[position] = RowResult.failed(*failures[index])
+            item = returned[index] if index < len(returned) else None
+            if index in located:
+                results[position] = _failed(located[index])
+            elif failures is not None and (loose if validate_only else _empty(item)):
+                # a failed operation's result is empty (Google): never applied with nothing to show
+                results[position] = _failed(loose or [("PARTIAL_FAILURE", "Google returned no result for it")],
+                                            unlocated=True)
             elif validate_only:
                 results[position] = RowResult.applied({"validate_only": True})
             else:
-                results[position] = RowResult.applied(_result(returned[index]) if index < len(returned) else None)
+                results[position] = RowResult.applied(_result(item) if item is not None else None)
     return [item for item in results if item is not None]
