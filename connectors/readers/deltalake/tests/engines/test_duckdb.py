@@ -62,7 +62,7 @@ def test_a_step_reads_a_table_inside_the_roots_only(tmp_path, lake):
            "steps": [{"name": "cities", "connection": "lake", "read": "delta", "path": "cities"}],
            "outputs": [{"name": "copy", "connection": "lake", "step": "cities", "path": "copy", "mode": "append"}]}
     assert run_job(job).exit_code == 0
-    assert deltalake.DeltaTable(os.path.join(inside, "copy")).to_pyarrow_table().num_rows == 3
+    assert deltalake.DeltaTable(os.path.join(inside, "copy")).to_pyarrow_table(engine="datafusion").num_rows == 3
     job["steps"][0]["path"] = os.path.join(outside, "cities")
     failed = run_job(job)
     assert failed.exit_code == 1 and "outside the roots" in failed.error
@@ -145,21 +145,21 @@ def test_an_append_whose_commit_already_happened_is_not_written_again(tmp_path, 
         raise ConnectionError("state store unreachable")
     monkeypatch.setattr(SqlStateStore, "record_receipt", lost)
     failed = run_job(job)
-    assert failed.exit_code == 1 and _table(tmp_path).to_pyarrow_table().num_rows == 2
+    assert failed.exit_code == 1 and _table(tmp_path).to_pyarrow_table(engine="datafusion").num_rows == 2
     monkeypatch.setattr(SqlStateStore, "record_receipt", real)
     store = open_sqlite(str(tmp_path / "state.db"))
     lease = store.acquire_lease("lake_job", "operator", 60)
     store.retry_batch(lease, failed.batches[0])
     store.release_lease(lease)
     resumed = run_job(job, resume_only=True)
-    assert resumed.exit_code == 0 and _table(tmp_path).to_pyarrow_table().num_rows == 2
+    assert resumed.exit_code == 0 and _table(tmp_path).to_pyarrow_table(engine="datafusion").num_rows == 2
     assert store.get_receipts("lake_job", failed.batches[0])["orders"]["version"] == 0
-    assert run_job(job).exit_code == 0 and _table(tmp_path).to_pyarrow_table().num_rows == 4
+    assert run_job(job).exit_code == 0 and _table(tmp_path).to_pyarrow_table(engine="datafusion").num_rows == 4
 
 
 def test_a_retried_append_is_written_with_its_own_transaction_version(tmp_path, monkeypatch):
     job = _job(tmp_path, {"mode": "append"})
-    assert run_job(job).exit_code == 0 and _table(tmp_path).to_pyarrow_table().num_rows == 2
+    assert run_job(job).exit_code == 0 and _table(tmp_path).to_pyarrow_table(engine="datafusion").num_rows == 2
     adapter = DeltaLakeDuckDBAdapter
     real = adapter.write
 
@@ -167,7 +167,7 @@ def test_a_retried_append_is_written_with_its_own_transaction_version(tmp_path, 
         raise ConnectionError("storage unreachable")
     monkeypatch.setattr(adapter, "write", down)
     failed = run_job(job)
-    assert failed.exit_code == 1 and _table(tmp_path).to_pyarrow_table().num_rows == 2
+    assert failed.exit_code == 1 and _table(tmp_path).to_pyarrow_table(engine="datafusion").num_rows == 2
     monkeypatch.setattr(adapter, "write", real)
     store = open_sqlite(str(tmp_path / "state.db"))
     lease = store.acquire_lease("lake_job", "operator", 60)
@@ -175,7 +175,7 @@ def test_a_retried_append_is_written_with_its_own_transaction_version(tmp_path, 
     store.release_lease(lease)
     resumed = run_job(job, resume_only=True)
     assert resumed.exit_code == 0 and resumed.skipped == set()        # not mistaken for the first batch's commit
-    assert _table(tmp_path).to_pyarrow_table().num_rows == 4
+    assert _table(tmp_path).to_pyarrow_table(engine="datafusion").num_rows == 4
     assert store.get_batch("lake_job", failed.batches[0])["batch_sequence"] == 2
 
 
@@ -185,7 +185,7 @@ def test_scopes_commit_with_their_own_app_ids(tmp_path):
     job["runtime"]["state"]["scope"] = "client:{{ config.client }}"
     for client in ("a", "b"):                     # both scopes' first batch: sequence 1, distinct app ids
         assert run_job(job, config={"client": client}).exit_code == 0
-    assert _table(tmp_path).to_pyarrow_table().num_rows == 4
+    assert _table(tmp_path).to_pyarrow_table(engine="datafusion").num_rows == 4
 
 
 def test_a_table_created_by_a_concurrent_writer_is_appended_to(tmp_path, monkeypatch):
@@ -199,7 +199,7 @@ def test_a_table_created_by_a_concurrent_writer_is_appended_to(tmp_path, monkeyp
     monkeypatch.setattr(duckdb_engine, "_open_table", raced)
     result = run_job(job)
     assert result.exit_code == 0, result.error
-    assert len(calls) == 2 and _table(tmp_path).to_pyarrow_table().num_rows == 4
+    assert len(calls) == 2 and _table(tmp_path).to_pyarrow_table(engine="datafusion").num_rows == 4
 
 
 def test_a_table_created_by_a_writer_of_the_same_batch_is_not_appended_to_again(tmp_path, monkeypatch):
@@ -210,7 +210,7 @@ def test_a_table_created_by_a_writer_of_the_same_batch_is_not_appended_to_again(
         raise ConnectionError("state store unreachable")
     monkeypatch.setattr(SqlStateStore, "record_receipt", lost)
     failed = run_job(job)
-    assert failed.exit_code == 1 and _table(tmp_path).to_pyarrow_table().num_rows == 2
+    assert failed.exit_code == 1 and _table(tmp_path).to_pyarrow_table(engine="datafusion").num_rows == 2
     monkeypatch.setattr(SqlStateStore, "record_receipt", real_receipt)
     real_open, calls = duckdb_engine._open_table, []
 
@@ -224,7 +224,7 @@ def test_a_table_created_by_a_writer_of_the_same_batch_is_not_appended_to_again(
     store.release_lease(lease)
     resumed = run_job(job, resume_only=True)
     assert resumed.exit_code == 0 and "orders" in resumed.skipped
-    assert _table(tmp_path).to_pyarrow_table().num_rows == 2
+    assert _table(tmp_path).to_pyarrow_table(engine="datafusion").num_rows == 2
 
 
 def _merge_job(tmp_path, v, *, durable=False):
@@ -246,7 +246,7 @@ def test_two_in_memory_runs_with_changed_data_apply_the_second_merge(tmp_path):
     assert run_job(_merge_job(tmp_path, "a")).exit_code == 0
     result = run_job(_merge_job(tmp_path, "b"))
     assert result.exit_code == 0, result.error
-    assert [r["v"] for r in _table(tmp_path).to_pyarrow_table().to_pylist()] == ["b"]
+    assert [r["v"] for r in _table(tmp_path).to_pyarrow_table(engine="datafusion").to_pylist()] == ["b"]
 
 
 def test_a_durable_replay_of_a_committed_write_is_skipped_and_reported(tmp_path, monkeypatch):
@@ -265,7 +265,7 @@ def test_a_durable_replay_of_a_committed_write_is_skipped_and_reported(tmp_path,
     store.release_lease(lease)
     resumed = run_job(job, resume_only=True)
     assert resumed.exit_code == 0 and "orders" in resumed.skipped
-    assert _table(tmp_path).to_pyarrow_table().num_rows == 1
+    assert _table(tmp_path).to_pyarrow_table(engine="datafusion").num_rows == 1
     receipt = open_sqlite(str(tmp_path / "state.db")).get_receipts("lake_job", failed.batches[0])["orders"]
     assert receipt["already_committed"] is True
 
@@ -279,7 +279,7 @@ def test_merge_scopes_the_target_with_rendered_pinned_values(tmp_path):
                  "SELECT 2 AS id, DATE '2026-11-02' AS day, 'b' AS v UNION ALL SELECT 3, DATE '2026-11-03', 'it''s'")
     result = run_job(merge)
     assert result.exit_code == 0, result.error
-    rows = sorted(_table(tmp_path).to_pyarrow_table().to_pylist(), key=lambda r: r["id"])
+    rows = sorted(_table(tmp_path).to_pyarrow_table(engine="datafusion").to_pylist(), key=lambda r: r["id"])
     assert [r["v"] for r in rows] == ["a", "b", "it's"]
     receipt = open_sqlite(str(tmp_path / "state.db")).get_receipts("lake_job", result.batches[0])["orders"]
     assert receipt["predicate"] == "target.v IN ('b', 'it''s')"
@@ -290,7 +290,7 @@ def test_an_overwrite_replaces_what_replace_where_selects(tmp_path):
     result = run_job(_job(tmp_path, {"mode": "overwrite", "replace_where": "day = DATE '2026-11-02'"},
                           "SELECT 5 AS id, DATE '2026-11-02' AS day, 'z' AS v"))
     assert result.exit_code == 0, result.error
-    assert sorted(row["id"] for row in _table(tmp_path).to_pyarrow_table().to_pylist()) == [1, 5]
+    assert sorted(row["id"] for row in _table(tmp_path).to_pyarrow_table(engine="datafusion").to_pylist()) == [1, 5]
 
 
 def test_schema_changes_need_add_columns(tmp_path):
